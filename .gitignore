@@ -1,0 +1,5 @@
+.claude/
+*.swp
+*.bak
+.DS_Store
+Thumbs.db
