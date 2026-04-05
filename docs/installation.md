@@ -10,7 +10,7 @@
 ### macOS / Linux / WSL
 
 ```bash
-git clone <repo-url> claude-agents
+git clone https://github.com/zevtos/claude-agents.git claude-agents
 cd claude-agents
 ./install.sh
 ```
@@ -18,7 +18,7 @@ cd claude-agents
 ### Windows (PowerShell)
 
 ```powershell
-git clone <repo-url> claude-agents
+git clone https://github.com/zevtos/claude-agents.git claude-agents
 cd claude-agents
 .\install.ps1
 ```

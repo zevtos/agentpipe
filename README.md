@@ -13,7 +13,7 @@ A set of installable agents and commands that add structured development workflo
 ## Quick Start
 
 ```bash
-git clone <repo-url> claude-agents
+git clone https://github.com/zevtos/claude-agents.git claude-agents
 cd claude-agents
 ./install.sh        # macOS/Linux/WSL
 # or
@@ -91,6 +91,14 @@ Each gate must pass before proceeding. Agents have bounded tool access (reviewer
 - **Project-level overrides**: add `.claude/agents/` or `.claude/commands/` in your project
 - **Edit globals**: modify `~/.claude/agents/` and `~/.claude/commands/` directly
 - **Fork**: fork this repo, customize, install from your fork
+
+## Contributing
+
+Contributions welcome — new agents, commands, and improvements to existing ones. Open an issue or submit a PR.
+
+## License
+
+[MIT](LICENSE)
 
 ## Research Documents
 
