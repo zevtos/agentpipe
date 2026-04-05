@@ -9,17 +9,23 @@
     .\install.ps1 -Dry         # show what would be copied
     .\install.ps1 -Diff        # show differences
     .\install.ps1 -Pull        # pull installed versions back to repo
+    .\install.ps1 -Uninstall   # remove installed agents and commands
+    .\install.ps1 -Version     # show version
 #>
 param(
     [switch]$Dry,
     [switch]$Diff,
     [switch]$Pull,
+    [switch]$Uninstall,
+    [switch]$ShowVersion,
     [switch]$Help
 )
 
 $ErrorActionPreference = "Stop"
 
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ScriptDir = $PSScriptRoot
+$VersionFile = Join-Path $ScriptDir "VERSION"
+$Script:Version = if (Test-Path $VersionFile) { (Get-Content $VersionFile -Raw).Trim() } else { "unknown" }
 $AgentsSrc = Join-Path $ScriptDir "agents"
 $CommandsSrc = Join-Path $ScriptDir "commands"
 
@@ -33,7 +39,7 @@ function Write-Info($msg) { Write-Host "  $msg" -ForegroundColor Cyan }
 function Write-Err($msg) { Write-Host "  $msg" -ForegroundColor Red }
 
 function Do-Install {
-    Write-Info "Installing to: $ClaudeHome"
+    Write-Info "Installing claude-agents v$($Script:Version) to: $ClaudeHome"
 
     New-Item -ItemType Directory -Path $AgentsDst -Force | Out-Null
     New-Item -ItemType Directory -Path $CommandsDst -Force | Out-Null
@@ -54,6 +60,43 @@ function Do-Install {
 
     Write-Host ""
     Write-Info "Installed $count files to $ClaudeHome"
+    Write-Ok "claude-agents v$($Script:Version)"
+}
+
+function Do-Uninstall {
+    Write-Info "Uninstalling claude-agents from: $ClaudeHome"
+    $count = 0
+
+    Get-ChildItem "$AgentsSrc\*.md" -ErrorAction SilentlyContinue | ForEach-Object {
+        $dst = Join-Path $AgentsDst $_.Name
+        if (Test-Path $dst) {
+            Remove-Item $dst
+            Write-Ok "removed agents/$($_.Name)"
+            $count++
+        }
+    }
+
+    Get-ChildItem "$CommandsSrc\*.md" -ErrorAction SilentlyContinue | ForEach-Object {
+        $dst = Join-Path $CommandsDst $_.Name
+        if (Test-Path $dst) {
+            Remove-Item $dst
+            Write-Ok "removed commands/$($_.Name)"
+            $count++
+        }
+    }
+
+    # Remove directories only if empty
+    if ((Test-Path $AgentsDst) -and @(Get-ChildItem $AgentsDst).Count -eq 0) {
+        Remove-Item $AgentsDst
+        Write-Ok "removed agents/"
+    }
+    if ((Test-Path $CommandsDst) -and @(Get-ChildItem $CommandsDst).Count -eq 0) {
+        Remove-Item $CommandsDst
+        Write-Ok "removed commands/"
+    }
+
+    Write-Host ""
+    Write-Info "Removed $count files from $ClaudeHome"
 }
 
 function Do-Dry {
@@ -151,7 +194,13 @@ if ($Help) {
     exit 0
 }
 
+if ($ShowVersion) {
+    Write-Host "claude-agents v$($Script:Version)"
+    exit 0
+}
+
 if ($Dry) { Do-Dry }
 elseif ($Diff) { Do-Diff }
 elseif ($Pull) { Do-Pull }
+elseif ($Uninstall) { Do-Uninstall }
 else { Do-Install }

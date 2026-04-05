@@ -5,12 +5,15 @@ set -euo pipefail
 # Works on: macOS, Linux, WSL, Git Bash (Windows)
 #
 # Usage:
-#   ./install.sh          # install agents + commands
-#   ./install.sh --dry    # show what would be copied
-#   ./install.sh --diff   # show differences between repo and installed
-#   ./install.sh --pull   # copy installed versions BACK to repo (update repo from live)
+#   ./install.sh              # install agents + commands
+#   ./install.sh --dry        # show what would be copied
+#   ./install.sh --diff       # show differences between repo and installed
+#   ./install.sh --pull       # copy installed versions BACK to repo (update repo from live)
+#   ./install.sh --uninstall  # remove installed agents and commands
+#   ./install.sh --version    # show version
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VERSION=$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "unknown")
 AGENTS_SRC="$SCRIPT_DIR/agents"
 COMMANDS_SRC="$SCRIPT_DIR/commands"
 
@@ -68,7 +71,7 @@ info() { echo -e "${CYAN}→${NC} $*"; }
 # --- Actions ---
 
 do_install() {
-    info "Installing to: $CLAUDE_HOME"
+    info "Installing claude-agents v$VERSION to: $CLAUDE_HOME"
     mkdir -p "$AGENTS_DST" "$COMMANDS_DST"
 
     local count=0
@@ -93,6 +96,53 @@ do_install() {
 
     echo ""
     info "Installed $count files to $CLAUDE_HOME"
+    log "claude-agents v$VERSION"
+}
+
+do_uninstall() {
+    info "Uninstalling claude-agents from: $CLAUDE_HOME"
+    local count=0
+
+    for f in "$AGENTS_SRC"/*.md; do
+        [[ -f "$f" ]] || continue
+        local name
+        name=$(basename "$f")
+        if [[ -f "$AGENTS_DST/$name" ]]; then
+            rm "$AGENTS_DST/$name"
+            log "removed agents/$name"
+            count=$((count + 1))
+        fi
+    done
+
+    for f in "$COMMANDS_SRC"/*.md; do
+        [[ -f "$f" ]] || continue
+        local name
+        name=$(basename "$f")
+        if [[ -f "$COMMANDS_DST/$name" ]]; then
+            rm "$COMMANDS_DST/$name"
+            log "removed commands/$name"
+            count=$((count + 1))
+        fi
+    done
+
+    # Remove directories only if empty
+    if [[ -d "$AGENTS_DST" ]]; then
+        if rmdir "$AGENTS_DST" 2>/dev/null; then
+            log "removed agents/"
+        else
+            warn "agents/ not empty, left in place"
+        fi
+    fi
+    if [[ -d "$COMMANDS_DST" ]]; then
+        if rmdir "$COMMANDS_DST" 2>/dev/null; then
+            log "removed commands/"
+        else
+            warn "commands/ not empty, left in place"
+        fi
+    fi
+
+    echo ""
+    info "Removed $count files from $CLAUDE_HOME"
 }
 
 do_dry() {
@@ -191,16 +241,25 @@ do_pull() {
 # --- Main ---
 
 case "${1:-}" in
-    --dry)  do_dry ;;
-    --diff) do_diff ;;
-    --pull) do_pull ;;
+    --dry)       do_dry ;;
+    --diff)      do_diff ;;
+    --pull)      do_pull ;;
+    --uninstall) do_uninstall ;;
+    --version|-v)
+        echo "claude-agents v$VERSION"
+        exit 0
+        ;;
     --help|-h)
-        echo "Usage: $0 [--dry|--diff|--pull]"
+        echo "claude-agents v$VERSION"
         echo ""
-        echo "  (no args)  Install agents + commands to ~/.claude/"
-        echo "  --dry      Show what would be copied"
-        echo "  --diff     Show differences between repo and installed"
-        echo "  --pull     Copy installed versions back to repo"
+        echo "Usage: $0 [--dry|--diff|--pull|--uninstall|--version]"
+        echo ""
+        echo "  (no args)    Install agents + commands to ~/.claude/"
+        echo "  --dry        Show what would be copied"
+        echo "  --diff       Show differences between repo and installed"
+        echo "  --pull       Copy installed versions back to repo"
+        echo "  --uninstall  Remove installed agents and commands"
+        echo "  --version    Show version"
         exit 0
         ;;
     "")     do_install ;;
