@@ -1,5 +1,5 @@
 ---
-description: "Iterative issue-by-issue development: plan → implement → self-review loop → fix → PR to develop. Works through all open issues one by one until each has a clean PR."
+description: "Iterative issue-by-issue development: plan → implement → self-review loop → fix → PR to default branch. Works through all open issues one by one until each has a clean PR."
 argument-hint: [issue numbers or labels, e.g. "12 15 20" or "label:ready" or empty for all open]
 ---
 
@@ -24,6 +24,15 @@ gh issue list --state open --assignee @me --json number,title,body,labels
 If $ARGUMENTS specifies issue numbers (e.g. "12 15 20"), filter to those.
 If $ARGUMENTS is a label (e.g. "label:bugs"), filter by label.
 If $ARGUMENTS is empty, list all open and ask: "Which issues should I work through?"
+
+Detect the repository's default branch:
+
+```
+DEFAULT_BRANCH=$(git remote show origin 2>/dev/null | sed -n '/HEAD branch/s/.*: //p')
+DEFAULT_BRANCH=${DEFAULT_BRANCH:-main}
+```
+
+Use `$DEFAULT_BRANCH` as the base branch throughout this entire pipeline.
 
 Present list and wait for confirmation. Then process each issue with the loop below.
 
@@ -86,7 +95,7 @@ Produce: expand-contract migration SQL, lock_timeout settings, rollback plan.
 ### Phase 3: Branch
 
 ```
-git checkout develop && git pull origin develop
+git checkout $DEFAULT_BRANCH && git pull origin $DEFAULT_BRANCH
 git checkout -b issue/{NUMBER}-{kebab-slug-max-5-words}
 ```
 
@@ -117,7 +126,7 @@ Prompt to `reviewer` agent:
 Code review for issue #{NUMBER}: {TITLE}
 
 Diff to review:
-[run: git diff develop...HEAD and paste output]
+[run: git diff $DEFAULT_BRANCH...HEAD and paste output]
 
 Architect's implementation plan was:
 [paste architect's ordered steps]
@@ -132,7 +141,7 @@ Prompt to `security` agent:
 Security review for issue #{NUMBER}: {TITLE}
 
 Diff to review:
-[run: git diff develop...HEAD and paste output]
+[run: git diff $DEFAULT_BRANCH...HEAD and paste output]
 
 Check: injection risks, auth/authz, input validation, data exposure, error leakage, OWASP Top 10:2025, OWASP API Top 10:2023.
 ```
@@ -161,7 +170,7 @@ Prompt to `tester` agent:
 Issue #{NUMBER} is implemented and passed review.
 
 Diff of changes:
-[run: git diff develop...HEAD and paste output]
+[run: git diff $DEFAULT_BRANCH...HEAD and paste output]
 
 Architect's risk assessment was:
 [paste risk section from architect output]
@@ -183,11 +192,11 @@ If tests fail — fix the failure, do not proceed until green.
 
 ---
 
-### Phase 7: PR to develop
+### Phase 7: PR to default branch
 
 ```
 gh pr create \
-  --base develop \
+  --base $DEFAULT_BRANCH \
   --title "fix(scope): {ISSUE_TITLE} (closes #{NUMBER})" \
   --body "$(cat <<'EOF'
 ## Summary

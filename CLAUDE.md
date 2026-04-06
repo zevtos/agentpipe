@@ -70,7 +70,7 @@ Commands that run agents in parallel: review (reviewer + security), feature step
 ## Conventions
 
 - Commit messages: conventional commits (`feat:`, `fix:`, `docs:`, `chore:`)
-- Branch strategy for this repo: main only. (Commands like /sprint may target develop in user projects.)
+- Branch strategy for this repo: main only. (Commands like /sprint auto-detect the repository's default branch.)
 - All agents and commands are .md files. No code generation, no templates.
 - Installer must stay POSIX-safe: `set -euo pipefail`, no bashisms beyond what install.sh already uses.
 - Arithmetic: use `$((count + 1))` not `((count++))`. The latter exits non-zero on zero under set -e.
