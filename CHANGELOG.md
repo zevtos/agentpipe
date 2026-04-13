@@ -7,8 +7,18 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-13
+
+### Added
+- **refactorer agent** — 9th specialist agent for code smell detection, duplication elimination, dead code removal, and test suite refactoring (language-agnostic)
+- 4 new research docs: code smells catalog, test patterns, AI-assisted refactoring, architecture debt
+- `/refactor` command now runs refactorer as mandatory first step before architect
+- `CLAUDE.md` with project conventions, agent/command format specs, and contributor guide — the repo now dogfoods its own pattern
+- MIT LICENSE file
+
 ### Fixed
-- Sprint command no longer hardcodes `develop` as the base branch; auto-detects the repository's default branch with fallback to `main`
+- `/sprint` no longer hardcodes `develop` as the base branch; auto-detects the repository's default branch with fallback to `main`
+- Repo URLs in README replaced with actual GitHub URL
 
 ## [0.1.0] - 2026-04-04
 
