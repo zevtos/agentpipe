@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# claude-agents — Install Script
+# agentpipe — Install Script
 # Works on: macOS, Linux, WSL, Git Bash (Windows)
 #
 # Usage:
@@ -90,12 +90,12 @@ while [[ $# -gt 0 ]]; do
         --pull)      ACTION="pull"; shift ;;
         --uninstall) ACTION="uninstall"; shift ;;
         --version|-v)
-            echo "claude-agents v$VERSION"
+            echo "agentpipe v$VERSION"
             exit 0
             ;;
         --help|-h)
             cat <<EOF
-claude-agents v$VERSION
+agentpipe v$VERSION
 
 Usage: bash install.sh [--target <name>] [--dry|--diff|--pull|--uninstall]
        bash install.sh --version
@@ -157,7 +157,7 @@ codex_skip_notice() {
 # --- Actions ---
 
 do_install() {
-    info "Installing claude-agents v$VERSION (target: $TARGET) to: $BASE"
+    info "Installing agentpipe v$VERSION (target: $TARGET) to: $BASE"
     local count=0
 
     if [[ -n "$AGENTS_DST" ]]; then
@@ -200,11 +200,11 @@ do_install() {
     echo ""
     info "Installed $count items to $BASE"
     codex_skip_notice
-    log "claude-agents v$VERSION"
+    log "agentpipe v$VERSION"
 }
 
 do_uninstall() {
-    info "Uninstalling claude-agents from: $BASE (target: $TARGET)"
+    info "Uninstalling agentpipe from: $BASE (target: $TARGET)"
     local count=0
 
     if [[ -n "$AGENTS_DST" ]]; then

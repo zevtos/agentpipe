@@ -51,4 +51,4 @@ if ($Name -and $count -eq 0) {
 }
 
 Write-Host ""
-Write-Host "Built $count skill archive(s) in $Dist (claude-agents v$Version)" -ForegroundColor Cyan
+Write-Host "Built $count skill archive(s) in $Dist (agentpipe v$Version)" -ForegroundColor Cyan

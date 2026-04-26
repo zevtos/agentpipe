@@ -7,6 +7,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-04-26
+
+### Changed
+- **Repo renamed** `claude-agents` → `agentpipe`. New URL: https://github.com/zevtos/agentpipe. GitHub redirects the old URL automatically, so existing clones / links / `gh` commands keep working; for cleanliness run `git remote set-url origin git@github.com:zevtos/agentpipe.git`.
+- README repositioned: "gated pipeline orchestration for Claude Code and Codex CLI" instead of generic "config" — the orchestration angle (`/feature` runs `pm → architect → reviewer → security → tester → docs`) is what differentiates this project from the saturated "AI config sync" namespace.
+- Project identity strings in installers, build scripts, and `CLAUDE.md` updated from `claude-agents` to `agentpipe`. Past CHANGELOG entries kept verbatim for historical accuracy.
+
 ## [0.4.0] - 2026-04-26
 
 ### Added

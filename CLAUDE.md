@@ -1,6 +1,6 @@
-# claude-agents
+# agentpipe
 
-Comprehensive Claude Code + Codex configuration: agents, slash commands, and skills.
+Gated pipeline orchestration for Claude Code and Codex CLI: specialist agents, slash commands, and skills.
 9 agents, 15 commands, 1 skill (`gost-report`), 14 research docs. Multi-target installer:
 default puts everything in `~/.claude/`; `--target codex` puts skills in `~/.agents/skills/`
 (open-agent-skills standard) and skips agents/commands (Codex format differences).

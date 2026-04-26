@@ -60,4 +60,4 @@ if [[ -n "$target" && $count -eq 0 ]]; then
 fi
 
 echo ""
-echo -e "${CYAN}→${NC} Built $count skill archive(s) in $DIST/ (claude-agents v$VERSION)"
+echo -e "${CYAN}→${NC} Built $count skill archive(s) in $DIST/ (agentpipe v$VERSION)"

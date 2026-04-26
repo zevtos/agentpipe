@@ -1,6 +1,6 @@
-# Claude Agents
+# agentpipe
 
-A comprehensive Claude Code configuration: agents, slash commands, and skills installed globally to `~/.claude/`. Started as multi-agent orchestration; now a general-purpose toolkit for tailoring Claude Code to your workflow.
+Gated pipeline orchestration for **Claude Code** and **Codex CLI** — specialist agents, slash commands, and skills installed globally. Unlike "config sync" tools, agentpipe gives you ready-made multi-agent workflows: `/feature` runs `pm → architect → reviewer → security → tester → docs` as a gated pipeline, `/sprint` works through GitHub issues one at a time, `/audit` runs threat modeling. Multi-vendor: same skills work in both Claude and Codex.
 
 ## What This Is
 
@@ -14,8 +14,8 @@ Three kinds of installable extensions, plus reference material:
 ## Quick Start
 
 ```bash
-git clone https://github.com/zevtos/claude-agents.git claude-agents
-cd claude-agents
+git clone https://github.com/zevtos/agentpipe.git
+cd agentpipe
 
 # Claude Code (default target) — installs agents + commands + skills to ~/.claude/
 bash install.sh
@@ -80,7 +80,7 @@ Adding your university? Build a `UniversityProfile` and PR it back.
 ## Project Structure
 
 ```
-claude-agents/
+agentpipe/
   agents/                9 specialist agent definitions
   commands/              15 orchestration commands
   skills/                Domain-specific Claude skills (folders with SKILL.md + assets)

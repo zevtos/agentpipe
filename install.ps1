@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    claude-agents — Install Script (Windows PowerShell)
+    agentpipe — Install Script (Windows PowerShell)
 .DESCRIPTION
     Copies agents, commands, and skills from this repo to ~/.claude/ (Claude Code, default)
     or ~/.agents/skills/ (Codex CLI, with -Target codex; agents and commands are skipped
@@ -66,7 +66,7 @@ function Show-CodexSkipNotice {
 }
 
 function Do-Install {
-    Write-Info "Installing claude-agents v$($Script:Version) (target: $Target) to: $Base"
+    Write-Info "Installing agentpipe v$($Script:Version) (target: $Target) to: $Base"
     $count = 0
 
     if ($AgentsDst) {
@@ -101,11 +101,11 @@ function Do-Install {
     Write-Host ""
     Write-Info "Installed $count items to $Base"
     Show-CodexSkipNotice
-    Write-Ok "claude-agents v$($Script:Version)"
+    Write-Ok "agentpipe v$($Script:Version)"
 }
 
 function Do-Uninstall {
-    Write-Info "Uninstalling claude-agents from: $Base (target: $Target)"
+    Write-Info "Uninstalling agentpipe from: $Base (target: $Target)"
     $count = 0
 
     if ($AgentsDst) {
@@ -311,7 +311,7 @@ if ($Help) {
 }
 
 if ($ShowVersion) {
-    Write-Host "claude-agents v$($Script:Version)"
+    Write-Host "agentpipe v$($Script:Version)"
     exit 0
 }
 

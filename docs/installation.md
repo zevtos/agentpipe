@@ -10,16 +10,16 @@
 ### macOS / Linux / WSL
 
 ```bash
-git clone https://github.com/zevtos/claude-agents.git claude-agents
-cd claude-agents
+git clone https://github.com/zevtos/agentpipe.git
+cd agentpipe
 bash install.sh
 ```
 
 ### Windows (PowerShell)
 
 ```powershell
-git clone https://github.com/zevtos/claude-agents.git claude-agents
-cd claude-agents
+git clone https://github.com/zevtos/agentpipe.git
+cd agentpipe
 .\install.ps1
 ```
 
@@ -95,7 +95,7 @@ bash install.sh --diff                      # diff Claude install (default targe
 Pull the latest changes and re-run the installer:
 
 ```bash
-cd claude-agents
+cd agentpipe
 git pull
 bash install.sh
 ```
