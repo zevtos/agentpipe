@@ -16,6 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERSION=$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "unknown")
 AGENTS_SRC="$SCRIPT_DIR/agents"
 COMMANDS_SRC="$SCRIPT_DIR/commands"
+SKILLS_SRC="$SCRIPT_DIR/skills"
 
 # Detect target directory
 detect_claude_home() {
@@ -51,6 +52,7 @@ detect_claude_home() {
 CLAUDE_HOME="$(detect_claude_home)"
 AGENTS_DST="$CLAUDE_HOME/agents"
 COMMANDS_DST="$CLAUDE_HOME/commands"
+SKILLS_DST="$CLAUDE_HOME/skills"
 
 # Colors (if terminal supports)
 if [[ -t 1 ]]; then
@@ -72,7 +74,7 @@ info() { echo -e "${CYAN}→${NC} $*"; }
 
 do_install() {
     info "Installing claude-agents v$VERSION to: $CLAUDE_HOME"
-    mkdir -p "$AGENTS_DST" "$COMMANDS_DST"
+    mkdir -p "$AGENTS_DST" "$COMMANDS_DST" "$SKILLS_DST"
 
     local count=0
 
@@ -94,8 +96,20 @@ do_install() {
         count=$((count + 1))
     done
 
+    if [[ -d "$SKILLS_SRC" ]]; then
+        for d in "$SKILLS_SRC"/*/; do
+            [[ -d "$d" ]] || continue
+            local name
+            name=$(basename "$d")
+            rm -rf "$SKILLS_DST/$name"
+            cp -R "$d" "$SKILLS_DST/$name"
+            log "skills/$name/"
+            count=$((count + 1))
+        done
+    fi
+
     echo ""
-    info "Installed $count files to $CLAUDE_HOME"
+    info "Installed $count items to $CLAUDE_HOME"
     log "claude-agents v$VERSION"
 }
 
@@ -125,24 +139,33 @@ do_uninstall() {
         fi
     done
 
-    # Remove directories only if empty
-    if [[ -d "$AGENTS_DST" ]]; then
-        if rmdir "$AGENTS_DST" 2>/dev/null; then
-            log "removed agents/"
-        else
-            warn "agents/ not empty, left in place"
-        fi
-    fi
-    if [[ -d "$COMMANDS_DST" ]]; then
-        if rmdir "$COMMANDS_DST" 2>/dev/null; then
-            log "removed commands/"
-        else
-            warn "commands/ not empty, left in place"
-        fi
+    if [[ -d "$SKILLS_SRC" ]]; then
+        for d in "$SKILLS_SRC"/*/; do
+            [[ -d "$d" ]] || continue
+            local name
+            name=$(basename "$d")
+            if [[ -d "$SKILLS_DST/$name" ]]; then
+                rm -rf "$SKILLS_DST/$name"
+                log "removed skills/$name/"
+                count=$((count + 1))
+            fi
+        done
     fi
 
+    # Remove directories only if empty
+    for d in "$AGENTS_DST" "$COMMANDS_DST" "$SKILLS_DST"; do
+        [[ -d "$d" ]] || continue
+        local label
+        label=$(basename "$d")
+        if rmdir "$d" 2>/dev/null; then
+            log "removed $label/"
+        else
+            warn "$label/ not empty, left in place"
+        fi
+    done
+
     echo ""
-    info "Removed $count files from $CLAUDE_HOME"
+    info "Removed $count items from $CLAUDE_HOME"
 }
 
 do_dry() {
@@ -181,6 +204,25 @@ do_dry() {
             info "  + $name (NEW)"
         fi
     done
+
+    if [[ -d "$SKILLS_SRC" ]]; then
+        echo ""
+        echo "Skills:"
+        for d in "$SKILLS_SRC"/*/; do
+            [[ -d "$d" ]] || continue
+            local name
+            name=$(basename "$d")
+            if [[ -d "$SKILLS_DST/$name" ]]; then
+                if diff -rq "$d" "$SKILLS_DST/$name" >/dev/null 2>&1; then
+                    echo "  = $name/ (identical)"
+                else
+                    warn "  ~ $name/ (CHANGED)"
+                fi
+            else
+                info "  + $name/ (NEW)"
+            fi
+        done
+    fi
 }
 
 do_diff() {
@@ -206,6 +248,25 @@ do_diff() {
             fi
         done
     done
+
+    if [[ -d "$SKILLS_SRC" ]]; then
+        for d in "$SKILLS_SRC"/*/; do
+            [[ -d "$d" ]] || continue
+            local name
+            name=$(basename "$d")
+            if [[ -d "$SKILLS_DST/$name" ]]; then
+                if ! diff -rq "$d" "$SKILLS_DST/$name" >/dev/null 2>&1; then
+                    echo ""
+                    warn "skills/$name/ differs:"
+                    diff --color=auto -ru "$SKILLS_DST/$name" "$d" || true
+                    has_diff=1
+                fi
+            else
+                warn "skills/$name/ — not installed"
+                has_diff=1
+            fi
+        done
+    fi
 
     if [[ $has_diff -eq 0 ]]; then
         log "Everything in sync"
@@ -234,8 +295,22 @@ do_pull() {
         count=$((count + 1))
     done
 
+    if [[ -d "$SKILLS_SRC" ]]; then
+        for d in "$SKILLS_SRC"/*/; do
+            [[ -d "$d" ]] || continue
+            local name
+            name=$(basename "$d")
+            if [[ -d "$SKILLS_DST/$name" ]]; then
+                rm -rf "$SKILLS_SRC/$name"
+                cp -R "$SKILLS_DST/$name" "$SKILLS_SRC/$name"
+                log "skills/$name/ ← installed"
+                count=$((count + 1))
+            fi
+        done
+    fi
+
     echo ""
-    info "Pulled $count files into repo"
+    info "Pulled $count items into repo"
 }
 
 # --- Main ---

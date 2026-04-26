@@ -1,28 +1,33 @@
 # claude-agents
 
-Multi-agent orchestration for Claude Code. 9 agents, 15 commands, 14 research docs.
-Installed globally to ~/.claude/ — not a runtime application. No build, no tests, no dependencies.
+Comprehensive Claude Code configuration: agents, slash commands, and skills.
+9 agents, 15 commands, 1 skill (`gost-report`), 14 research docs. Installed globally to `~/.claude/`.
+The only build step is packaging skills into release zips — no runtime, no tests, no dependencies.
 
 ## Commands
 
 ```
-./install.sh                    # install agents + commands to ~/.claude/
-./install.sh --dry              # preview what would change
-./install.sh --diff             # show repo vs installed differences
-./install.sh --pull             # copy installed back to repo
+bash install.sh                 # install agents + commands + skills to ~/.claude/
+bash install.sh --dry           # preview what would change
+bash install.sh --diff          # show repo vs installed differences
+bash install.sh --pull          # copy installed back to repo
+bash scripts/build-skills.sh    # package every skills/<name>/ into dist/<name>.zip
 ```
 
 ## Structure
 
 ```
-agents/*.md         Agent definitions — YAML frontmatter + system prompt
-commands/*.md       Slash commands — YAML frontmatter + orchestration pipeline
-research/*.md       Reference docs, numbered 01-10. Not auto-imported by agents.
-docs/               User-facing documentation (commands.md, agents.md, installation.md)
-install.sh          Bash installer (macOS, Linux, WSL, Git Bash)
-install.ps1         PowerShell installer (Windows)
-VERSION             Semver string, read by installers
-CHANGELOG.md        Keep a Changelog format
+agents/*.md             Agent definitions — YAML frontmatter + system prompt
+commands/*.md           Slash commands — YAML frontmatter + orchestration pipeline
+skills/<name>/SKILL.md  Skills — folder with SKILL.md plus optional scripts/, references/
+research/*.md           Reference docs, numbered 01-14. Not auto-imported by agents.
+docs/                   User-facing documentation (commands.md, agents.md, installation.md)
+scripts/build-skills.*  Package skills/* into dist/*.zip for releases
+.github/workflows/      release.yml: on tag push, builds skill zips and attaches to GH release
+install.sh              Bash installer (macOS, Linux, WSL, Git Bash)
+install.ps1             PowerShell installer (Windows)
+VERSION                 Semver string, read by installers and release workflow
+CHANGELOG.md            Keep a Changelog format
 ```
 
 ## Agent Format (agents/*.md)
@@ -67,28 +72,53 @@ Body structure:
 Commands without argument-hint: next, onboard, deploy.
 Commands that run agents in parallel: review (reviewer + security), feature step 5.
 
+## Skill Format (skills/<name>/)
+
+Each skill is its own folder under `skills/`. Required: `SKILL.md` at the folder root with YAML frontmatter:
+
+```
+name:         lowercase-with-hyphens, must match the folder name
+description:  trigger sentence — what the skill does and when Claude should invoke it
+```
+
+Optional folders inside the skill:
+- `scripts/`    — supporting code (Python, Bash, etc.) the skill calls or references
+- `references/` — long-form reference material (checklists, specs) loaded on demand
+
+Body structure of `SKILL.md`:
+- `# <Skill name>` — H1 title
+- `## When to use` — concrete triggers, examples in user's language if domain-specific
+- `## How to use` — minimal example + API reference
+- `## Dependencies` — pip/system packages needed
+- `## Checklist` (optional) — final verification steps before delivering output
+
+Skills are installed as folders to `~/.claude/skills/<name>/` and discovered by Claude through their description. Don't add new top-level frontmatter fields — Claude Code ignores them silently.
+
 ## Conventions
 
 - Commit messages: conventional commits (`feat:`, `fix:`, `docs:`, `chore:`)
 - Branch strategy for this repo: main only. (Commands like /sprint auto-detect the repository's default branch.)
-- All agents and commands are .md files. No code generation, no templates.
+- Agents and commands are .md files. Skills are folders with SKILL.md plus optional scripts/references. No code generation, no templates.
 - Installer must stay POSIX-safe: `set -euo pipefail`, no bashisms beyond what install.sh already uses.
 - Arithmetic: use `$((count + 1))` not `((count++))`. The latter exits non-zero on zero under set -e.
-- VERSION file: single line, semver, no v prefix. Installers read it at runtime.
+- VERSION file: single line, semver, no v prefix. Installers and the release workflow read it at runtime.
 - CHANGELOG.md: Keep a Changelog format. Update on every release.
 - Agent descriptions are triggers, not summaries. Write for the model to understand WHEN to fire.
+- Skill descriptions follow the same trigger principle and may include foreign-language keywords if the skill is domain-specific (see skills/itmo-report).
 - No @-importing files in agent bodies — bloats every session.
 - Model assignment: opus for high-reasoning roles (architect, security). sonnet for everything else.
 - Research docs are reference material. Agents do not auto-import them.
+- Releases: bump VERSION → update CHANGELOG → commit → `git tag vX.Y.Z` → push tag. The release workflow builds skill zips and attaches them to the GitHub release.
 
 ## Do Not
 
 - Add test files or test frameworks. Validation is via real usage, not test harnesses.
-- Add CI workflows. This project has no build step and no tests to run.
+- Add CI workflows beyond `.github/workflows/release.yml` (skill packaging) unless the project gains an actual test suite.
 - Create a `.claude/` directory in the repo. It is gitignored. The repo IS the source for `~/.claude/`.
 - Add new frontmatter fields beyond what is documented above. Claude Code ignores unknown fields silently.
 - Change installer flags without updating both install.sh and install.ps1.
-- Put implementation details in agent descriptions. Descriptions say WHEN to invoke, not HOW the agent works.
+- Put implementation details in agent or skill descriptions. Descriptions say WHEN to invoke, not HOW.
+- Commit anything under `dist/` — it is generated by `scripts/build-skills.sh` and gitignored.
 
 ## Adding a New Agent
 
@@ -108,7 +138,16 @@ Commands that run agents in parallel: review (reviewer + security), feature step
 4. Pipeline uses `### Step N: Name` structure with agent prompts in quotes
 5. Each step that invokes an agent: "Run the `name` agent:" followed by prompt
 6. Update README.md commands table, docs/commands.md, and CHANGELOG.md
-7. Run `./install.sh` to deploy, then test the command in a real project
+7. Run `bash install.sh` to deploy, then test the command in a real project
+
+## Adding a New Skill
+
+1. Create `skills/<name>/SKILL.md` with frontmatter: `name` (must equal the folder name) and `description` (trigger sentence)
+2. Body explains *when* the skill applies, then *how* to use it (minimal example + API reference)
+3. Optional: `skills/<name>/scripts/` for supporting code, `skills/<name>/references/` for long-form docs
+4. Update README.md skills table, docs/skills.md (if present), and CHANGELOG.md
+5. Run `bash install.sh` to deploy locally, then test by invoking the skill in a real project
+6. Run `bash scripts/build-skills.sh` to verify the release archive builds cleanly
 
 ## Contributing
 

@@ -1,13 +1,14 @@
 # Claude Agents
 
-Multi-agent orchestration system for Claude Code. Transforms a single AI assistant into a coordinated development team with 9 specialist agents and 15 pipeline commands.
+A comprehensive Claude Code configuration: agents, slash commands, and skills installed globally to `~/.claude/`. Started as multi-agent orchestration; now a general-purpose toolkit for tailoring Claude Code to your workflow.
 
 ## What This Is
 
-A set of installable agents and commands that add structured development workflows to Claude Code:
+Three kinds of installable extensions, plus reference material:
 
 - **Agents** — specialist personas (architect, DBA, security engineer, etc.) with bounded tool access
 - **Commands** — orchestration pipelines (`/feature`, `/sprint`, `/deploy`, etc.) that coordinate agents through gated workflows
+- **Skills** — domain capabilities Claude invokes automatically (e.g. generating ITMO/GOST academic reports as `.docx`)
 - **Research** — reference documents on security, testing, observability, and API design
 
 ## Quick Start
@@ -20,7 +21,7 @@ bash install.sh     # macOS/Linux/WSL
 .\install.ps1       # Windows PowerShell
 ```
 
-Then open Claude Code in any project and use commands like `/next`, `/feature`, `/review`.
+Then open Claude Code in any project and use commands like `/next`, `/feature`, `/review`, or just describe a task that matches a skill (e.g. «сделай лабораторную ИТМО по теме X»).
 
 ## Commands
 
@@ -56,19 +57,27 @@ Then open Claude Code in any project and use commands like `/next`, `/feature`, 
 | refactorer | Code smell detection, duplication, test quality | sonnet |
 | docs | API docs, ADRs, runbooks, changelogs | sonnet |
 
+## Skills
+
+| Skill | Purpose | Triggers on |
+|-------|---------|-------------|
+| `gost-report` | Generate Russian academic reports (`.docx`) formatted to GOST 7.32 — лабораторные, отчёты по практике, курсовые, ВКР. Two built-in profiles (`ITMO_PROFILE`, `GOST_PROFILE`) plus `UniversityProfile` for any other vuz. | Russian-language asks for «лабораторную», «отчёт по ГОСТ», «курсовую», «ИТМО», etc. |
+
+Each release attaches every skill as a standalone `.zip` to the GitHub release page — drop it into `~/.claude/skills/` to install without cloning the repo. Adding your university? Build a `UniversityProfile` and PR it back.
+
 ## Project Structure
 
 ```
 claude-agents/
-  agents/           9 specialist agent definitions
-  commands/         15 orchestration commands
-  research/         14 reference documents
-  docs/             documentation
-    commands.md     detailed command reference
-    agents.md       detailed agent reference
-    installation.md install guide and customization
-  install.sh        bash installer (macOS/Linux/WSL)
-  install.ps1       PowerShell installer (Windows)
+  agents/                9 specialist agent definitions
+  commands/              15 orchestration commands
+  skills/                Domain-specific Claude skills (folders with SKILL.md + assets)
+  research/              14 reference documents
+  scripts/               build-skills.sh / .ps1 — package skills into release zips
+  .github/workflows/     release.yml — auto-attaches skill zips to GH releases on tag push
+  docs/                  documentation (commands.md, agents.md, installation.md)
+  install.sh             bash installer (macOS/Linux/WSL)
+  install.ps1            PowerShell installer (Windows)
 ```
 
 ## Documentation
@@ -89,9 +98,18 @@ Each gate must pass before proceeding. Agents have bounded tool access (reviewer
 
 ## Customization
 
-- **Project-level overrides**: add `.claude/agents/` or `.claude/commands/` in your project
-- **Edit globals**: modify `~/.claude/agents/` and `~/.claude/commands/` directly
+- **Project-level overrides**: add `.claude/agents/`, `.claude/commands/`, or `.claude/skills/` in your project
+- **Edit globals**: modify files under `~/.claude/agents/`, `~/.claude/commands/`, `~/.claude/skills/` directly
 - **Fork**: fork this repo, customize, install from your fork
+
+## Building Release Archives
+
+```bash
+bash scripts/build-skills.sh           # zips every skills/<name>/ into dist/<name>.zip
+bash scripts/build-skills.sh itmo-report   # build a single skill
+```
+
+On `git push --tags vX.Y.Z`, the `release.yml` workflow runs the same script and attaches the zips to the GitHub release. Tag must match `VERSION` exactly.
 
 ## Contributing
 
