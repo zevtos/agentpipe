@@ -7,6 +7,26 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-04-27
+
+### Added
+- **`gost-report`: native LaTeX equations.** New API method `r.formula(latex, where=None) → int` inserts a LaTeX formula as a real Word equation (OMML), not a rendered image — the formula opens editable in Word, scales cleanly, and looks native. Supports the full `latex2mathml` subset: powers/subscripts, `\frac`, `\sqrt[n]`, Greek letters, `\sum/\int/\prod` with limits, `\bar/\hat/\vec/\tilde/\dot` accents, `pmatrix/bmatrix/vmatrix`, `\text{...}`, fenced groups. Auto-numbered «(N)» pinned to the right edge per GOST 7.32, optional `where=...` block for variable explanations renders below the formula. Returns the formula's number so prose can reference it: `f1 = r.formula(...)` → `r.text(f"По формуле ({f1}) ...")`. The LaTeX string itself bypasses `_sanitize_prose` (so `\text{1—5}` doesn't get mangled); `where` text is sanitized as normal user prose.
+- **`gost-report`: isolated Python environment.** New `scripts/ensure_env.py` bootstrap manages the skill's deps in a dedicated venv at `<skill_dir>/.venv/` — fixed location, single per installation, never global. Manager preference: `uv` → `conda --prefix` → stdlib `python -m venv`. Idempotent: hashes `requirements.txt` and skips work when nothing changed (millisecond no-op on warm runs). When the skill ships a new `requirements.txt`, deps auto-update on next invocation. Two modes: `python ensure_env.py` (prints venv python path) and `python ensure_env.py <script>` (bootstraps then `os.execv`s the script with venv python). Cross-platform (POSIX + Windows), stdlib only, with best-effort flock to prevent concurrent-bootstrap races.
+- **`gost-report`: `scripts/requirements.txt`** — `python-docx>=1.1.0`, `latex2mathml>=3.77.0`. Single source of truth for both pip and the bootstrap.
+
+### Changed
+- **`gost-report` SKILL.md** — `## Dependencies` rewritten: agents are now told to **never** `pip install` globally, always go through `ensure_env.py`. New `### Формулы (LaTeX)` section with examples and supported subset. New `### Запуск через ensure_env.py` block under `## How to use` documenting the bootstrap workflow. Checklist gains two items (formulas render as equations, single venv per skill).
+- **Installers** (`install.sh`, `install.ps1`) and **build script** (`scripts/build-skills.sh`) — strip `.venv/` and `.venv.lock` on copy/zip in both directions (install + pull). Prevents a developer's local venv from leaking into system installations or release archives, where the absolute paths in `pyvenv.cfg` would be wrong anyway.
+- **`.gitignore`** — `skills/*/.venv/` and `skills/*/.venv.lock` so `git status` stays clean during local skill development.
+
+## [0.4.4] - 2026-04-27
+
+### Added
+- **`gost-report`: hard enforcement against em-dashes.** The soft writing-style rule from v0.4.3 was still being ignored — agents kept putting `—` into report prose. Now two layers of protection:
+  1. **Prompt.** `SKILL.md` opens with a top-level "⛔ Правило №1 — приоритет выше всего остального" block right after the H1, listing exactly where em/en-dashes are forbidden (`r.text`, `r.task`, headings, list items, captions, table cells) and what to write instead (comma between words, hyphen in ranges). The old writing-style section now defers to this rule.
+  2. **Code.** `gost_report.py` adds `_sanitize_prose()` — every content method (`text`, `task`, `h1/h2/h3`, `numbered`, `bullet`, table cells, and the user `caption` argument in `figure`/`table`) runs input through regexes: ` — ` / ` – ` → `, ` and bare `—`/`–` → `-`. The library-generated prefixes «Рисунок N — Описание» and «Таблица N — Описание» are untouched because the dash there is mandated by GOST and inserted by the library itself.
+- The sanitizer is a safety net, not a license to relax — `SKILL.md` explicitly tells the model not to rely on it and to write without em-dashes from the start.
+
 ## [0.4.3] - 2026-04-26
 
 ### Added

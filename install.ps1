@@ -93,6 +93,10 @@ function Do-Install {
             $dst = Join-Path $SkillsDst $_.Name
             if (Test-Path $dst) { Remove-Item $dst -Recurse -Force }
             Copy-Item $_.FullName -Destination $dst -Recurse -Force
+            # Скиллы могут держать свой venv в .venv/ (создаётся
+            # bootstrap-скриптом). Не тащим dev venv в системную установку.
+            Remove-Item -Path (Join-Path $dst ".venv") -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path (Join-Path $dst ".venv.lock") -Force -ErrorAction SilentlyContinue
             Write-Ok "skills/$($_.Name)/"
             $count++
         }
@@ -294,6 +298,8 @@ function Do-Pull {
                 $repoCopy = Join-Path $SkillsSrc $_.Name
                 if (Test-Path $repoCopy) { Remove-Item $repoCopy -Recurse -Force }
                 Copy-Item $dst -Destination $repoCopy -Recurse -Force
+                Remove-Item -Path (Join-Path $repoCopy ".venv") -Recurse -Force -ErrorAction SilentlyContinue
+                Remove-Item -Path (Join-Path $repoCopy ".venv.lock") -Force -ErrorAction SilentlyContinue
                 Write-Ok "skills/$($_.Name)/ <- installed"
                 $count++
             }

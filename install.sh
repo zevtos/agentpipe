@@ -192,6 +192,10 @@ do_install() {
             name=$(basename "$d")
             rm -rf "$SKILLS_DST/$name"
             cp -R "$d" "$SKILLS_DST/$name"
+            # Скиллы могут держать собственный venv в .venv/ (создаётся
+            # bootstrap-скриптом). Не тащим dev-овский venv в системную
+            # установку — пути и питон у пользователя другие.
+            rm -rf "$SKILLS_DST/$name/.venv" "$SKILLS_DST/$name/.venv.lock"
             log "skills/$name/"
             count=$((count + 1))
         done
@@ -425,6 +429,8 @@ do_pull() {
             if [[ -d "$SKILLS_DST/$name" ]]; then
                 rm -rf "$SKILLS_SRC/$name"
                 cp -R "$SKILLS_DST/$name" "$SKILLS_SRC/$name"
+                # На обратном пути тоже не тянем venv в репо.
+                rm -rf "$SKILLS_SRC/$name/.venv" "$SKILLS_SRC/$name/.venv.lock"
                 log "skills/$name/ ← installed"
                 count=$((count + 1))
             fi

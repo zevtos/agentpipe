@@ -49,7 +49,9 @@ for d in "$SKILLS_SRC"/*/; do
 
     out="$DIST/$name.zip"
     rm -f "$out"
-    (cd "$SKILLS_SRC" && zip -qr "$out" "$name" -x "*.DS_Store" "*/__pycache__/*" "*.pyc")
+    (cd "$SKILLS_SRC" && zip -qr "$out" "$name" \
+        -x "*.DS_Store" "*/__pycache__/*" "*.pyc" \
+           "*/.venv/*" "*/.venv.lock" "*/.installed_hash")
     echo -e "${GREEN}✓${NC} dist/$name.zip"
     count=$((count + 1))
 done

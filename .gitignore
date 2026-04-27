@@ -6,3 +6,5 @@ Thumbs.db
 dist/
 __pycache__/
 *.pyc
+skills/*/.venv/
+skills/*/.venv.lock
