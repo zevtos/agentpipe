@@ -75,6 +75,7 @@ r = Report(TitleConfig(
     teacher_name="Фамилия И.О.",
     teacher_degree="к.т.н.",
     teacher_position="доцент",
+    teacher_label="Проверил",   # женщине: "Проверила"; ВКР/курсовая: "Руководитель"
     year="2026",
 ))
 
@@ -108,6 +109,18 @@ r.save("/tmp/report.docx")
 | `r.numbered(items)`, `r.bullet(items)` | Списки. Каждый вызов стартует с 1 заново. |
 | `r.page_break()` | Принудительный разрыв (редко нужен — h1 сам ставит). |
 | `r.save(path)` | Сохранить .docx. |
+
+### `TitleConfig` — часто переопределяемые поля
+
+| Поле | Дефолт | Когда менять |
+|---|---|---|
+| `teacher_label` | `"Проверил"` | Женщина-преподаватель: `"Проверила"`. ВКР/курсовая: `"Руководитель"` / `"Руководительница"`. |
+| `work_number` | `""` | Лабы с номерами: `"№1"`, `"№3"`. |
+| `variant` | `""` | Лабы с вариантами: `"3"`. |
+| `teacher_degree` | `""` | `"к.т.н."`, `"д.ф.-м.н."`. |
+| `teacher_position` | `""` | `"доцент"`, `"профессор"`, `"ст. преподаватель"`. |
+
+Обязательные: `work_type`, `topic`, `student_name`, `student_group`, `year`. Полный список (включая `city`, `ministry`, `university_*`, `faculty` для override профиля) — в `references/api.md`.
 
 ## Подробности — see references/
 

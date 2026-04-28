@@ -7,6 +7,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-04-27
+
+### Changed
+- **`gost-report` SKILL.md surfaces `TitleConfig` configurable fields directly.** A real-world session showed the agent assuming `teacher_label="Проверил"` was a hard-coded title-page string, when it's actually a TitleConfig field that takes any value (`"Проверила"` for a female teacher, `"Руководитель"` for theses/term papers). Two small additions to plug this blind spot:
+  1. The minimal-workflow example now passes `teacher_label="Проверил"` explicitly with an inline comment showing the alternatives, so the agent sees the option as part of the canonical template.
+  2. A compact `TitleConfig — часто переопределяемые поля` table after the methods table covers the five fields agents most often miss (`teacher_label`, `work_number`, `variant`, `teacher_degree`, `teacher_position`), with a pointer to `references/api.md` for the full list. ~10 extra lines in SKILL.md to prevent a recurring class of mistake.
+
 ## [0.6.0] - 2026-04-27
 
 ### Added
