@@ -7,6 +7,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-04-27
+
+### Fixed
+- **`gost-report`: nested N-ary operators (∑∑, ∫∑, ∑∏, …) no longer leave a placeholder square between the inner operator and its body.** v0.5.0 collected the body of an N-ary operator at the `mrow` level via lookahead, but only one level deep — the inner operator's `<m:e>` stayed empty because its body siblings were consumed at the outer level instead. Refactored the lookahead into a recursive walker (`_walk_with_nary`) that, when it encounters a nested N-ary inside an outer N-ary's body, recurses to collect the inner one's body first. Result: `J = \sum_{c=1}^{k} \sum_{x \in C_c} \|x - \mu_c\|^2` now produces a properly nested `<m:nary><m:e><m:nary><m:e>‖x−μ_c‖²` structure instead of two siblings with the norm-squared dangling outside. Verified end-to-end on `\sum\sum`, `\sum\prod`, and the original 8-formula regression suite — 0 empty `<m:e>` left.
+
 ## [0.6.1] - 2026-04-27
 
 ### Changed

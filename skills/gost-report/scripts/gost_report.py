@@ -508,6 +508,47 @@ def _is_body_terminator(node) -> bool:
     return text in _NARY_BODY_TERMINATORS
 
 
+def _walk_with_nary(children, start: int, *, stop_at_terminator: bool):
+    """Обход списка MathML-детей с lookahead для N-ary операторов.
+
+    Возвращает (omml_elements, next_index) — индекс на первый элемент,
+    который не был поглощён (терминатор либо конец списка).
+
+    stop_at_terminator=True: останавливаемся при первом теле-терминаторе
+        (=, ≤, ≠, …) и НЕ съедаем его — он остаётся для caller'а. Это
+        режим сбора body внутри N-ary: правая часть равенства не
+        принадлежит подынтегральному выражению.
+    stop_at_terminator=False: терминаторы рендерятся как обычные mo,
+        потребляются. Режим для верхнего mrow.
+
+    Рекурсивный — вложенные N-ary (∑∑..., ∫∑..., etc.) обрабатываются
+    корректно: внутренний оператор поглощает свой body раньше, чем
+    внешний продолжает сбор.
+    """
+    result: List[OxmlElement] = []
+    j = start
+    while j < len(children):
+        child = children[j]
+        if stop_at_terminator and _is_body_terminator(child):
+            break
+        nary_info = _extract_nary_info(child)
+        if nary_info:
+            chr_text, sub_kids, sup_kids, hide_sub, hide_sup = nary_info
+            inner_body, next_j = _walk_with_nary(
+                children, j + 1, stop_at_terminator=True
+            )
+            result.append(_build_nary(
+                chr_text, sub_kids, sup_kids,
+                e_children=inner_body,
+                hide_sub=hide_sub, hide_sup=hide_sup,
+            ))
+            j = next_j
+            continue
+        result.extend(_walk_mathml(child))
+        j += 1
+    return result, j
+
+
 def _walk_mathml(node) -> List[OxmlElement]:
     """Рекурсивный обход MathML-узла, возвращает список OMML-элементов.
 
@@ -520,28 +561,7 @@ def _walk_mathml(node) -> List[OxmlElement]:
     # Контейнеры — плющим в плоский список с lookahead для N-ary тел.
     if tag in ("math", "mstyle", "mrow", "semantics", "annotation"):
         children = [c for c in node if _ml_local(c.tag) != "annotation"]
-        result: List[OxmlElement] = []
-        i = 0
-        while i < len(children):
-            child = children[i]
-            nary_info = _extract_nary_info(child)
-            if nary_info:
-                chr_text, sub_kids, sup_kids, hide_sub, hide_sup = nary_info
-                # Сбор body: всё что идёт после оператора до терминатора.
-                body: List[OxmlElement] = []
-                j = i + 1
-                while j < len(children) and not _is_body_terminator(children[j]):
-                    body.extend(_walk_mathml(children[j]))
-                    j += 1
-                result.append(_build_nary(
-                    chr_text, sub_kids, sup_kids,
-                    e_children=body,
-                    hide_sub=hide_sub, hide_sup=hide_sup,
-                ))
-                i = j
-                continue
-            result.extend(_walk_mathml(child))
-            i += 1
+        result, _ = _walk_with_nary(children, 0, stop_at_terminator=False)
         return result
 
     if tag == "mi":
