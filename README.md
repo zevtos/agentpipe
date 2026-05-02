@@ -158,7 +158,9 @@ Each gate must pass before proceeding. Agents have bounded tool access (reviewer
   - Codex: `.agents/skills/` in your project (or `.codex/agents/` for TOML agents)
 - **Edit globals**: modify the installed files directly under the target directory
 - **Fork**: fork this repo, customize, install from your fork
-- **Co-Authored-By suppression**: by default, `--target claude` also disables the `Co-Authored-By: Claude` and `🤖 Generated with [Claude Code]` trailers in your commits via `~/.claude/settings.json` + a global `commit-msg` hook. Pass `--no-attribution-fix` to skip. See [docs/installation.md](docs/installation.md#removing-claude-attribution-from-commits).
+- **Co-Authored-By suppression**: by default, `--target claude` disables the `Co-Authored-By: Claude` and `🤖 Generated with [Claude Code]` trailers via `~/.claude/settings.json` + a global `commit-msg` hook. Pass `--no-attribution-fix` to skip. See [docs/installation.md](docs/installation.md#removing-claude-attribution-from-commits).
+- **Safe defaults**: also by default, the installer adds `$schema` (for IDE autocomplete) and a `permissions.deny` set-union for unsafe file reads (`.env`, `*.pem`, `*.key`, `secrets/**`) to your settings.json. Pass `--no-config-defaults` to skip. See [docs/installation.md](docs/installation.md#safe-defaults-layer).
+- **Optional shell env vars**: `scripts/agentpipe.env.example` documents reasoning-effort, adaptive-thinking, and telemetry-bundle vars. Not auto-installed — copy what you want into your shell rc. See [docs/installation.md](docs/installation.md#optional-shell-environment-variables).
 
 ## Building Release Archives
 
@@ -173,7 +175,7 @@ On `git push --tags vX.Y.Z`, the `release.yml` workflow runs the same script and
 
 - [Commands Reference](docs/commands.md) — detailed usage for each command
 - [Agents Reference](docs/agents.md) — agent capabilities and responsibilities
-- [Installation Guide](docs/installation.md) — install, update, and customize
+- [Installation Guide](docs/installation.md) — install, update, customize, terminal & keybindings
 - [Eval Framework](docs/eval.md) — local prompt-quality testing for agents
 
 ## Contributing

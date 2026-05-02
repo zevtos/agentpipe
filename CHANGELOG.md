@@ -7,6 +7,24 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-05-02
+
+### Fixed
+- **`includeCoAuthoredBy` is deprecated by Claude Code.** v0.7.0 wrote only the legacy key; the modern key is `attribution: { commit: "", pr: "" }`, which takes precedence. The installer now writes **both** — `attribution` for current Claude Code, `includeCoAuthoredBy` for backward compat with older versions. Verified against [official settings docs](https://code.claude.com/docs/en/settings).
+- **Hook regex was too narrow.** v0.7.0 stripped only `Co-Authored-By: Claude <noreply@anthropic.com>`. Modern Claude Code emits model-named variants like `Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>` (and presumably future model names). Regex broadened to `Claude[^<]*<noreply@anthropic\.com>` so any model-name variant is caught.
+
+### Added
+- **Safe-defaults layer (default-on for `--target claude`, opt-out via `--no-config-defaults` / `-NoConfigDefaults`).** Two universal defaults merged into `~/.claude/settings.json`:
+  - `$schema: https://json.schemastore.org/claude-code-settings.json` — enables JSON autocomplete and inline validation in VS Code, Cursor, and other editors.
+  - `permissions.deny` — set-union (preserves user entries) of universally-unsafe file-read patterns: `Read(./.env)`, `Read(./.env.*)`, `Read(./**/secrets/**)`, `Read(./**/*.pem)`, `Read(./**/*.key)`. We deliberately do not ship a `permissions.allow` list — it's stack-specific; use Claude Code's `fewer-permission-prompts` skill instead.
+- **`scripts/json-merge.py`: `--list-union <dotted.path>`** repeatable flag. For the named JSON path, lists merge via set-union (overlay-first order, dedupe) instead of overwrite. Used to merge `permissions.deny` without clobbering user entries. Backward-compatible with v0.7.0 invocations (no flag → existing scalar/array overwrite behavior).
+- **`scripts/agentpipe.env.example`** — curated reference for opt-in shell env vars (`CLAUDE_CODE_EFFORT_LEVEL`, `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`) with caveats: explicitly **not** auto-installed and **not** auto-sourced. Annotated trade-offs: `EFFORT_LEVEL=max` removes per-turn token cap (paid-plan quota burns faster), `DISABLE_ADAPTIVE_THINKING` is a no-op on Opus 4.7, `DISABLE_NONESSENTIAL_TRAFFIC` bundles autoupdater + telemetry + error-reporting + feedback-command.
+- **`docs/installation.md`: "After Install: Terminal & Keybindings" section** — pointer to `/terminal-setup`, newline fallbacks (`Ctrl+J`), and a keybindings table covering `Esc Esc` rewind, image paste, permission-mode cycling, transcript toggle. Plus an "Optional Shell Environment Variables" section explaining how to use `agentpipe.env.example`.
+
+### Notes
+- `--uninstall` does **not** auto-remove the new `$schema` / `permissions.deny` keys (same precedent as `includeCoAuthoredBy` in v0.7.0): we don't track which keys we added, and removing user state on uninstall is not symmetric with adding by deep-merge. Edit `~/.claude/settings.json` manually to revert.
+- The `agentpipe.env.example` file is shipped **only in the repo** — the installer does not copy it anywhere. Users who want it explicitly copy it to `~/.claude/agentpipe.env` and add a single source-line to their shell rc. This is intentional: shell rc is the user's territory.
+
 ## [0.7.0] - 2026-05-02
 
 ### Added
