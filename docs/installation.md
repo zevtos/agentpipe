@@ -81,6 +81,7 @@ The skill becomes globally available across all your conversations on that accou
 | Pull | `--pull` | `-Pull` | Copy installed files back to repo (reverse sync) |
 | Update | `--update` | `-Update` | `git pull --ff-only` then install (one-shot upgrade) |
 | Uninstall | `--uninstall` | `-Uninstall` | Remove installed files (respects `--target`) |
+| No attribution-fix | `--no-attribution-fix` | `-NoAttributionFix` | Skip Co-Authored-By suppression layer (see below) |
 | Help | `--help` | `-Help` | Show usage information |
 
 All actions respect `--target`. Examples:
@@ -90,6 +91,37 @@ bash install.sh --target codex --dry        # preview Codex install
 bash install.sh --target codex --uninstall  # remove only Codex skills
 bash install.sh --diff                      # diff Claude install (default target)
 ```
+
+## Removing Claude Attribution from Commits
+
+By default, on `--target claude`, the installer suppresses the `Co-Authored-By: Claude <noreply@anthropic.com>` and `🤖 Generated with [Claude Code]` trailers Claude Code adds to commit messages. Two layers, both idempotent:
+
+1. **Settings flag.** Sets `includeCoAuthoredBy: false` in `~/.claude/settings.json` (the official Claude Code switch). Existing keys in `settings.json` are preserved — the installer deep-merges, never overwrites.
+2. **Global git `commit-msg` hook.** Copies `scripts/git-hooks/commit-msg` to `~/.git-templates/hooks/commit-msg` and points `git config --global init.templateDir` at `~/.git-templates`. The hook strips the two trailing lines and any resulting blank lines from every commit message, so anything that slips past the settings flag still gets cleaned up.
+
+**Opt out:** pass `--no-attribution-fix` (Bash) or `-NoAttributionFix` (PowerShell). The flag has no effect on `--target codex`.
+
+**Existing repos.** New repos created via `git init` after the installer runs inherit the hook automatically. **Existing repos are not modified** — `git init` inside an already-initialized repo does not refresh hooks. To apply the hook to an existing repo, either run `git init` inside it (a no-op for everything except hooks; safe), or copy `~/.git-templates/hooks/commit-msg` into `.git/hooks/` manually.
+
+**Existing template dir.** If `git config --global init.templateDir` is already set to a non-default path, the installer refuses to override it and prints a notice. Copy the hook into your existing template dir's `hooks/` folder manually.
+
+**Existing `commit-msg` hook.** If `~/.git-templates/hooks/commit-msg` already exists with different content, it's backed up to `commit-msg.agentpipe.bak.<epoch>` before being replaced. The installer warns loudly when this happens.
+
+**Uninstall behavior.** `--uninstall` removes the hook file and unsets `init.templateDir` (only if it points to our path). It does **not** auto-remove `includeCoAuthoredBy` from `settings.json` — that key remains until you edit the file manually. The installer prints a reminder.
+
+### Cleaning already-committed trailers
+
+The installer only prevents future trailers; it does not rewrite commits already in your history. If you have local or pushed commits with the trailers and want to scrub them, use [`git-filter-repo`](https://github.com/newren/git-filter-repo):
+
+```bash
+# Inside the repo. Requires git-filter-repo (pip install git-filter-repo).
+git filter-repo --message-callback '
+  return re.sub(rb"\n*🤖 Generated with \[Claude Code\][^\n]*\nCo-Authored-By: Claude <noreply@anthropic\.com>\n?", b"", message)
+'
+git push --force-with-lease
+```
+
+> **Warning:** this rewrites commit history. Force-pushing breaks collaborators' clones — coordinate with everyone who has pulled the affected branches before running it. Don't use this on shared `main` without explicit consensus.
 
 ## Updating
 

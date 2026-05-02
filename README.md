@@ -158,6 +158,7 @@ Each gate must pass before proceeding. Agents have bounded tool access (reviewer
   - Codex: `.agents/skills/` in your project (or `.codex/agents/` for TOML agents)
 - **Edit globals**: modify the installed files directly under the target directory
 - **Fork**: fork this repo, customize, install from your fork
+- **Co-Authored-By suppression**: by default, `--target claude` also disables the `Co-Authored-By: Claude` and `🤖 Generated with [Claude Code]` trailers in your commits via `~/.claude/settings.json` + a global `commit-msg` hook. Pass `--no-attribution-fix` to skip. See [docs/installation.md](docs/installation.md#removing-claude-attribution-from-commits).
 
 ## Building Release Archives
 

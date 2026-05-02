@@ -7,6 +7,25 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-02
+
+### Added
+- **Installer suppresses Claude Code commit-message attribution by default (`--target claude`).** Two layers, both idempotent and reversible:
+  1. **Settings flag.** `~/.claude/settings.json` gets `includeCoAuthoredBy: false` deep-merged in (existing keys preserved). Atomic write via temp file + rename through `scripts/json-merge.py` (Python 3 stdlib only); on parse error of the existing file, the original is left untouched. PowerShell uses native `ConvertFrom-Json` / `ConvertTo-Json` and skips the Python dependency.
+  2. **Global `commit-msg` hook.** `scripts/git-hooks/commit-msg` is copied into `~/.git-templates/hooks/`, and `git config --global init.templateDir` is pointed at `~/.git-templates` (only if currently unset or already ours — never overrides a user-set path). The hook strips `🤖 Generated with [Claude Code]` and `Co-Authored-By: Claude <noreply@anthropic.com>` lines plus trailing blank lines via portable BSD/GNU sed.
+- **`--no-attribution-fix` (Bash) / `-NoAttributionFix` (PowerShell) opt-out flag.** Skips both layers. Always implicitly off for `--target codex`.
+- `--uninstall` reverses the layer: removes our hook (only if byte-identical to ours), unsets `init.templateDir` (only if it points to our path). `settings.json/includeCoAuthoredBy` is left as-is — uninstall scope stays narrow; the installer prints a one-line reminder so users can revert manually.
+- New files: `scripts/git-hooks/commit-msg`, `scripts/json-merge.py`. Existing user hooks are backed up to `commit-msg.agentpipe.bak.<epoch>` before overwrite, with a loud warning.
+
+### Changed
+- `install.sh` and `install.ps1` gain three internal helpers (`do_attribution_fix` / `do_attribution_unfix` / `do_attribution_dry`) wired into install, uninstall, dry, and diff flows. Codex target unchanged.
+- `docs/installation.md` adds a "Removing Claude Attribution from Commits" section with troubleshooting (existing template dir conflict, existing hook backup) and a `git filter-repo --message-callback` recipe for cleaning already-committed trailers (with explicit force-push warning — destructive, not automated).
+- README "Customization" mentions the new default and how to opt out.
+
+### Notes
+- Existing repos are not retroactively modified — `git init` only seeds hooks at repo creation. To apply the hook to an existing repo, run `git init` inside it (no-op except for hooks; safe) or copy the hook into `.git/hooks/` manually. The installer surfaces this as a one-line note on every install.
+- History rewrites for already-pushed commits with the trailers are documented but explicitly not automated by the installer (force-push hazard — must be coordinated with collaborators).
+
 ## [0.6.4] - 2026-05-02
 
 ### Fixed
