@@ -7,6 +7,19 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-05-03
+
+### Added
+- **`gost-report`: project-paths convention.** New `_paths.py` module ships `ProjectPaths` (frozen dataclass: `root`, `docs`, `figures`, `tables`, `out`, `tex`) and `paths(start=None) → ProjectPaths` helper. Project root auto-detected by walking up from the caller's `__file__` (or CWD fallback) and matching the first marker among `.git/` → `Makefile` → `pyproject.toml` → `.claude/`. "Contains marker, not is marker" rule means a script in `<project>/.claude/gost-report/build.py` walks past `.claude/` and lands at `<project>/`. Both names re-exported from `gost_report` for `from gost_report import paths`.
+- **`Report` auto-resolves figure and save paths.** `Report.figure(path, caption)` resolves relative paths against `<project>/docs/figures/`; absolute paths pass through. `Report.save(path=None)` defaults to `<project>/docs/report.docx`, treats relative paths as relative to `<project>/docs/`, and creates parent directories with `mkdir parents=True exist_ok=True`. `save()` now returns `Path` (was `str`). New keyword-only constructor parameter `Report(..., project_root=None)` lets callers override auto-detection. Result: agent-generated scripts drop the 5-line `Path(__file__).parent / "figures"` boilerplate and the build script can live anywhere — recommended location `<project>/.claude/gost-report/build.py` so it doesn't pollute the artefact directory.
+- **`references/templates/build.py`** — copy-paste scaffold for a fresh project (see SKILL.md "Project layout" section for the full convention).
+
+### Changed
+- **BC NOTE**: `r.figure("foo.png", ...)` with a relative path previously resolved against `os.getcwd()`. It now resolves against `<project>/docs/figures/`. Real consumer scripts always built absolute paths via `Path(__file__).parent / "figures"`, so the in-the-wild break is near zero. If you hit this, either pass an absolute path (unchanged behavior) or accept the new convention. `FileNotFoundError` raised on miss now includes both input and resolved paths.
+- `Report.save()` return type widened from `str` to `Path`. `print(f"Wrote {out}")` style still works.
+- SKILL.md gains a "Project layout" section showing the recommended `<project>/.claude/gost-report/build.py` location and the auto-resolve rules. API table updated to reflect the new `figure`/`save` semantics and adds the `paths()` row.
+
+
 ## [0.7.1] - 2026-05-02
 
 ### Fixed
@@ -24,6 +37,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Notes
 - `--uninstall` does **not** auto-remove the new `$schema` / `permissions.deny` keys (same precedent as `includeCoAuthoredBy` in v0.7.0): we don't track which keys we added, and removing user state on uninstall is not symmetric with adding by deep-merge. Edit `~/.claude/settings.json` manually to revert.
 - The `agentpipe.env.example` file is shipped **only in the repo** — the installer does not copy it anywhere. Users who want it explicitly copy it to `~/.claude/agentpipe.env` and add a single source-line to their shell rc. This is intentional: shell rc is the user's territory.
+
 
 ## [0.7.0] - 2026-05-02
 

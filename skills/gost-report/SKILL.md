@@ -61,6 +61,29 @@ python3 <skill_dir>/scripts/ensure_env.py твой_скрипт.py
 
 (`<skill_dir>` это папка где лежит `SKILL.md`. Bootstrap пробует `uv` → `conda --prefix` → `python -m venv`. Тёплые запуски ~30 мс, deps обновляются автоматически при апдейте скилла.)
 
+## Project layout (рекомендуемая конвенция)
+
+Скрипт-генератор кладётся в `<project>/.claude/gost-report/build.py`. Артефакты идут в `<project>/docs/`:
+
+```
+<project>/
+├── .claude/
+│   └── gost-report/build.py          # скрипт (инструмент, не артефакт)
+├── docs/
+│   ├── figures/*.png                 # картинки
+│   ├── tables/*.tex                  # таблицы (если есть)
+│   └── report.docx                   # сгенерированный отчёт
+├── Makefile или .git/                # маркер project root
+└── ...
+```
+
+Project root определяется автоматически (обход вверх до первого маркера: `.git/` → `Makefile` → `pyproject.toml` → `.claude/`). Из этого выводятся:
+- `r.figure("name.png", ...)` — резолвится от `<project>/docs/figures/`
+- `r.save()` без аргумента — кладёт в `<project>/docs/report.docx`
+- `paths()` — `(root, docs, figures, tables, out, tex)` если нужен явный доступ
+
+Готовый скелет: `references/templates/build.py`.
+
 **Минимальный пример** (ИТМО, дефолт):
 
 ```python
@@ -90,8 +113,9 @@ f1 = r.formula(r"\sum_{i=1}^{n} i = \frac{n(n+1)}{2}")
 r.text(f"Сумма по формуле ({f1}).")
 r.h1("Заключение")
 r.numbered(["Команда ls освоена.", "Опции -a и -l изучены."])
+r.figure("schema.png", "Архитектура")  # относительный путь → <project>/docs/figures/
 
-r.save("/tmp/report.docx")
+r.save()  # без аргумента → <project>/docs/report.docx; mkdir parents автоматический
 ```
 
 ## API
@@ -103,12 +127,13 @@ r.save("/tmp/report.docx")
 | `r.text(text, bold=False, italic=False)` | Абзац основного текста (justify, отступ 1.25 см). |
 | `r.task(text)` | Жирный «Задание N. ...». |
 | `r.code(code)` | Блок моноширинного кода (Courier New 11). |
-| `r.figure(image_path, caption, width_cm=None)` | Картинка + «Рисунок N — caption». Ширина клампится по печатной области. |
+| `r.figure(image_path, caption, width_cm=None)` | Картинка + «Рисунок N — caption». Ширина клампится по печатной области. Относительный путь → `<project>/docs/figures/`. |
 | `r.formula(latex, where=None) → int` | LaTeX-формула как нативное Word-уравнение, авто-номер «(N)» справа. Возвращает номер для ссылок. |
 | `r.table(rows, caption, has_header=True)` | Таблица + «Таблица N — caption». |
 | `r.numbered(items)`, `r.bullet(items)` | Списки. Каждый вызов стартует с 1 заново. |
 | `r.page_break()` | Принудительный разрыв (редко нужен — h1 сам ставит). |
-| `r.save(path)` | Сохранить .docx. |
+| `r.save(path=None)` | Сохранить .docx. Без аргумента → `<project>/docs/report.docx`. Относительный путь → от `<project>/docs/`. Возвращает абсолютный `Path`. |
+| `paths(start=None) → ProjectPaths` | `(root, docs, figures, tables, out, tex)`. По умолчанию резолвит от __file__ caller'а. |
 
 ### `TitleConfig` — часто переопределяемые поля
 
