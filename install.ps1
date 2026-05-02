@@ -14,6 +14,7 @@
     .\install.ps1 -Pull                  # copy installed back to repo
     .\install.ps1 -Update                # git pull --ff-only, then install
     .\install.ps1 -Uninstall             # remove installed files
+    .\install.ps1 -NoAttributionFix      # skip Co-Authored-By suppression layer
     .\install.ps1 -ShowVersion           # show version
 #>
 param(
@@ -24,6 +25,7 @@ param(
     [switch]$Pull,
     [switch]$Update,
     [switch]$Uninstall,
+    [switch]$NoAttributionFix,
     [switch]$ShowVersion,
     [switch]$Help
 )
@@ -37,6 +39,9 @@ $Script:Version = if (Test-Path $VersionFile) { (Get-Content $VersionFile -Raw).
 $AgentsSrc = Join-Path $ScriptDir "agents"
 $CommandsSrc = Join-Path $ScriptDir "commands"
 $SkillsSrc = Join-Path $ScriptDir "skills"
+$HookSrc = Join-Path $ScriptDir "scripts/git-hooks/commit-msg"
+$GitTemplateDir = Join-Path $env:USERPROFILE ".git-templates"
+$GitHookDst = Join-Path $GitTemplateDir "hooks/commit-msg"
 
 # Resolve destinations from target. Codex skills go to ~/.agents/skills/ (open-agent-skills
 # standard), NOT ~/.codex/skills/. ~/.codex/ holds config and TOML agents.
@@ -65,6 +70,162 @@ function Show-CodexSkipNotice {
         Write-Warn "Codex CLI has no custom slash commands - skipped commands/"
         Write-Warn "Codex agents use a different TOML format - skipped agents/. See README for details."
     }
+}
+
+# --- Attribution-fix layer (claude target only) ---
+# Mirrors install.sh: settings.json/includeCoAuthoredBy=false +
+# global commit-msg hook + init.templateDir. Codex target skips both.
+
+function Test-AttributionActive {
+    return ($Target -eq "claude" -and -not $NoAttributionFix)
+}
+
+function Files-Equal($a, $b) {
+    if (-not (Test-Path $a) -or -not (Test-Path $b)) { return $false }
+    return (Get-FileHash $a).Hash -eq (Get-FileHash $b).Hash
+}
+
+function Merge-SettingsJson {
+    $settings = Join-Path $Base "settings.json"
+    $base = @{}
+    if (Test-Path $settings) {
+        try {
+            $raw = (Get-Content $settings -Raw -ErrorAction Stop)
+            if ($raw.Trim()) {
+                $parsed = $raw | ConvertFrom-Json -ErrorAction Stop
+                # Convert PSCustomObject to hashtable for mutation
+                $parsed.PSObject.Properties | ForEach-Object {
+                    $base[$_.Name] = $_.Value
+                }
+            }
+        } catch {
+            Write-Warn "settings.json has invalid JSON - leaving file untouched"
+            return $false
+        }
+    }
+
+    if ($base.ContainsKey("includeCoAuthoredBy") -and $base["includeCoAuthoredBy"] -eq $false) {
+        Write-Ok "settings/includeCoAuthoredBy already false"
+        return $true
+    }
+
+    $base["includeCoAuthoredBy"] = $false
+    New-Item -ItemType Directory -Path $Base -Force | Out-Null
+
+    # Atomic write: temp + rename
+    $tmp = "$settings.agentpipe.tmp"
+    try {
+        ($base | ConvertTo-Json -Depth 32) | Set-Content -Path $tmp -Encoding UTF8 -NoNewline
+        Add-Content -Path $tmp -Value "" -Encoding UTF8
+        Move-Item -Path $tmp -Destination $settings -Force
+        Write-Ok "settings/includeCoAuthoredBy=false"
+        return $true
+    } catch {
+        if (Test-Path $tmp) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+        Write-Warn "settings.json write failed: $_"
+        return $false
+    }
+}
+
+function Do-AttributionFix {
+    if (-not (Test-AttributionActive)) { return }
+
+    # 1. settings.json
+    Merge-SettingsJson | Out-Null
+
+    # 2. Global commit-msg hook
+    New-Item -ItemType Directory -Path (Join-Path $GitTemplateDir "hooks") -Force | Out-Null
+    if ((Test-Path $GitHookDst) -and (Files-Equal $HookSrc $GitHookDst)) {
+        Write-Ok "git/commit-msg already current"
+    } else {
+        if (Test-Path $GitHookDst) {
+            $epoch = [int][double]::Parse((Get-Date -UFormat %s))
+            $backup = "$GitHookDst.agentpipe.bak.$epoch"
+            Move-Item -Path $GitHookDst -Destination $backup
+            Write-Warn "existing commit-msg hook backed up to $backup"
+        }
+        # Byte-for-byte copy preserves LF line endings (shebang needs LF on WSL).
+        [System.IO.File]::WriteAllBytes($GitHookDst, [System.IO.File]::ReadAllBytes($HookSrc))
+        Write-Ok "git/commit-msg installed -> $GitHookDst"
+    }
+
+    # 3. init.templateDir
+    $current = (& git config --global --get init.templateDir 2>$null)
+    if ($LASTEXITCODE -ne 0) { $current = "" }
+    $currentExpanded = $current -replace '^~', $env:USERPROFILE
+    if (-not $current) {
+        & git config --global init.templateDir $GitTemplateDir
+        Write-Ok "git/init.templateDir=$GitTemplateDir"
+    } elseif ($currentExpanded -eq $GitTemplateDir) {
+        Write-Ok "git/init.templateDir already set"
+    } else {
+        Write-Warn "init.templateDir already set to: $current"
+        Write-Warn "  -> not overriding. Copy $GitHookDst into $current/hooks/ manually."
+    }
+
+    Write-Info "note: existing repos are unaffected - run 'git init' inside any repo"
+    Write-Info "      to apply the hook, or copy the hook into .git/hooks/ manually."
+}
+
+function Do-AttributionUnfix {
+    if (-not (Test-AttributionActive)) { return }
+
+    if ((Test-Path $GitHookDst) -and (Files-Equal $HookSrc $GitHookDst)) {
+        Remove-Item $GitHookDst
+        Write-Ok "removed git/commit-msg"
+    }
+
+    $current = (& git config --global --get init.templateDir 2>$null)
+    if ($LASTEXITCODE -ne 0) { $current = "" }
+    $currentExpanded = $current -replace '^~', $env:USERPROFILE
+    if ($currentExpanded -eq $GitTemplateDir) {
+        & git config --global --unset init.templateDir
+        Write-Ok "unset git/init.templateDir"
+    }
+
+    Write-Info "note: settings.json/includeCoAuthoredBy left as-is - edit manually to revert"
+}
+
+function Do-AttributionDry {
+    if (-not (Test-AttributionActive)) { return }
+    Write-Host "Attribution-fix:"
+    $settings = Join-Path $Base "settings.json"
+    if ((Test-Path $settings) -and (Select-String -Path $settings -Pattern '"includeCoAuthoredBy"\s*:\s*false' -Quiet)) {
+        Write-Host "  = settings/includeCoAuthoredBy=false (already set)"
+    } else {
+        Write-Info "+ settings/includeCoAuthoredBy=false"
+    }
+    if ((Test-Path $GitHookDst) -and (Files-Equal $HookSrc $GitHookDst)) {
+        Write-Host "  = git/commit-msg (identical)"
+    } elseif (Test-Path $GitHookDst) {
+        Write-Warn "~ git/commit-msg (CHANGED - existing hook will be backed up)"
+    } else {
+        Write-Info "+ git/commit-msg (NEW)"
+    }
+    $current = (& git config --global --get init.templateDir 2>$null)
+    if ($LASTEXITCODE -ne 0) { $current = "" }
+    $currentExpanded = $current -replace '^~', $env:USERPROFILE
+    if ($currentExpanded -eq $GitTemplateDir) {
+        Write-Host "  = git/init.templateDir=$GitTemplateDir"
+    } elseif (-not $current) {
+        Write-Info "+ git/init.templateDir=$GitTemplateDir"
+    } else {
+        Write-Warn "! git/init.templateDir already set to $current - will not override"
+    }
+    Write-Host ""
+}
+
+function Do-AttributionDiff {
+    if (-not (Test-AttributionActive)) { return $true }
+    if (-not (Test-Path $GitHookDst)) {
+        Write-Warn "git-hooks/commit-msg - not installed"
+        return $false
+    }
+    if (-not (Files-Equal $HookSrc $GitHookDst)) {
+        Write-Warn "git-hooks/commit-msg differs"
+        return $false
+    }
+    return $true
 }
 
 function Do-Install {
@@ -102,6 +263,11 @@ function Do-Install {
             Write-Ok "skills/$($_.Name)/"
             $count++
         }
+    }
+
+    if (Test-AttributionActive) {
+        Write-Host ""
+        Do-AttributionFix
     }
 
     Write-Host ""
@@ -152,6 +318,11 @@ function Do-Uninstall {
             Remove-Item $d
             Write-Ok "removed $((Split-Path $d -Leaf))/"
         }
+    }
+
+    if (Test-AttributionActive) {
+        Write-Host ""
+        Do-AttributionUnfix
     }
 
     Write-Host ""
@@ -219,8 +390,10 @@ function Do-Dry {
                 Write-Info "+ $($_.Name)/ (NEW)"
             }
         }
+        Write-Host ""
     }
 
+    Do-AttributionDry
     Show-CodexSkipNotice
 }
 
@@ -265,6 +438,12 @@ function Do-Diff {
                 Write-Warn "skills/$($_.Name)/ - not installed"
                 $hasDiff = $true
             }
+        }
+    }
+
+    if (Test-AttributionActive) {
+        if (-not (Do-AttributionDiff)) {
+            $hasDiff = $true
         }
     }
 
