@@ -7,6 +7,23 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-05-03
+
+### Added
+- **Three new default keys in the config-defaults layer** (default-on for `--target claude`, opt-out via `--no-config-defaults`):
+  - `autoUpdatesChannel: "stable"` — official default is `"latest"` (beta channel; that's the channel the Feb–Mar 2026 adaptive-thinking regression shipped on). Stable lags ~1 week and skips versions with major regressions.
+  - `cleanupPeriodDays: 180` — official default is `30`, so old session files are purged at startup. 180 keeps history for users returning to projects after a month or two.
+  - `spinnerTipsEnabled: false` — disables the in-spinner tips (noisy after the first session).
+- **Destructive Bash patterns added to `permissions.deny`** (set-union with user entries via `--list-union`): `Bash(rm -rf /*)`, `Bash(rm -rf ~/*)`, `Bash(rm -rf $HOME/*)`, `Bash(mkfs *)`, `Bash(dd * of=/dev/*)`. These complement the existing secret-file deny list and are universally-unsafe regardless of stack. We chose `permissions.deny` (native Claude Code mechanism) over a custom `PreToolUse` hook with regex — simpler, no `jq` dependency, no false-positive risk.
+- **Neutral CLAUDE.md baseline (install-if-missing).** New file `scripts/CLAUDE.md.example` ships stack-agnostic rules covering communication, honesty, scope, and workflow — no language-specific style opinions. The installer copies it to `~/.claude/CLAUDE.md` **only if no file exists there**, and **never overwrites** on subsequent installs once it exists. Opt-out: `--no-claude-md` / `-NoClaudeMd`.
+- **`--with-sound-hooks` / `-WithSoundHooks` opt-in flag.** When passed, merges `Stop` + `Notification` hooks into `~/.claude/settings.json` with OS-auto-detected commands: `afplay` on macOS (Hero/Glass sounds), `paplay` on Linux (freedesktop complete.oga), `powershell.exe -c [console]::beep` on WSL, `[console]::beep` on Windows native. Set-union with user entries (your existing hooks are preserved). Off by default — personal preference.
+- **`--with-thinking-summaries` / `-WithThinkingSummaries` opt-in flag.** When passed, sets `showThinkingSummaries: true`. Useful for debugging agent quality (otherwise thinking renders as a collapsed stub). Off by default — some users find the thinking output noisy.
+- **`update.sh` / `update.ps1` canonical update entry point.** Thin wrappers that forward to `install.sh --update` / `install.ps1 -Update` (both still work for backward compat). Forward extra args, so `bash update.sh --target codex --no-claude-md` is valid. Promoted to canonical because "update agentpipe" is a discrete operation worth its own entry point.
+
+### Notes
+- Sandbox layer (the `sandbox.enabled` / `autoAllowBashIfSandboxed` config from the settings docs) was deliberately deferred to a future release. Its sub-keys (`filesystem.denyRead`, `network.allowedDomains`, `excludedCommands`) are user-specific (some users have `~/.aws`, some don't; allow-domains depend on stack) — shipping a single default would either be useless (empty lists) or invasive (our guesses clobbering user settings). Will likely arrive as `--with-sandbox` opt-in flag with minimal-neutral base config.
+- Sound-hook / thinking-summaries opt-ins do **not** have a corresponding `--without-` to remove on uninstall. `--uninstall` doesn't auto-strip these settings.json keys (same precedent as `--no-attribution-fix`/`--no-config-defaults` in v0.7.x — we don't track which keys we added). Re-running with the flag again is idempotent (set-union for hooks, scalar overwrite for thinking-summaries).
+
 ## [0.8.0] - 2026-05-03
 
 ### Added

@@ -82,7 +82,10 @@ The skill becomes globally available across all your conversations on that accou
 | Update | `--update` | `-Update` | `git pull --ff-only` then install (one-shot upgrade) |
 | Uninstall | `--uninstall` | `-Uninstall` | Remove installed files (respects `--target`) |
 | No attribution-fix | `--no-attribution-fix` | `-NoAttributionFix` | Skip Co-Authored-By suppression layer (see below) |
-| No config-defaults | `--no-config-defaults` | `-NoConfigDefaults` | Skip $schema URL + secret-file deny-list (see below) |
+| No config-defaults | `--no-config-defaults` | `-NoConfigDefaults` | Skip $schema + autoUpdatesChannel + cleanupPeriodDays + spinnerTipsEnabled + permissions.deny |
+| No CLAUDE.md | `--no-claude-md` | `-NoClaudeMd` | Skip neutral CLAUDE.md baseline (default: install-if-missing) |
+| With sound hooks | `--with-sound-hooks` | `-WithSoundHooks` | Opt-in: Stop + Notification audible cues (OS auto-detect) |
+| With thinking summaries | `--with-thinking-summaries` | `-WithThinkingSummaries` | Opt-in: `showThinkingSummaries=true` |
 | Help | `--help` | `-Help` | Show usage information |
 
 All actions respect `--target`. Examples:
@@ -95,19 +98,40 @@ bash install.sh --diff                      # diff Claude install (default targe
 
 ## Safe Defaults Layer
 
-By default, on `--target claude`, the installer also adds two universal defaults to `~/.claude/settings.json`:
+By default, on `--target claude`, the installer adds these defaults to `~/.claude/settings.json`:
 
-1. **`$schema`** — points at [`json.schemastore.org/claude-code-settings.json`](https://json.schemastore.org/claude-code-settings.json), so VS Code, Cursor, etc. give autocomplete and inline validation when you edit the file.
-2. **`permissions.deny`** — set-union (preserves your existing entries) of the universally-unsafe file-read patterns:
-   - `Read(./.env)`
-   - `Read(./.env.*)`
-   - `Read(./**/secrets/**)`
-   - `Read(./**/*.pem)`
-   - `Read(./**/*.key)`
+1. **`$schema`** — points at [`json.schemastore.org/claude-code-settings.json`](https://json.schemastore.org/claude-code-settings.json) so VS Code, Cursor, etc. give autocomplete and inline validation.
+2. **`autoUpdatesChannel: "stable"`** — official default is `"latest"` (beta channel). The Feb–Mar 2026 adaptive-thinking regression shipped via `latest`. Stable lags ~1 week and skips versions with major regressions.
+3. **`cleanupPeriodDays: 180`** — official default is `30` days, so old session files are deleted at startup. 180 keeps history for users who return to projects after a month or two.
+4. **`spinnerTipsEnabled: false`** — the in-spinner tips are noisy after the first session.
+5. **`permissions.deny`** — set-union (preserves your existing entries) of universally-unsafe patterns:
+   - **Secret files**: `Read(./.env)`, `Read(./.env.*)`, `Read(./**/secrets/**)`, `Read(./**/*.pem)`, `Read(./**/*.key)`
+   - **Destructive Bash**: `Bash(rm -rf /*)`, `Bash(rm -rf ~/*)`, `Bash(rm -rf $HOME/*)`, `Bash(mkfs *)`, `Bash(dd * of=/dev/*)`
 
-The deny list is intentional: these are paths nobody wants Claude reading regardless of stack. We deliberately do **not** ship a `permissions.allow` list — that's stack-specific (a Python user doesn't want `Bash(npm run *)` pre-allowed). Use Claude Code's built-in `fewer-permission-prompts` skill to build an allow-list dynamically from your actual usage.
+The deny list is intentional: these are paths nobody wants Claude reading and commands nobody wants Claude executing, regardless of stack. We deliberately do **not** ship a `permissions.allow` list — that's stack-specific. Use Claude Code's built-in `fewer-permission-prompts` skill to build an allow-list dynamically from your actual usage.
 
 Pass `--no-config-defaults` (Bash) or `-NoConfigDefaults` (PowerShell) to skip this layer. `--uninstall` does **not** auto-remove these keys (preserves user state); edit `settings.json` manually to revert.
+
+## CLAUDE.md Baseline (install-if-missing)
+
+By default, if `~/.claude/CLAUDE.md` does not exist, the installer copies a **neutral** baseline from `scripts/CLAUDE.md.example`. The baseline covers communication, honesty, scope, and workflow rules — explicitly **stack-agnostic**, no language-specific style opinions. If `~/.claude/CLAUDE.md` already exists, it is **never overwritten**.
+
+Pass `--no-claude-md` (Bash) or `-NoClaudeMd` (PowerShell) to skip the baseline copy. The file is also not modified on subsequent installer runs once it exists — agentpipe treats it as user-owned after first install.
+
+## Optional: Sound Hooks (`--with-sound-hooks`)
+
+Opt-in (off by default). When passed, the installer merges `Stop` and `Notification` hooks into `~/.claude/settings.json`. The OS-appropriate command is auto-detected:
+
+- **macOS**: `afplay /System/Library/Sounds/Hero.aiff` (Stop) + `Glass.aiff` (Notification)
+- **Linux**: `paplay /usr/share/sounds/freedesktop/stereo/complete.oga`
+- **WSL**: `powershell.exe -c '[console]::beep(800,200)'`
+- **Windows (PowerShell installer)**: `[console]::beep(880,150)` / `[console]::beep(660,250)`
+
+The merge is set-union — your existing hook entries are preserved.
+
+## Optional: Thinking Summaries (`--with-thinking-summaries`)
+
+Opt-in (off by default). Sets `showThinkingSummaries: true` in `~/.claude/settings.json`. Useful for debugging agent quality — without it, thinking blocks render as collapsed stubs in the interactive UI. Some users find the verbose thinking output noisy; that's why it's opt-in rather than default.
 
 ## Removing Claude Attribution from Commits
 
@@ -142,13 +166,15 @@ git push --force-with-lease
 
 ## Updating
 
-One-shot upgrade (pulls latest from remote, then installs):
+One-shot upgrade — preferred entry point:
 
 ```bash
 cd agentpipe
-bash install.sh --update     # bash on macOS/Linux/WSL/Git Bash
-.\install.ps1 -Update        # PowerShell on Windows
+bash update.sh        # bash on macOS/Linux/WSL/Git Bash
+.\update.ps1          # PowerShell on Windows
 ```
+
+`update.sh` / `update.ps1` are thin wrappers around `install.sh --update` / `install.ps1 -Update` (both still work for backward compat). They forward extra args, so `bash update.sh --target codex --no-claude-md` is valid.
 
 `--update` runs `git pull --ff-only` first; if your working tree has uncommitted changes or the remote has diverged, it stops with a clear error so nothing is clobbered. Equivalent to `git pull && bash install.sh` when both succeed.
 

@@ -159,8 +159,11 @@ Each gate must pass before proceeding. Agents have bounded tool access (reviewer
 - **Edit globals**: modify the installed files directly under the target directory
 - **Fork**: fork this repo, customize, install from your fork
 - **Co-Authored-By suppression**: by default, `--target claude` disables the `Co-Authored-By: Claude` and `🤖 Generated with [Claude Code]` trailers via `~/.claude/settings.json` + a global `commit-msg` hook. Pass `--no-attribution-fix` to skip. See [docs/installation.md](docs/installation.md#removing-claude-attribution-from-commits).
-- **Safe defaults**: also by default, the installer adds `$schema` (for IDE autocomplete) and a `permissions.deny` set-union for unsafe file reads (`.env`, `*.pem`, `*.key`, `secrets/**`) to your settings.json. Pass `--no-config-defaults` to skip. See [docs/installation.md](docs/installation.md#safe-defaults-layer).
+- **Safe defaults**: also by default, the installer adds `$schema`, `autoUpdatesChannel: "stable"` (vs the beta `latest`), `cleanupPeriodDays: 180`, `spinnerTipsEnabled: false`, and a `permissions.deny` set-union for unsafe reads (`.env`, `*.pem`, `*.key`, `secrets/**`) and destructive Bash patterns (`rm -rf /*`, `mkfs *`, `dd * of=/dev/*`). Pass `--no-config-defaults` to skip. See [docs/installation.md](docs/installation.md#safe-defaults-layer).
+- **CLAUDE.md baseline**: install-if-missing. The installer copies a neutral, stack-agnostic baseline from `scripts/CLAUDE.md.example` to `~/.claude/CLAUDE.md` only if no file exists there. Never overwrites. Pass `--no-claude-md` to skip.
+- **Opt-in personal preferences**: `--with-sound-hooks` (Stop/Notification audible cues, OS auto-detect), `--with-thinking-summaries` (`showThinkingSummaries: true` in settings).
 - **Optional shell env vars**: `scripts/agentpipe.env.example` documents reasoning-effort, adaptive-thinking, and telemetry-bundle vars. Not auto-installed — copy what you want into your shell rc. See [docs/installation.md](docs/installation.md#optional-shell-environment-variables).
+- **Update entry point**: `bash update.sh` (or `.\update.ps1`) — pulls latest and re-installs. Same thing as `install.sh --update`, just a clearer entry point.
 
 ## Building Release Archives
 

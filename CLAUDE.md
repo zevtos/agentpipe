@@ -14,8 +14,12 @@ bash install.sh --target codex        # install for Codex CLI (skills only)
 bash install.sh --dry                 # preview what would change (works with --target too)
 bash install.sh --diff                # show repo vs installed differences
 bash install.sh --pull                # copy installed back to repo
-bash install.sh --update              # git pull --ff-only, then install (one-shot upgrade)
+bash install.sh --update              # git pull --ff-only, then install (alias of update.sh)
 bash install.sh --uninstall           # remove installed files (target-scoped)
+bash update.sh                        # canonical update entry point (forwards to install.sh --update)
+bash install.sh --no-claude-md        # skip baseline CLAUDE.md (default: install-if-missing)
+bash install.sh --with-sound-hooks    # opt-in: Stop+Notification sound hooks (OS auto-detect)
+bash install.sh --with-thinking-summaries  # opt-in: showThinkingSummaries=true
 bash scripts/build-skills.sh          # package every skills/<name>/ into dist/<name>.zip
 bash scripts/eval.sh --list           # list local agent eval scenarios (no claude calls)
 bash scripts/eval.sh <agent>          # run agent prompt-quality eval (uses claude -p, ~2 msgs/scenario)
@@ -35,6 +39,9 @@ tests/<agent>/<scenario>/  Agent eval scenarios (input.md + rubric.md). Empty by
 .github/workflows/      release.yml: on tag push, builds skill zips and attaches to GH release
 install.sh              Bash installer (macOS, Linux, WSL, Git Bash)
 install.ps1             PowerShell installer (Windows)
+update.sh / update.ps1  Thin wrappers — forward to install with --update
+scripts/CLAUDE.md.example  Neutral baseline CLAUDE.md (install-if-missing to ~/.claude/)
+scripts/agentpipe.env.example  Curated reference for shell env vars (NOT auto-installed)
 VERSION                 Semver string, read by installers and release workflow
 CHANGELOG.md            Keep a Changelog format
 ```
