@@ -138,6 +138,8 @@ r.save("/tmp/report.docx")
 - `python-docx>=1.1.0`
 - `latex2mathml>=3.77.0`
 
+При первом запуске bootstrap пишет `gost_report.pth` в site-packages venv'а — поэтому в твоём скрипте достаточно `from gost_report import Report, TitleConfig`. **Никаких `sys.path.insert(...)` не нужно.** Если IDE настроен на venv скилла — импорт тоже работает напрямую.
+
 ## License
 
 MIT — see `LICENSE`.
