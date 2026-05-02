@@ -15,6 +15,7 @@
     .\install.ps1 -Update                # git pull --ff-only, then install
     .\install.ps1 -Uninstall             # remove installed files
     .\install.ps1 -NoAttributionFix      # skip Co-Authored-By suppression layer
+    .\install.ps1 -NoConfigDefaults      # skip $schema + secret deny-list
     .\install.ps1 -ShowVersion           # show version
 #>
 param(
@@ -26,6 +27,7 @@ param(
     [switch]$Update,
     [switch]$Uninstall,
     [switch]$NoAttributionFix,
+    [switch]$NoConfigDefaults,
     [switch]$ShowVersion,
     [switch]$Help
 )
@@ -42,6 +44,14 @@ $SkillsSrc = Join-Path $ScriptDir "skills"
 $HookSrc = Join-Path $ScriptDir "scripts/git-hooks/commit-msg"
 $GitTemplateDir = Join-Path $env:USERPROFILE ".git-templates"
 $GitHookDst = Join-Path $GitTemplateDir "hooks/commit-msg"
+$ConfigSchemaUrl = "https://json.schemastore.org/claude-code-settings.json"
+$ConfigDenyList = @(
+    "Read(./.env)"
+    "Read(./.env.*)"
+    "Read(./**/secrets/**)"
+    "Read(./**/*.pem)"
+    "Read(./**/*.key)"
+)
 
 # Resolve destinations from target. Codex skills go to ~/.agents/skills/ (open-agent-skills
 # standard), NOT ~/.codex/skills/. ~/.codex/ holds config and TOML agents.
@@ -80,12 +90,17 @@ function Test-AttributionActive {
     return ($Target -eq "claude" -and -not $NoAttributionFix)
 }
 
+function Test-ConfigDefaultsActive {
+    return ($Target -eq "claude" -and -not $NoConfigDefaults)
+}
+
 function Files-Equal($a, $b) {
     if (-not (Test-Path $a) -or -not (Test-Path $b)) { return $false }
     return (Get-FileHash $a).Hash -eq (Get-FileHash $b).Hash
 }
 
-function Merge-SettingsJson {
+function Read-SettingsJson {
+    # Returns @{Hash=<hashtable>; Ok=$true} or @{Ok=$false} on parse error.
     $settings = Join-Path $Base "settings.json"
     $base = @{}
     if (Test-Path $settings) {
@@ -93,38 +108,51 @@ function Merge-SettingsJson {
             $raw = (Get-Content $settings -Raw -ErrorAction Stop)
             if ($raw.Trim()) {
                 $parsed = $raw | ConvertFrom-Json -ErrorAction Stop
-                # Convert PSCustomObject to hashtable for mutation
                 $parsed.PSObject.Properties | ForEach-Object {
                     $base[$_.Name] = $_.Value
                 }
             }
         } catch {
-            Write-Warn "settings.json has invalid JSON - leaving file untouched"
-            return $false
+            return @{ Ok = $false }
         }
     }
+    return @{ Hash = $base; Ok = $true }
+}
 
-    if ($base.ContainsKey("includeCoAuthoredBy") -and $base["includeCoAuthoredBy"] -eq $false) {
-        Write-Ok "settings/includeCoAuthoredBy already false"
-        return $true
-    }
-
-    $base["includeCoAuthoredBy"] = $false
+function Write-SettingsJson($base) {
+    $settings = Join-Path $Base "settings.json"
     New-Item -ItemType Directory -Path $Base -Force | Out-Null
-
-    # Atomic write: temp + rename
     $tmp = "$settings.agentpipe.tmp"
     try {
         ($base | ConvertTo-Json -Depth 32) | Set-Content -Path $tmp -Encoding UTF8 -NoNewline
         Add-Content -Path $tmp -Value "" -Encoding UTF8
         Move-Item -Path $tmp -Destination $settings -Force
-        Write-Ok "settings/includeCoAuthoredBy=false"
         return $true
     } catch {
         if (Test-Path $tmp) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
         Write-Warn "settings.json write failed: $_"
         return $false
     }
+}
+
+function Merge-SettingsJson {
+    # Writes the modern attribution key (commit/pr=hidden) plus legacy
+    # includeCoAuthoredBy=false for backward compat with older Claude Code.
+    $r = Read-SettingsJson
+    if (-not $r.Ok) {
+        Write-Warn "settings.json has invalid JSON - leaving file untouched"
+        return $false
+    }
+    $base = $r.Hash
+
+    $base["attribution"] = @{ commit = ""; pr = "" }
+    $base["includeCoAuthoredBy"] = $false
+
+    if (Write-SettingsJson $base) {
+        Write-Ok "settings/attribution=hidden + includeCoAuthoredBy=false"
+        return $true
+    }
+    return $false
 }
 
 function Do-AttributionFix {
@@ -228,6 +256,71 @@ function Do-AttributionDiff {
     return $true
 }
 
+# --- Config-defaults layer (claude target only) ---
+# $schema URL for IDE autocomplete + permissions.deny set-union for universal
+# secret-file paths. User entries are preserved (set-union, not overwrite).
+
+function Do-ConfigDefaults {
+    if (-not (Test-ConfigDefaultsActive)) { return }
+
+    $r = Read-SettingsJson
+    if (-not $r.Ok) {
+        Write-Warn "settings.json has invalid JSON - skipping config-defaults"
+        return
+    }
+    $base = $r.Hash
+
+    # $schema (overwrite scalar)
+    $base["`$schema"] = $ConfigSchemaUrl
+
+    # permissions.deny set-union with user entries
+    $perms = @{}
+    if ($base.ContainsKey("permissions")) {
+        $base["permissions"].PSObject.Properties | ForEach-Object {
+            $perms[$_.Name] = $_.Value
+        }
+    }
+    $existingDeny = @()
+    if ($perms.ContainsKey("deny") -and $perms["deny"]) {
+        $existingDeny = @($perms["deny"])
+    }
+    $unionDeny = [System.Collections.Generic.List[string]]::new()
+    foreach ($item in $ConfigDenyList) {
+        if (-not $unionDeny.Contains($item)) { $unionDeny.Add($item) }
+    }
+    foreach ($item in $existingDeny) {
+        if (-not $unionDeny.Contains($item)) { $unionDeny.Add($item) }
+    }
+    $perms["deny"] = $unionDeny.ToArray()
+    $base["permissions"] = $perms
+
+    if (Write-SettingsJson $base) {
+        Write-Ok "settings/`$schema + permissions.deny (secrets) merged"
+    }
+}
+
+function Do-ConfigDefaultsUnfix {
+    if (-not (Test-ConfigDefaultsActive)) { return }
+    Write-Info "note: `$schema + permissions.deny left as-is - edit settings.json to revert"
+}
+
+function Do-ConfigDefaultsDry {
+    if (-not (Test-ConfigDefaultsActive)) { return }
+    Write-Host "Config-defaults:"
+    $settings = Join-Path $Base "settings.json"
+    if ((Test-Path $settings) -and (Select-String -Path $settings -SimpleMatch -Pattern $ConfigSchemaUrl -Quiet)) {
+        Write-Host "  = settings/`$schema (already set)"
+    } else {
+        Write-Info "+ settings/`$schema=$ConfigSchemaUrl"
+    }
+    if ((Test-Path $settings) -and (Select-String -Path $settings -SimpleMatch -Pattern 'Read(./**/*.key)' -Quiet)) {
+        Write-Host "  = settings/permissions.deny secrets (already set)"
+    } else {
+        Write-Info "+ settings/permissions.deny += [.env, *.pem, *.key, secrets/**]"
+    }
+    Write-Host ""
+}
+
 function Do-Install {
     Write-Info "Installing agentpipe v$($Script:Version) (target: $Target) to: $Base"
     $count = 0
@@ -268,6 +361,11 @@ function Do-Install {
     if (Test-AttributionActive) {
         Write-Host ""
         Do-AttributionFix
+    }
+
+    if (Test-ConfigDefaultsActive) {
+        Write-Host ""
+        Do-ConfigDefaults
     }
 
     Write-Host ""
@@ -323,6 +421,11 @@ function Do-Uninstall {
     if (Test-AttributionActive) {
         Write-Host ""
         Do-AttributionUnfix
+    }
+
+    if (Test-ConfigDefaultsActive) {
+        Write-Host ""
+        Do-ConfigDefaultsUnfix
     }
 
     Write-Host ""
@@ -394,6 +497,7 @@ function Do-Dry {
     }
 
     Do-AttributionDry
+    Do-ConfigDefaultsDry
     Show-CodexSkipNotice
 }
 
