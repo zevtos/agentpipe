@@ -35,10 +35,12 @@ from pathlib import Path
 
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
+SCRIPTS_DIR = Path(__file__).resolve().parent
 VENV_DIR = SKILL_DIR / ".venv"
-REQ_FILE = Path(__file__).resolve().parent / "requirements.txt"
+REQ_FILE = SCRIPTS_DIR / "requirements.txt"
 HASH_FILE = VENV_DIR / ".installed_hash"
 LOCK_FILE = SKILL_DIR / ".venv.lock"
+PTH_NAME = "gost_report.pth"
 
 
 def log(msg: str) -> None:
@@ -83,6 +85,54 @@ def create_venv() -> None:
         return
     log(f"Creating venv via python -m venv at {VENV_DIR}")
     subprocess.run([sys.executable, "-m", "venv", str(VENV_DIR)], check=True)
+
+
+def site_packages_dir() -> Path | None:
+    """Спрашиваем у самого venv-питона, где у него purelib. Не хардкодим
+    `lib/pythonX.Y/site-packages` — Windows, conda и future-Python отличаются.
+    Возвращаем None, если запрос упал (тогда вызывающий должен залогировать
+    и продолжить — .pth не критичен, есть PYTHONPATH-страховка)."""
+    py = venv_python()
+    if not py.exists():
+        return None
+    try:
+        out = subprocess.run(
+            [str(py), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+    except (subprocess.CalledProcessError, OSError):
+        return None
+    if not out:
+        return None
+    return Path(out)
+
+
+def write_pth() -> None:
+    """Пишем <venv>/<purelib>/gost_report.pth с абсолютным путём к scripts/.
+    Делает gost_report импортируемым любым процессом, использующим venv-питон,
+    без правки sys.path в user-скрипте. Если упадёт — не критично, есть
+    PYTHONPATH-страховка в main() для запусков через ensure_env.py."""
+    sp = site_packages_dir()
+    if sp is None:
+        log("Could not resolve venv site-packages; skipping .pth write")
+        return
+    try:
+        sp.mkdir(parents=True, exist_ok=True)
+        pth = sp / PTH_NAME
+        content = str(SCRIPTS_DIR.resolve()) + "\n"
+        if pth.exists() and pth.read_text(encoding="utf-8") == content:
+            return
+        pth.write_text(content, encoding="utf-8")
+        log(f"Wrote {pth.name} → {SCRIPTS_DIR}")
+    except OSError as e:
+        log(f"Failed to write {PTH_NAME}: {e}")
+
+
+def pth_exists() -> bool:
+    sp = site_packages_dir()
+    if sp is None:
+        return False
+    return (sp / PTH_NAME).exists()
 
 
 def install_deps() -> None:
@@ -147,16 +197,27 @@ def _release_lock(fh) -> None:
 
 
 def bootstrap() -> None:
+    # Self-heal: даже если deps in sync, .pth мог быть удалён руками — переписываем.
     if not needs_update():
+        if not pth_exists():
+            lock = _acquire_lock()
+            try:
+                if not pth_exists():
+                    write_pth()
+            finally:
+                _release_lock(lock)
         return
     lock = _acquire_lock()
     try:
         if not needs_update():
+            if not pth_exists():
+                write_pth()
             return
         VENV_DIR.parent.mkdir(parents=True, exist_ok=True)
         if not venv_python().exists():
             create_venv()
         install_deps()
+        write_pth()
         HASH_FILE.write_text(req_hash())
         log("Environment ready")
     finally:
@@ -181,6 +242,17 @@ def main() -> int:
     if not args:
         print(py)
         return 0
+
+    # Belt-and-suspenders: даже если .pth почему-то не сработал (старый venv,
+    # пользователь убил файл, сторонний инструмент вычистил site-packages) —
+    # PYTHONPATH гарантирует import gost_report для запусков через ensure_env.py.
+    # Утечёт в подпроцессы user-скрипта; имя gost_report достаточно уникально,
+    # чтобы это не было проблемой.
+    scripts_dir = str(SCRIPTS_DIR.resolve())
+    existing = os.environ.get("PYTHONPATH", "")
+    os.environ["PYTHONPATH"] = (
+        scripts_dir + os.pathsep + existing if existing else scripts_dir
+    )
 
     if os.name == "nt":
         rc = subprocess.run([py, *args]).returncode

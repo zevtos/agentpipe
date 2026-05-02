@@ -7,6 +7,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-05-02
+
+### Fixed
+- **`gost-report`: consumer scripts no longer need `sys.path.insert(...)` boilerplate before `from gost_report import ...`.** Previously every agent-generated script (e.g. lab `build_report.py`) had to start with `sys.path.insert(0, "/Users/.../skills/gost-report/scripts")` to make the import resolve, baking a hardcoded absolute path into every output and burning tokens on identical preamble each regeneration. `scripts/ensure_env.py` now writes a `gost_report.pth` file into the venv's `site-packages` during bootstrap (purelib path queried from the venv's own `sysconfig`, not hardcoded — works on macOS, Linux, Windows, conda). The `.pth` is rewritten if missing on every `main()` call (self-heal for venvs predating this feature or for users who manually deleted it). As belt-and-suspenders, `ensure_env.py` also prepends `<skill_dir>/scripts/` to `PYTHONPATH` before `os.execv` / Windows `subprocess.run` of the user script. Result: agents/users write `from gost_report import Report, TitleConfig` directly. SKILL.md Dependencies section documents the mechanism in one paragraph.
+
 ## [0.6.3] - 2026-05-02
 
 ### Fixed
