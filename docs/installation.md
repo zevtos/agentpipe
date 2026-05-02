@@ -82,6 +82,7 @@ The skill becomes globally available across all your conversations on that accou
 | Update | `--update` | `-Update` | `git pull --ff-only` then install (one-shot upgrade) |
 | Uninstall | `--uninstall` | `-Uninstall` | Remove installed files (respects `--target`) |
 | No attribution-fix | `--no-attribution-fix` | `-NoAttributionFix` | Skip Co-Authored-By suppression layer (see below) |
+| No config-defaults | `--no-config-defaults` | `-NoConfigDefaults` | Skip $schema URL + secret-file deny-list (see below) |
 | Help | `--help` | `-Help` | Show usage information |
 
 All actions respect `--target`. Examples:
@@ -92,12 +93,28 @@ bash install.sh --target codex --uninstall  # remove only Codex skills
 bash install.sh --diff                      # diff Claude install (default target)
 ```
 
+## Safe Defaults Layer
+
+By default, on `--target claude`, the installer also adds two universal defaults to `~/.claude/settings.json`:
+
+1. **`$schema`** — points at [`json.schemastore.org/claude-code-settings.json`](https://json.schemastore.org/claude-code-settings.json), so VS Code, Cursor, etc. give autocomplete and inline validation when you edit the file.
+2. **`permissions.deny`** — set-union (preserves your existing entries) of the universally-unsafe file-read patterns:
+   - `Read(./.env)`
+   - `Read(./.env.*)`
+   - `Read(./**/secrets/**)`
+   - `Read(./**/*.pem)`
+   - `Read(./**/*.key)`
+
+The deny list is intentional: these are paths nobody wants Claude reading regardless of stack. We deliberately do **not** ship a `permissions.allow` list — that's stack-specific (a Python user doesn't want `Bash(npm run *)` pre-allowed). Use Claude Code's built-in `fewer-permission-prompts` skill to build an allow-list dynamically from your actual usage.
+
+Pass `--no-config-defaults` (Bash) or `-NoConfigDefaults` (PowerShell) to skip this layer. `--uninstall` does **not** auto-remove these keys (preserves user state); edit `settings.json` manually to revert.
+
 ## Removing Claude Attribution from Commits
 
 By default, on `--target claude`, the installer suppresses the `Co-Authored-By: Claude <noreply@anthropic.com>` and `🤖 Generated with [Claude Code]` trailers Claude Code adds to commit messages. Two layers, both idempotent:
 
-1. **Settings flag.** Sets `includeCoAuthoredBy: false` in `~/.claude/settings.json` (the official Claude Code switch). Existing keys in `settings.json` are preserved — the installer deep-merges, never overwrites.
-2. **Global git `commit-msg` hook.** Copies `scripts/git-hooks/commit-msg` to `~/.git-templates/hooks/commit-msg` and points `git config --global init.templateDir` at `~/.git-templates`. The hook strips the two trailing lines and any resulting blank lines from every commit message, so anything that slips past the settings flag still gets cleaned up.
+1. **Settings keys.** Writes the modern `attribution: { commit: "", pr: "" }` (the official, current way to hide attribution) **and** the legacy `includeCoAuthoredBy: false` (kept for backward compat with older Claude Code that doesn't read `attribution`). Both keys are deep-merged into `~/.claude/settings.json` — existing user keys are preserved.
+2. **Global git `commit-msg` hook.** Copies `scripts/git-hooks/commit-msg` to `~/.git-templates/hooks/commit-msg` and points `git config --global init.templateDir` at `~/.git-templates`. The hook strips both trailers (including model-named variants like `Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>`) and any resulting blank lines from every commit message, so anything that slips past the settings keys still gets cleaned up.
 
 **Opt out:** pass `--no-attribution-fix` (Bash) or `-NoAttributionFix` (PowerShell). The flag has no effect on `--target codex`.
 
@@ -154,6 +171,39 @@ After installing, open Claude Code in any project and try:
 ```
 
 If you see the onboarding pipeline start, installation was successful.
+
+## After Install: Terminal & Keybindings
+
+If your terminal emulator needs Shift+Enter to insert a newline (most do — VS Code, Cursor, Windsurf, Alacritty, Zed), run **`/terminal-setup`** once inside a Claude Code session in that terminal. Native-supported terminals (iTerm2, WezTerm, Ghostty, Kitty, Warp, Apple Terminal) don't need it. Run it in the host terminal — not inside `tmux` / `screen`.
+
+Newline fallbacks that work in any terminal: **`Ctrl+J`** or **`\` + Enter`**.
+
+Useful keybindings:
+
+| Key | Action |
+|---|---|
+| `Ctrl+C` | Cancel the current generation/input |
+| `Ctrl+D` | Exit the session |
+| `Esc` | Interrupt mid-response (community-known; `Ctrl+C` is the documented stop) |
+| `Esc` `Esc` | Open the rewind menu — three modes: conversation, code, both |
+| `Ctrl+V` | Paste an image from clipboard (`Cmd+V` in iTerm2, `Alt+V` on Windows) |
+| `Shift+Tab` | Cycle permission modes: default → acceptEdits → plan |
+| `Ctrl+T` | Show task list |
+| `Ctrl+O` | Toggle verbose/transcript view (helps debug agent quality) |
+
+Reference: [Interactive mode docs](https://code.claude.com/docs/en/interactive-mode), [terminal config docs](https://code.claude.com/docs/en/terminal-config).
+
+## Optional: Shell Environment Variables
+
+agentpipe ships `scripts/agentpipe.env.example` with a curated set of Claude Code env vars (reasoning effort, adaptive-thinking override, telemetry bundle) and explanations of trade-offs. **Not auto-installed and not auto-sourced** — shell rc is the user's territory; pick what fits.
+
+To use: copy what you want into `~/.zshrc` / `~/.bashrc`, or copy the whole file to `~/.claude/agentpipe.env` and add this line to your rc:
+
+```bash
+[ -f ~/.claude/agentpipe.env ] && source ~/.claude/agentpipe.env
+```
+
+Caveat: `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING` is a no-op on Opus 4.7 (always adaptive at the API level). `CLAUDE_CODE_EFFORT_LEVEL=max` removes the per-turn token cap — quality up, paid-plan quota burns faster.
 
 ## Customization
 

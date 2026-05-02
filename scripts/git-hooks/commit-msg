@@ -16,7 +16,7 @@ msg_file="$1"
 
 sed -i.bak -E \
     -e '/^[[:space:]]*🤖 Generated with \[Claude Code\]/d' \
-    -e '/^[[:space:]]*Co-Authored-By: Claude <noreply@anthropic\.com>/d' \
+    -e '/^[[:space:]]*Co-Authored-By: Claude[^<]*<noreply@anthropic\.com>/d' \
     "$msg_file"
 
 # Trim trailing blank lines (POSIX BRE; works on BSD and GNU sed).

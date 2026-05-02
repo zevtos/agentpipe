@@ -12,6 +12,7 @@ set -euo pipefail
 #   bash install.sh --pull                # copy installed back to repo
 #   bash install.sh --uninstall           # remove installed files
 #   bash install.sh --no-attribution-fix  # skip Co-Authored-By suppression layer
+#   bash install.sh --no-config-defaults  # skip $schema + secret deny-list
 #   bash install.sh --version             # show version
 #
 # Targets:
@@ -86,6 +87,7 @@ info() { echo -e "${CYAN}→${NC} $*"; }
 TARGET="claude"
 ACTION="install"
 ATTRIBUTION_FIX=1
+CONFIG_DEFAULTS=1
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -97,6 +99,7 @@ while [[ $# -gt 0 ]]; do
         --update)    ACTION="update"; shift ;;
         --uninstall) ACTION="uninstall"; shift ;;
         --no-attribution-fix) ATTRIBUTION_FIX=0; shift ;;
+        --no-config-defaults) CONFIG_DEFAULTS=0; shift ;;
         --version|-v)
             echo "agentpipe v$VERSION"
             exit 0
@@ -124,7 +127,10 @@ Actions:
   --version     Show version
 
 Options:
-  --no-attribution-fix  Skip Co-Authored-By suppression (settings flag + git hook).
+  --no-attribution-fix  Skip Co-Authored-By suppression (settings keys + git hook).
+                        On by default for --target claude. Always off for codex.
+  --no-config-defaults  Skip safe-defaults layer ($schema URL for IDE autocomplete
+                        + permissions.deny for .env / *.pem / *.key / secrets/**).
                         On by default for --target claude. Always off for codex.
 EOF
             exit 0
@@ -170,8 +176,12 @@ codex_skip_notice() {
 # --- Attribution-fix layer (claude target only) ---
 #
 # Two independent guards against Claude Code commit trailers:
-#  1. settings.json  → includeCoAuthoredBy=false  (official switch)
-#  2. ~/.git-templates/hooks/commit-msg  + init.templateDir  (belt-and-suspenders)
+#  1. settings.json  → attribution.commit/pr=""  (modern key, takes precedence)
+#                    + includeCoAuthoredBy=false (deprecated key, kept for backward
+#                      compat with older Claude Code that doesn't read attribution)
+#  2. ~/.git-templates/hooks/commit-msg  + init.templateDir  (belt-and-suspenders;
+#     hook regex matches Co-Authored-By: Claude<anything><noreply@anthropic.com>
+#     to catch model-named variants like "Claude Sonnet 4.6")
 # Codex target skips both: it doesn't run Claude Code.
 
 attribution_active() {
@@ -181,11 +191,12 @@ attribution_active() {
 do_attribution_fix() {
     attribution_active || return 0
 
-    # 1. settings.json
+    # 1. settings.json — write both keys: modern (attribution) + legacy
     local settings="$BASE/settings.json"
+    local attribution_payload='{"attribution": {"commit": "", "pr": ""}, "includeCoAuthoredBy": false}'
     if command -v python3 >/dev/null 2>&1; then
-        if python3 "$JSON_MERGE" "$settings" '{"includeCoAuthoredBy": false}' 2>/dev/null; then
-            log "settings/includeCoAuthoredBy=false"
+        if python3 "$JSON_MERGE" "$settings" "$attribution_payload" 2>/dev/null; then
+            log "settings/attribution=hidden (commit+pr) and includeCoAuthoredBy=false"
         else
             warn "settings.json merge failed — leaving file untouched"
         fi
@@ -243,17 +254,18 @@ do_attribution_unfix() {
         log "unset git/init.templateDir"
     fi
 
-    info "note: settings.json/includeCoAuthoredBy left as-is — edit manually to revert"
+    info "note: settings.json/attribution + includeCoAuthoredBy left as-is — edit manually to revert"
 }
 
 do_attribution_dry() {
     attribution_active || return 0
     echo "Attribution-fix:"
     local settings="$BASE/settings.json"
-    if [[ -f "$settings" ]] && grep -q '"includeCoAuthoredBy"[[:space:]]*:[[:space:]]*false' "$settings"; then
-        echo "  = settings/includeCoAuthoredBy=false (already set)"
+    # Check the modern key (attribution.commit="") as the source of truth.
+    if [[ -f "$settings" ]] && python3 -c "import json,sys; d=json.load(open('$settings')); sys.exit(0 if d.get('attribution',{}).get('commit')=='' else 1)" 2>/dev/null; then
+        echo "  = settings/attribution=hidden (already set)"
     else
-        info "  + settings/includeCoAuthoredBy=false"
+        info "  + settings/attribution=hidden + includeCoAuthoredBy=false"
     fi
     if [[ -f "$GIT_HOOK_DST" ]] && cmp -s "$HOOK_SRC" "$GIT_HOOK_DST"; then
         echo "  = git/commit-msg (identical)"
@@ -289,6 +301,63 @@ do_attribution_diff() {
         return 1
     fi
     return 0
+}
+
+# --- Config-defaults layer (claude target only) ---
+#
+# Two universal defaults for ~/.claude/settings.json:
+#  1. $schema URL — IDE autocomplete + validation in VS Code, Cursor, etc.
+#  2. permissions.deny — universally-unsafe file reads (.env, *.pem, *.key,
+#     secrets/**). User's existing entries are preserved (set-union via
+#     json-merge.py --list-union). Allow-list is intentionally NOT set: too
+#     stack-specific to ship as a default.
+# Codex target skips this: settings.json is Claude Code only.
+
+config_defaults_active() {
+    [[ "$TARGET" == "claude" && "$CONFIG_DEFAULTS" -eq 1 ]]
+}
+
+CONFIG_SCHEMA_URL='https://json.schemastore.org/claude-code-settings.json'
+CONFIG_DENY_LIST='["Read(./.env)","Read(./.env.*)","Read(./**/secrets/**)","Read(./**/*.pem)","Read(./**/*.key)"]'
+
+do_config_defaults() {
+    config_defaults_active || return 0
+
+    local settings="$BASE/settings.json"
+    if ! command -v python3 >/dev/null 2>&1; then
+        warn "python3 not found — skipping config-defaults"
+        return 0
+    fi
+
+    local payload
+    payload=$(printf '{"$schema": "%s", "permissions": {"deny": %s}}' "$CONFIG_SCHEMA_URL" "$CONFIG_DENY_LIST")
+    if python3 "$JSON_MERGE" --list-union permissions.deny "$settings" "$payload" 2>/dev/null; then
+        log "settings/\$schema + permissions.deny (secrets) merged"
+    else
+        warn "settings.json config-defaults merge failed — leaving file untouched"
+    fi
+}
+
+do_config_defaults_unfix() {
+    config_defaults_active || return 0
+    info "note: \$schema + permissions.deny left as-is — edit settings.json to revert"
+}
+
+do_config_defaults_dry() {
+    config_defaults_active || return 0
+    echo "Config-defaults:"
+    local settings="$BASE/settings.json"
+    if [[ -f "$settings" ]] && grep -Fq "$CONFIG_SCHEMA_URL" "$settings"; then
+        echo "  = settings/\$schema (already set)"
+    else
+        info "  + settings/\$schema=$CONFIG_SCHEMA_URL"
+    fi
+    if [[ -f "$settings" ]] && grep -Fq 'Read(./**/*.key)' "$settings"; then
+        echo "  = settings/permissions.deny secrets (already set)"
+    else
+        info "  + settings/permissions.deny += [.env, *.pem, *.key, secrets/**]"
+    fi
+    echo ""
 }
 
 # --- Actions ---
@@ -341,6 +410,11 @@ do_install() {
     if attribution_active; then
         echo ""
         do_attribution_fix
+    fi
+
+    if config_defaults_active; then
+        echo ""
+        do_config_defaults
     fi
 
     echo ""
@@ -409,6 +483,11 @@ do_uninstall() {
         do_attribution_unfix
     fi
 
+    if config_defaults_active; then
+        echo ""
+        do_config_defaults_unfix
+    fi
+
     echo ""
     info "Removed $count items from $BASE"
 }
@@ -475,6 +554,7 @@ do_dry() {
     fi
 
     do_attribution_dry
+    do_config_defaults_dry
     codex_skip_notice
 }
 
