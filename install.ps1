@@ -4,7 +4,7 @@
     agentpipe — Install Script (Windows PowerShell)
 .DESCRIPTION
     Copies agents, commands, and skills from this repo to ~/.claude/ (Claude Code, default)
-    or ~/.agents/skills/ (Codex CLI, with -Target codex; agents and commands are skipped
+    or ~/.agents/skills/ plus ~/.codex/skills/ (Codex CLI, with -Target codex; agents and commands are skipped
     because Codex agents use a different TOML format and Codex CLI has no custom slash commands).
 .EXAMPLE
     .\install.ps1                          # install for Claude Code (default)
@@ -78,7 +78,8 @@ $ConfigDenyList = @(
 )
 
 # Resolve destinations from target. Codex skills go to ~/.agents/skills/ (open-agent-skills
-# standard), NOT ~/.codex/skills/. ~/.codex/ holds config and TOML agents.
+# standard) and ~/.codex/skills/ (path loaded by current Codex sessions).
+$SkillsExtraDst = $null
 switch ($Target) {
     "claude" {
         $Base = Join-Path $env:USERPROFILE ".claude"
@@ -88,9 +89,11 @@ switch ($Target) {
     }
     "codex" {
         $Base = Join-Path $env:USERPROFILE ".agents"
+        $CodexBase = Join-Path $env:USERPROFILE ".codex"
         $AgentsDst   = $null
         $CommandsDst = $null
         $SkillsDst   = Join-Path $Base "skills"
+        $SkillsExtraDst = Join-Path $CodexBase "skills"
     }
 }
 
@@ -119,6 +122,7 @@ function Show-CodexSkipNotice {
     if ($Target -eq "codex") {
         Write-Warn "Codex CLI has no custom slash commands - skipped commands/"
         Write-Warn "Codex agents use a different TOML format - skipped agents/. See README for details."
+        Write-Info "Codex skills installed to both ~/.agents/skills/ and ~/.codex/skills/ for compatibility."
     }
 }
 
@@ -748,6 +752,9 @@ function Do-Install {
         Write-Info "Installing agentpipe v$($Script:Version) (target: $Target, model-profile: $ModelProfile) to: $Base"
     } else {
         Write-Info "Installing agentpipe v$($Script:Version) (target: $Target) to: $Base"
+        if ($SkillsExtraDst) {
+            Write-Info "Additional Codex skills path: $SkillsExtraDst"
+        }
     }
     $count = 0
 
@@ -769,18 +776,21 @@ function Do-Install {
         }
     }
 
-    if ($SkillsDst -and (Test-Path $SkillsSrc)) {
-        New-Item -ItemType Directory -Path $SkillsDst -Force | Out-Null
-        Get-ChildItem $SkillsSrc -Directory | ForEach-Object {
-            $dst = Join-Path $SkillsDst $_.Name
-            if (Test-Path $dst) { Remove-Item $dst -Recurse -Force }
-            Copy-Item $_.FullName -Destination $dst -Recurse -Force
-            # Скиллы могут держать свой venv в .venv/ (создаётся
-            # bootstrap-скриптом). Не тащим dev venv в системную установку.
-            Remove-Item -Path (Join-Path $dst ".venv") -Recurse -Force -ErrorAction SilentlyContinue
-            Remove-Item -Path (Join-Path $dst ".venv.lock") -Force -ErrorAction SilentlyContinue
-            Write-Ok "skills/$($_.Name)/"
-            $count++
+    if (Test-Path $SkillsSrc) {
+        foreach ($skillsDst in @($SkillsDst, $SkillsExtraDst)) {
+            if (-not $skillsDst) { continue }
+            New-Item -ItemType Directory -Path $skillsDst -Force | Out-Null
+            Get-ChildItem $SkillsSrc -Directory | ForEach-Object {
+                $dst = Join-Path $skillsDst $_.Name
+                if (Test-Path $dst) { Remove-Item $dst -Recurse -Force }
+                Copy-Item $_.FullName -Destination $dst -Recurse -Force
+                # Скиллы могут держать свой venv в .venv/ (создаётся
+                # bootstrap-скриптом). Не тащим dev venv в системную установку.
+                Remove-Item -Path (Join-Path $dst ".venv") -Recurse -Force -ErrorAction SilentlyContinue
+                Remove-Item -Path (Join-Path $dst ".venv.lock") -Force -ErrorAction SilentlyContinue
+                Write-Ok "skills/$($_.Name)/ -> $dst"
+                $count++
+            }
         }
     }
 
@@ -861,18 +871,21 @@ function Do-Uninstall {
         }
     }
 
-    if ($SkillsDst -and (Test-Path $SkillsSrc)) {
-        Get-ChildItem $SkillsSrc -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-            $dst = Join-Path $SkillsDst $_.Name
-            if (Test-Path $dst) {
-                Remove-Item $dst -Recurse -Force
-                Write-Ok "removed skills/$($_.Name)/"
-                $count++
+    if (Test-Path $SkillsSrc) {
+        foreach ($skillsDst in @($SkillsDst, $SkillsExtraDst)) {
+            if (-not $skillsDst) { continue }
+            Get-ChildItem $SkillsSrc -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                $dst = Join-Path $skillsDst $_.Name
+                if (Test-Path $dst) {
+                    Remove-Item $dst -Recurse -Force
+                    Write-Ok "removed skills/$($_.Name)/ from $skillsDst"
+                    $count++
+                }
             }
         }
     }
 
-    foreach ($d in @($AgentsDst, $CommandsDst, $SkillsDst)) {
+    foreach ($d in @($AgentsDst, $CommandsDst, $SkillsDst, $SkillsExtraDst)) {
         if ($d -and (Test-Path $d) -and (@(Get-ChildItem $d).Count -eq 0)) {
             Remove-Item $d
             Write-Ok "removed $((Split-Path $d -Leaf))/"
@@ -941,26 +954,29 @@ function Do-Dry {
         Write-Host ""
     }
 
-    if ($SkillsDst -and (Test-Path $SkillsSrc)) {
-        Write-Host "Skills:"
-        Get-ChildItem $SkillsSrc -Directory | ForEach-Object {
-            $dst = Join-Path $SkillsDst $_.Name
-            if (Test-Path $dst) {
-                # Hash-based folder comparison: concatenate file hashes
-                $srcFiles = Get-ChildItem $_.FullName -Recurse -File | Sort-Object FullName
-                $dstFiles = Get-ChildItem $dst -Recurse -File | Sort-Object FullName
-                $srcSig = ($srcFiles | ForEach-Object { (Get-FileHash $_.FullName).Hash }) -join ""
-                $dstSig = ($dstFiles | ForEach-Object { (Get-FileHash $_.FullName).Hash }) -join ""
-                if ($srcSig -eq $dstSig -and $srcFiles.Count -eq $dstFiles.Count) {
-                    Write-Host "  = $($_.Name)/ (identical)"
+    if (Test-Path $SkillsSrc) {
+        foreach ($skillsDst in @($SkillsDst, $SkillsExtraDst)) {
+            if (-not $skillsDst) { continue }
+            Write-Host "Skills ($skillsDst):"
+            Get-ChildItem $SkillsSrc -Directory | ForEach-Object {
+                $dst = Join-Path $skillsDst $_.Name
+                if (Test-Path $dst) {
+                    # Hash-based folder comparison: concatenate file hashes
+                    $srcFiles = Get-ChildItem $_.FullName -Recurse -File | Sort-Object FullName
+                    $dstFiles = Get-ChildItem $dst -Recurse -File | Sort-Object FullName
+                    $srcSig = ($srcFiles | ForEach-Object { (Get-FileHash $_.FullName).Hash }) -join ""
+                    $dstSig = ($dstFiles | ForEach-Object { (Get-FileHash $_.FullName).Hash }) -join ""
+                    if ($srcSig -eq $dstSig -and $srcFiles.Count -eq $dstFiles.Count) {
+                        Write-Host "  = $($_.Name)/ (identical)"
+                    } else {
+                        Write-Warn "~ $($_.Name)/ (CHANGED)"
+                    }
                 } else {
-                    Write-Warn "~ $($_.Name)/ (CHANGED)"
+                    Write-Info "+ $($_.Name)/ (NEW)"
                 }
-            } else {
-                Write-Info "+ $($_.Name)/ (NEW)"
             }
+            Write-Host ""
         }
-        Write-Host ""
     }
 
     Do-AttributionDry
@@ -1010,21 +1026,24 @@ function Do-Diff {
         }
     }
 
-    if ($SkillsDst -and (Test-Path $SkillsSrc)) {
-        Get-ChildItem $SkillsSrc -Directory | ForEach-Object {
-            $dst = Join-Path $SkillsDst $_.Name
-            if (Test-Path $dst) {
-                $srcFiles = Get-ChildItem $_.FullName -Recurse -File | Sort-Object FullName
-                $dstFiles = Get-ChildItem $dst -Recurse -File | Sort-Object FullName
-                $srcSig = ($srcFiles | ForEach-Object { (Get-FileHash $_.FullName).Hash }) -join ""
-                $dstSig = ($dstFiles | ForEach-Object { (Get-FileHash $_.FullName).Hash }) -join ""
-                if ($srcSig -ne $dstSig -or $srcFiles.Count -ne $dstFiles.Count) {
-                    Write-Warn "skills/$($_.Name)/ differs"
+    if (Test-Path $SkillsSrc) {
+        foreach ($skillsDst in @($SkillsDst, $SkillsExtraDst)) {
+            if (-not $skillsDst) { continue }
+            Get-ChildItem $SkillsSrc -Directory | ForEach-Object {
+                $dst = Join-Path $skillsDst $_.Name
+                if (Test-Path $dst) {
+                    $srcFiles = Get-ChildItem $_.FullName -Recurse -File | Sort-Object FullName
+                    $dstFiles = Get-ChildItem $dst -Recurse -File | Sort-Object FullName
+                    $srcSig = ($srcFiles | ForEach-Object { (Get-FileHash $_.FullName).Hash }) -join ""
+                    $dstSig = ($dstFiles | ForEach-Object { (Get-FileHash $_.FullName).Hash }) -join ""
+                    if ($srcSig -ne $dstSig -or $srcFiles.Count -ne $dstFiles.Count) {
+                        Write-Warn "skills/$($_.Name)/ differs at $skillsDst"
+                        $hasDiff = $true
+                    }
+                } else {
+                    Write-Warn "skills/$($_.Name)/ - not installed at $skillsDst"
                     $hasDiff = $true
                 }
-            } else {
-                Write-Warn "skills/$($_.Name)/ - not installed"
-                $hasDiff = $true
             }
         }
     }
@@ -1108,16 +1127,21 @@ function Do-Pull {
         }
     }
 
-    if ($SkillsDst -and (Test-Path $SkillsSrc)) {
+    $pullSkillsDst = $SkillsDst
+    if ((-not (Test-Path $pullSkillsDst)) -and $SkillsExtraDst) {
+        $pullSkillsDst = $SkillsExtraDst
+    }
+
+    if ($pullSkillsDst -and (Test-Path $pullSkillsDst) -and (Test-Path $SkillsSrc)) {
         Get-ChildItem $SkillsSrc -Directory | ForEach-Object {
-            $dst = Join-Path $SkillsDst $_.Name
+            $dst = Join-Path $pullSkillsDst $_.Name
             if (Test-Path $dst) {
                 $repoCopy = Join-Path $SkillsSrc $_.Name
                 if (Test-Path $repoCopy) { Remove-Item $repoCopy -Recurse -Force }
                 Copy-Item $dst -Destination $repoCopy -Recurse -Force
                 Remove-Item -Path (Join-Path $repoCopy ".venv") -Recurse -Force -ErrorAction SilentlyContinue
                 Remove-Item -Path (Join-Path $repoCopy ".venv.lock") -Force -ErrorAction SilentlyContinue
-                Write-Ok "skills/$($_.Name)/ <- installed"
+                Write-Ok "skills/$($_.Name)/ <- installed from $pullSkillsDst"
                 $count++
             }
         }

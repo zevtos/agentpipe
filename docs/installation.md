@@ -37,11 +37,15 @@ The installer supports two targets via `--target`:
     gost-report/
 ```
 
-**`--target codex`** — copies skills to Codex's open-agent-skills directory:
+**`--target codex`** — copies skills to Codex's open-agent-skills directory and Codex's native skills directory:
 
 ```
 ~/.agents/
   skills/                 <- skill folders (same format as Claude)
+    gost-report/
+
+~/.codex/
+  skills/                 <- skill folders loaded by current Codex sessions
     gost-report/
 ```
 
@@ -49,7 +53,7 @@ For Codex, agents and commands are intentionally skipped: Codex agents use a dif
 
 If you use both clients, run the installer twice — once per target. The install paths don't conflict.
 
-On WSL, files are installed to the Windows-side directory automatically.
+On WSL, the Claude target still prefers an existing Windows-side `~/.claude` directory. The Codex target uses the current shell's `$HOME` for `~/.agents` and `~/.codex`; run `install.ps1` from Windows if you want a Windows-side Codex install.
 
 ### Installing a Skill from a Release Zip
 

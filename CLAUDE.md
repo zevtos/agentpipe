@@ -3,7 +3,8 @@
 Gated pipeline orchestration for Claude Code and Codex CLI: specialist agents, slash commands, and skills.
 9 agents, 15 commands, 2 skills (`gost-report`, `doc2kb`), 15 research docs. Multi-target installer:
 default puts everything in `~/.claude/`; `--target codex` puts skills in `~/.agents/skills/`
-(open-agent-skills standard) and skips agents/commands (Codex format differences).
+(open-agent-skills standard) and `~/.codex/skills/` (loaded by current Codex sessions),
+then skips agents/commands (Codex format differences).
 The only build step is packaging skills into release zips — no runtime, no tests, no dependencies.
 
 ## Commands

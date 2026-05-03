@@ -23,7 +23,7 @@ set -euo pipefail
 #
 # Targets:
 #   claude (default) — copies agents, commands, and skills to ~/.claude/
-#   codex            — copies skills to ~/.agents/skills/ (Codex's open-agent-skills path).
+#   codex            — copies skills to ~/.agents/skills/ and ~/.codex/skills/.
 #                      Agents and commands are NOT installed: Codex agents use a different
 #                      TOML format and Codex CLI doesn't support custom slash commands.
 
@@ -39,7 +39,8 @@ GIT_TEMPLATE_DIR="$HOME/.git-templates"
 GIT_HOOK_DST="$GIT_TEMPLATE_DIR/hooks/commit-msg"
 
 # Resolve $HOME or Windows USERPROFILE for the given dotfolder name.
-# Used for both ~/.claude (Claude Code) and ~/.agents (Codex skills).
+# Used for ~/.claude (Claude Code). Codex targets intentionally use the
+# current shell's $HOME for both ~/.agents and ~/.codex.
 detect_home_for() {
     local subdir="$1"  # ".claude" or ".agents"
 
@@ -136,7 +137,7 @@ Usage: bash install.sh [--target <name>] [--dry|--diff|--pull|--update|--uninsta
 
 Targets:
   claude (default)  Install agents + commands + skills to ~/.claude/
-  codex             Install skills only to ~/.agents/skills/ (Codex CLI).
+  codex             Install skills only to ~/.agents/skills/ and ~/.codex/skills/ (Codex CLI).
                     Codex agents use TOML (different format) and Codex CLI
                     has no custom slash commands; both are skipped.
 
@@ -208,14 +209,18 @@ case "$TARGET" in
         AGENTS_DST="$BASE/agents"
         COMMANDS_DST="$BASE/commands"
         SKILLS_DST="$BASE/skills"
+        SKILLS_EXTRA_DST=""
         ;;
     codex)
-        # Codex skills live in ~/.agents/skills/ (open-agent-skills standard),
-        # NOT in ~/.codex/skills/. ~/.codex/ is for config/agents only.
-        BASE="$(detect_home_for .agents)"
+        # Keep the open-agent-skills path, and also install to ~/.codex/skills/.
+        # Both paths use the current shell's HOME. WSL Codex sessions load
+        # Linux-side home paths; Windows-side installs should use install.ps1.
+        BASE="$HOME/.agents"
+        CODEX_BASE="$HOME/.codex"
         AGENTS_DST=""    # Codex agents are TOML files in ~/.codex/agents/ — out of scope
         COMMANDS_DST=""  # Codex CLI does not support custom slash commands
         SKILLS_DST="$BASE/skills"
+        SKILLS_EXTRA_DST="$CODEX_BASE/skills"
         ;;
     *)
         err "Unknown target: $TARGET (use 'claude' or 'codex')"
@@ -250,6 +255,7 @@ codex_skip_notice() {
     if [[ "$TARGET" == "codex" ]]; then
         warn "Codex CLI has no custom slash commands — skipped commands/"
         warn "Codex agents use a different TOML format — skipped agents/. See README for details."
+        info "Codex skills installed to both ~/.agents/skills/ and ~/.codex/skills/ for compatibility."
     fi
 }
 
@@ -819,6 +825,9 @@ do_install() {
         info "Installing agentpipe v$VERSION (target: $TARGET, model-profile: $MODEL_PROFILE) to: $BASE"
     else
         info "Installing agentpipe v$VERSION (target: $TARGET) to: $BASE"
+        if [[ -n "${SKILLS_EXTRA_DST:-}" ]]; then
+            info "Additional Codex skills path: $SKILLS_EXTRA_DST"
+        fi
     fi
     local count=0
 
@@ -846,20 +855,23 @@ do_install() {
         done
     fi
 
-    if [[ -n "$SKILLS_DST" && -d "$SKILLS_SRC" ]]; then
-        mkdir -p "$SKILLS_DST"
-        for d in "$SKILLS_SRC"/*/; do
-            [[ -d "$d" ]] || continue
-            local name
-            name=$(basename "$d")
-            rm -rf "$SKILLS_DST/$name"
-            cp -R "$d" "$SKILLS_DST/$name"
-            # Скиллы могут держать собственный venv в .venv/ (создаётся
-            # bootstrap-скриптом). Не тащим dev-овский venv в системную
-            # установку — пути и питон у пользователя другие.
-            rm -rf "$SKILLS_DST/$name/.venv" "$SKILLS_DST/$name/.venv.lock"
-            log "skills/$name/"
-            count=$((count + 1))
+    if [[ -d "$SKILLS_SRC" ]]; then
+        for skills_dst in "$SKILLS_DST" "${SKILLS_EXTRA_DST:-}"; do
+            [[ -n "$skills_dst" ]] || continue
+            mkdir -p "$skills_dst"
+            for d in "$SKILLS_SRC"/*/; do
+                [[ -d "$d" ]] || continue
+                local name
+                name=$(basename "$d")
+                rm -rf "$skills_dst/$name"
+                cp -R "$d" "$skills_dst/$name"
+                # Скиллы могут держать собственный venv в .venv/ (создаётся
+                # bootstrap-скриптом). Не тащим dev-овский venv в системную
+                # установку — пути и питон у пользователя другие.
+                rm -rf "$skills_dst/$name/.venv" "$skills_dst/$name/.venv.lock"
+                log "skills/$name/ → $skills_dst/$name"
+                count=$((count + 1))
+            done
         done
     fi
 
@@ -945,21 +957,24 @@ do_uninstall() {
         done
     fi
 
-    if [[ -n "$SKILLS_DST" && -d "$SKILLS_SRC" ]]; then
-        for d in "$SKILLS_SRC"/*/; do
-            [[ -d "$d" ]] || continue
-            local name
-            name=$(basename "$d")
-            if [[ -d "$SKILLS_DST/$name" ]]; then
-                rm -rf "$SKILLS_DST/$name"
-                log "removed skills/$name/"
-                count=$((count + 1))
-            fi
+    if [[ -d "$SKILLS_SRC" ]]; then
+        for skills_dst in "$SKILLS_DST" "${SKILLS_EXTRA_DST:-}"; do
+            [[ -n "$skills_dst" ]] || continue
+            for d in "$SKILLS_SRC"/*/; do
+                [[ -d "$d" ]] || continue
+                local name
+                name=$(basename "$d")
+                if [[ -d "$skills_dst/$name" ]]; then
+                    rm -rf "$skills_dst/$name"
+                    log "removed skills/$name/ from $skills_dst"
+                    count=$((count + 1))
+                fi
+            done
         done
     fi
 
     # Remove directories only if empty
-    for d in "$AGENTS_DST" "$COMMANDS_DST" "$SKILLS_DST"; do
+    for d in "$AGENTS_DST" "$COMMANDS_DST" "$SKILLS_DST" "${SKILLS_EXTRA_DST:-}"; do
         [[ -n "$d" && -d "$d" ]] || continue
         local label
         label=$(basename "$d")
@@ -1030,23 +1045,26 @@ do_dry() {
         echo ""
     fi
 
-    if [[ -n "$SKILLS_DST" && -d "$SKILLS_SRC" ]]; then
-        echo "Skills:"
-        for d in "$SKILLS_SRC"/*/; do
-            [[ -d "$d" ]] || continue
-            local name
-            name=$(basename "$d")
-            if [[ -d "$SKILLS_DST/$name" ]]; then
-                if diff -rq "$d" "$SKILLS_DST/$name" >/dev/null 2>&1; then
-                    echo "  = $name/ (identical)"
+    if [[ -d "$SKILLS_SRC" ]]; then
+        for skills_dst in "$SKILLS_DST" "${SKILLS_EXTRA_DST:-}"; do
+            [[ -n "$skills_dst" ]] || continue
+            echo "Skills ($skills_dst):"
+            for d in "$SKILLS_SRC"/*/; do
+                [[ -d "$d" ]] || continue
+                local name
+                name=$(basename "$d")
+                if [[ -d "$skills_dst/$name" ]]; then
+                    if diff -rq "$d" "$skills_dst/$name" >/dev/null 2>&1; then
+                        echo "  = $name/ (identical)"
+                    else
+                        warn "  ~ $name/ (CHANGED)"
+                    fi
                 else
-                    warn "  ~ $name/ (CHANGED)"
+                    info "  + $name/ (NEW)"
                 fi
-            else
-                info "  + $name/ (NEW)"
-            fi
+            done
+            echo ""
         done
-        echo ""
     fi
 
     do_attribution_dry
@@ -1107,22 +1125,25 @@ do_diff() {
         done
     fi
 
-    if [[ -n "$SKILLS_DST" && -d "$SKILLS_SRC" ]]; then
-        for d in "$SKILLS_SRC"/*/; do
-            [[ -d "$d" ]] || continue
-            local name
-            name=$(basename "$d")
-            if [[ -d "$SKILLS_DST/$name" ]]; then
-                if ! diff -rq "$d" "$SKILLS_DST/$name" >/dev/null 2>&1; then
-                    echo ""
-                    warn "skills/$name/ differs:"
-                    diff --color=auto -ru "$SKILLS_DST/$name" "$d" || true
+    if [[ -d "$SKILLS_SRC" ]]; then
+        for skills_dst in "$SKILLS_DST" "${SKILLS_EXTRA_DST:-}"; do
+            [[ -n "$skills_dst" ]] || continue
+            for d in "$SKILLS_SRC"/*/; do
+                [[ -d "$d" ]] || continue
+                local name
+                name=$(basename "$d")
+                if [[ -d "$skills_dst/$name" ]]; then
+                    if ! diff -rq "$d" "$skills_dst/$name" >/dev/null 2>&1; then
+                        echo ""
+                        warn "skills/$name/ differs at $skills_dst:"
+                        diff --color=auto -ru "$skills_dst/$name" "$d" || true
+                        has_diff=1
+                    fi
+                else
+                    warn "skills/$name/ — not installed at $skills_dst"
                     has_diff=1
                 fi
-            else
-                warn "skills/$name/ — not installed"
-                has_diff=1
-            fi
+            done
         done
     fi
 
@@ -1171,17 +1192,22 @@ do_pull() {
         done
     fi
 
-    if [[ -n "$SKILLS_DST" && -d "$SKILLS_SRC" ]]; then
+    local pull_skills_dst="$SKILLS_DST"
+    if [[ ! -d "$pull_skills_dst" && -n "${SKILLS_EXTRA_DST:-}" ]]; then
+        pull_skills_dst="$SKILLS_EXTRA_DST"
+    fi
+
+    if [[ -n "$pull_skills_dst" && -d "$pull_skills_dst" && -d "$SKILLS_SRC" ]]; then
         for d in "$SKILLS_SRC"/*/; do
             [[ -d "$d" ]] || continue
             local name
             name=$(basename "$d")
-            if [[ -d "$SKILLS_DST/$name" ]]; then
+            if [[ -d "$pull_skills_dst/$name" ]]; then
                 rm -rf "$SKILLS_SRC/$name"
-                cp -R "$SKILLS_DST/$name" "$SKILLS_SRC/$name"
+                cp -R "$pull_skills_dst/$name" "$SKILLS_SRC/$name"
                 # На обратном пути тоже не тянем venv в репо.
                 rm -rf "$SKILLS_SRC/$name/.venv" "$SKILLS_SRC/$name/.venv.lock"
-                log "skills/$name/ ← installed"
+                log "skills/$name/ ← installed from $pull_skills_dst"
                 count=$((count + 1))
             fi
         done

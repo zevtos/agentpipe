@@ -110,17 +110,17 @@ Adding your university? Build a `UniversityProfile` and PR it back.
 
 ## Codex Support
 
-Codex CLI shares the open-agent-skills format with Claude, so the same `gost-report` skill folder works in both. The installer's `--target codex` flag puts skills in `~/.agents/skills/` (Codex's standard path — note: not `~/.codex/skills/`).
+Codex CLI shares the open-agent-skills format with Claude, so the same `gost-report` skill folder works in both. The installer's `--target codex` flag puts skills in both `~/.agents/skills/` and `~/.codex/skills/`: the first path keeps open-agent-skills compatibility, while current Codex sessions load skills from the second path.
 
 What gets installed per target:
 
 | | Claude Code (`--target claude`, default) | Codex CLI (`--target codex`) |
 |---|---|---|
-| Skills (`skills/*/`) | `~/.claude/skills/` | `~/.agents/skills/` |
+| Skills (`skills/*/`) | `~/.claude/skills/` | `~/.agents/skills/` + `~/.codex/skills/` |
 | Agents (`agents/*.md`) | `~/.claude/agents/` | skipped (Codex agents use TOML, different format) |
 | Slash commands (`commands/*.md`) | `~/.claude/commands/` | skipped (Codex CLI has no custom slash commands) |
 
-If you use both clients, run the installer twice — once per target. The two install paths don't conflict.
+If you use both clients, run the installer twice — once per target. The install paths don't conflict.
 
 **Why are agents and commands skipped for Codex?**
 
@@ -157,7 +157,7 @@ Each gate must pass before proceeding. Agents have bounded tool access (reviewer
 
 - **Project-level overrides**:
   - Claude: `.claude/agents/`, `.claude/commands/`, `.claude/skills/` in your project
-  - Codex: `.agents/skills/` in your project (or `.codex/agents/` for TOML agents)
+  - Codex: `.agents/skills/` or `.codex/skills/` in your project (or `.codex/agents/` for TOML agents)
 - **Edit globals**: modify the installed files directly under the target directory
 - **Fork**: fork this repo, customize, install from your fork
 - **Co-Authored-By suppression**: by default, `--target claude` disables the `Co-Authored-By: Claude` and `🤖 Generated with [Claude Code]` trailers via `~/.claude/settings.json` + a global `commit-msg` hook. Pass `--no-attribution-fix` to skip. See [docs/installation.md](docs/installation.md#removing-claude-attribution-from-commits).
