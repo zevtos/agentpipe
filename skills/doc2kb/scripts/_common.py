@@ -85,15 +85,28 @@ def sanitize_heading(text: str, maxlen: int = 200) -> str:
     return s[:maxlen]
 
 
+def nfc(s: str) -> str:
+    """Normalize a string to Unicode NFC form. Used for `source_path` /
+    `source` fields so that the same filename produced by macOS HFS+/APFS
+    (which exposes NFD) and the same string written into frontmatter or
+    matched by build_manifest agree byte-for-byte. Without this, a Cyrillic
+    or accented filename round-trips as NFD from `pathlib` but as NFC from
+    YAML frontmatter, and merge_scout sees a false-positive "missing
+    extraction" because the two strings differ even though they look
+    identical."""
+    return unicodedata.normalize("NFC", s)
+
+
 def validate_source_rel(s: str) -> str:
     """Reject `--source-rel` arguments that try to escape the corpus root.
-    Returns the cleaned string or raises ValueError.
+    Returns the cleaned, NFC-normalized string or raises ValueError.
 
     Rules:
       - non-empty
       - not absolute (no leading '/' on POSIX, no drive letter on Windows)
       - no '..' components
       - no NUL bytes
+      - returned string is NFC-normalized (see `nfc()` for rationale)
     """
     if not s:
         raise ValueError("source-rel is empty")
@@ -104,7 +117,7 @@ def validate_source_rel(s: str) -> str:
         raise ValueError(f"source-rel must be relative, got: {s!r}")
     if any(part == ".." for part in p.parts):
         raise ValueError(f"source-rel must not contain '..': {s!r}")
-    return s
+    return nfc(s)
 
 
 # ---------- tokens ----------

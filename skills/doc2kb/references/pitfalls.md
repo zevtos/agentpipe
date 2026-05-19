@@ -110,3 +110,52 @@ Output файлы должны быть чистым UTF-8 Markdown. Никак�
 binary blobs, никаких embedded fonts. Если extract-скрипт натолкнулся на
 binary blob (chart, OLE object) — он добавляет placeholder типа `*(chart)*`
 и warning в frontmatter.
+
+## 13. Не доверяй pymupdf4llm на PDF с визуальным layout-ом математики
+
+Старые PDF (часто .doc → "Сохранить как PDF" в Word), научные методички,
+курсовые с формулами часто содержат уравнения, набранные позиционно:
+символы — отдельные `Tj`-операторы, дробные черты — `re`-прямоугольники,
+штрихи производных — самостоятельные glyph'ы рядом с буквой. pymupdf4llm
+читает text-layer в "logical order" и в таблицах рассыпает такие формулы
+в цепочки `|x|<br>|2|<br>|y|<br>|...` — выглядит как мусор.
+
+Это **не баг pymupdf4llm**, а ограничение text-layer extraction: математика
+в таких PDF просто не представлена как читаемый текст, она нарисована.
+
+Что делает `extract_pdf_pymupdf4llm.py`:
+- post-extraction heuristic считает долю мангленных ячеек в markdown-таблицах
+  (`<br>`-цепочки одиночных фрагментов);
+- если ≥ 25% data-cells такие → emit warning `mangled_visual_layout: ...`
+  во frontmatter.
+
+Что должен делать agent при таком warning'е:
+1. Прочитать PDF напрямую через `Read` (Claude рендерит страницы);
+2. Переписать body соответствующего `kb/docs/<id>-*.md` вручную с
+   корректными формулами (Unicode `ÿ`, `ẏ`, или LaTeX-нотация — на выбор);
+3. Обновить frontmatter:
+   - `extraction_method: claude-pagewise-manual@1`,
+   - warning заменить на пояснение, что транскрипция ручная.
+4. Перезапустить `build_manifest.py`.
+
+Чего делать **нельзя**:
+- "почистить" garbled output регулярками — потеряются формулы;
+- молча принять output `pymupdf4llm` — внутри knowledge base окажется
+  семантический мусор, который дойдёт до второй сессии и поломает все
+  ответы про формулы;
+- автоматически попробовать `pymupdf.get_text()` без markdown layout —
+  тот же бэкенд, та же проблема.
+
+## 14. Нормализуй имена файлов в Unicode NFC
+
+macOS HFS+/APFS возвращает Cyrillic/accented filenames в NFD (decomposed)
+форме: `й` идёт как `и + ́` (U+0438 + U+0306). Большинство YAML-парсеров
+и Python-кода работают с NFC. Если `_scout.json` хранит путь в NFD, а
+extract пишет frontmatter `source:` в NFC, путь "выглядит одинаково", но
+сравнивается как разный — `build_manifest.py` помечает файл как
+"extraction missing" даже когда `docs/<id>-*.md` есть на диске.
+
+Фикс: `scout_corpus.py:scan_file()` и `_common.validate_source_rel()`
+нормализуют `source_path` в NFC при создании. `build_manifest.merge_scout()`
+делает дополнительный belt-and-suspenders — сравнивает обе стороны
+NFC-нормализованно, чтобы старые `_scout.json` не ломали повторную сборку.

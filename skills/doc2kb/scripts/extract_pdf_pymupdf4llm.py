@@ -45,6 +45,20 @@ from _common import (  # noqa: E402
 EXTRACTOR_NAME = "pymupdf4llm"
 MIN_CHARS_PER_PAGE = 30  # below this, suspect image-only or extraction failure
 
+# Mangled-layout heuristic tunables. A "mangled" cell is one where
+# pymupdf4llm collapsed visual math layout (absolute-positioned subscripts,
+# primes, fraction bars, multi-row equation rendering) into a sequence of
+# single-character fragments separated by <br>. The bug is unfixable inside
+# pymupdf4llm — the PDF doesn't carry the math as text-layer glyphs, it
+# carries them as positioned drawing operations — but we can detect the
+# pattern after extraction and tell the agent to re-extract via Claude's
+# Read-on-PDF path (which renders the page and reads it visually).
+MANGLED_CELL_BR_MIN = 6           # min <br> tags inside a cell to be suspicious
+MANGLED_CELL_FRAG_MAXLEN = 3      # fragments ≤ this many chars count as "orphan"
+MANGLED_CELL_ORPHAN_RATIO = 0.5   # ≥ this fraction of fragments must be orphans
+MANGLED_TABLE_RATIO = 0.25        # ≥ this fraction of data cells must be mangled
+MANGLED_MIN_TABLE_CELLS = 4       # tables smaller than this can't trip the flag
+
 
 def _try_import():
     try:
@@ -54,6 +68,66 @@ def _try_import():
     except Exception as e:
         emit_failure(f"pymupdf4llm not importable: {e}")
         sys.exit(1)
+
+
+def _detect_mangled_layout(body: str) -> dict | None:
+    """Detect when pymupdf4llm has collapsed a visual math layout
+    (absolute-positioned subscripts/primes/fraction bars) into orphan
+    single-char fragments interleaved with <br> tags inside markdown table
+    cells. The signature is unmistakable when present — see test fixture
+    `Варианты задания_оценка параметров.pdf` in the doc2kb regression
+    corpus, where rows of ODE equations come out as:
+
+        |1| )<br>(<br>2<br>)<br>(<br>... _t_<br>_y_<br>_t_<br>_y_ | ...
+
+    Returns None if the body looks healthy. Returns a stats dict if
+    mangling is detected — caller appends a `mangled_visual_layout`
+    warning so the orchestrating agent knows to re-extract this PDF by
+    reading it directly via the Read tool (claude-pagewise route).
+    """
+    # Only markdown table rows can carry the pattern. A row starts with `|`
+    # and contains another `|` after the first character.
+    rows = [ln for ln in body.split("\n") if ln.startswith("|") and "|" in ln[1:]]
+    if len(rows) < 2:
+        return None
+    suspicious_cells = 0
+    data_cells = 0
+    for row in rows:
+        # Strip leading/trailing pipes so split() doesn't emit two empties.
+        inner = row.strip()
+        if inner.startswith("|"):
+            inner = inner[1:]
+        if inner.endswith("|"):
+            inner = inner[:-1]
+        cells = inner.split("|")
+        for raw in cells:
+            cell = raw.strip()
+            if not cell:
+                continue
+            # Header separator rows look like `---`, `:---:`, etc.
+            if set(cell) <= {"-", ":", " "}:
+                continue
+            data_cells += 1
+            br_count = cell.count("<br>")
+            if br_count < MANGLED_CELL_BR_MIN:
+                continue
+            fragments = [f.strip() for f in cell.split("<br>") if f.strip()]
+            if not fragments:
+                continue
+            orphans = sum(1 for f in fragments
+                          if len(f) <= MANGLED_CELL_FRAG_MAXLEN)
+            if orphans / len(fragments) >= MANGLED_CELL_ORPHAN_RATIO:
+                suspicious_cells += 1
+    if data_cells < MANGLED_MIN_TABLE_CELLS:
+        return None
+    ratio = suspicious_cells / data_cells
+    if ratio < MANGLED_TABLE_RATIO:
+        return None
+    return {
+        "table_cells": data_cells,
+        "mangled_cells": suspicious_cells,
+        "ratio": round(ratio, 2),
+    }
 
 
 def extract(input_pdf: Path) -> tuple[str, dict, list[str]]:
@@ -99,11 +173,32 @@ def extract(input_pdf: Path) -> tuple[str, dict, list[str]]:
             f"(possible scanned/image-only PDF that bypassed scout)"
         )
 
-    # Try to detect a few headings for the manifest (top-level "# ..." lines).
+    # Mangled visual-math-layout guard. pymupdf4llm cannot represent PDFs
+    # that draw math via absolute positioning (subscripts/primes/fraction
+    # bars). When this happens, the orchestrating agent needs to re-extract
+    # the PDF via Claude's Read tool (which renders the page) — we can't fix
+    # it inside the extractor, but we can flag it loudly.
+    mangled = _detect_mangled_layout(body)
+    if mangled is not None:
+        warnings.append(
+            "mangled_visual_layout: detected fragmented text in "
+            f"{mangled['mangled_cells']}/{mangled['table_cells']} table cells "
+            f"(ratio {mangled['ratio']}) suggestive of visual math/equation "
+            "layout that pymupdf4llm cannot represent faithfully — re-extract "
+            "this PDF by reading the source file directly via the Read tool "
+            "(Claude's PDF reading renders the page) and overwrite the body "
+            "of this kb document with a manual transcription"
+        )
+
+    # Top-level headings for the manifest. pymupdf4llm tends to emit
+    # primary headings as `##` (no `#`), so include both `#` and `##`. Keep
+    # the cap at 10 to avoid bloating the manifest on long documents.
     headings = []
     for line in body.split("\n"):
-        if line.startswith("# ") and len(line) < 200:
-            sanitized = sanitize_heading(line[2:])
+        stripped = line.lstrip()
+        if (stripped.startswith("# ") or stripped.startswith("## ")) and len(stripped) < 200:
+            text = stripped.lstrip("#").lstrip()
+            sanitized = sanitize_heading(text)
             if sanitized:
                 headings.append(sanitized)
             if len(headings) >= 10:

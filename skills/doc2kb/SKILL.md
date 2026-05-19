@@ -93,6 +93,15 @@ python3 <skill_dir>/scripts/ensure_env.py extract_pdf_pymupdf4llm.py \
 
 Каждый extract-скрипт пишет один `.md` в `<kb_dir>/docs/` и возвращает JSON `{ok, out, tokens_estimated, warnings, ...}` в stdout. **Парсите этот JSON** — `warnings` непустые означают, что extraction прошёл с deficiency (пустой результат, charts dropped, и т.д.).
 
+**Warning `mangled_visual_layout` (PDF only).** Если в warnings extract'а появилось `mangled_visual_layout: ...`, то PDF использует визуальный layout для математики (формулы набраны позиционно: дроби как стек символов, штрихи отдельными glyph'ами). pymupdf4llm не может это восстановить — на выходе будут таблицы с `<br>`-цепочками одиночных символов. Что делать:
+1. Прочитайте исходный PDF напрямую через инструмент `Read` (Claude умеет читать PDF — рендерит страницы и видит математику визуально).
+2. Перепишите body соответствующего `<kb_dir>/docs/<id>-*.md` вручную, сохранив YAML frontmatter, но обновив:
+   - `extraction_method: claude-pagewise-manual@1`
+   - заменив warning на пояснение, что транскрипция ручная.
+3. После этого перезапустите `build_manifest.py`, чтобы обновить manifest/INDEX.
+
+Не пытайтесь "почистить" garbled output regex'ами — это путь к потере данных. Только переэкстракция через визуальное чтение даёт корректный результат.
+
 При желании сразу прогоните `normalize_md.py --write` на каждом извлечённом файле — он уберёт повторяющиеся headers/footers и стандартный boilerplate. Безопасно: idempotent, никогда не суммаризирует.
 
 ### Phase 5: Assemble

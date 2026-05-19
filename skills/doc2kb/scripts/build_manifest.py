@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,17 @@ from _common import (  # noqa: E402
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 TEMPLATE_AGENTS = SKILL_DIR / "assets" / "agents_template.md"
+
+
+def _nfc(s: str | None) -> str | None:
+    """NFC-normalize a path string for cross-source matching. Returns None
+    unchanged. macOS HFS+/APFS exposes filenames as NFD while YAML
+    frontmatter writers store them as NFC — without this normalization the
+    same filename appears identical but compares unequal, producing
+    spurious 'extraction missing' entries."""
+    if s is None:
+        return None
+    return unicodedata.normalize("NFC", s)
 
 
 def collect_docs(kb_dir: Path) -> list[dict[str, Any]]:
@@ -80,24 +92,28 @@ def merge_scout(kb_dir: Path, manifest: dict[str, Any]) -> None:
         return
     manifest["corpus_root"] = scout.get("input_root")
 
-    # Index scout files by source_path so we can enrich documents with
-    # original-file size_bytes (frontmatter doesn't carry it).
+    # Index scout files by NFC-normalized source_path so we can enrich
+    # documents with original-file size_bytes (frontmatter doesn't carry
+    # it). NFC matching tolerates older _scout.json files that stored
+    # NFD-form paths from macOS pathlib.
     scout_by_source = {
-        f.get("source_path"): f for f in scout.get("files", []) or []
+        _nfc(f.get("source_path")): f for f in scout.get("files", []) or []
     }
     for d in manifest["documents"]:
-        sf = scout_by_source.get(d.get("source_path"))
+        sf = scout_by_source.get(_nfc(d.get("source_path")))
         if sf and sf.get("size_bytes") is not None:
             d["size_bytes"] = sf["size_bytes"]
 
     # Files that scout flagged as skipped from the start.
     manifest["skipped"] = scout.get("skipped_at_scout", []) or []
     # Files scout knew about but we don't have a doc for — could be skipped
-    # by user during decide phase, or extraction errors. Fold in.
-    doc_sources = {d.get("source_path") for d in manifest["documents"]}
+    # by user during decide phase, or extraction errors. Fold in. Use
+    # NFC-normalized comparison so an NFD-form scout path doesn't
+    # false-positive against an NFC-form frontmatter path.
+    doc_sources = {_nfc(d.get("source_path")) for d in manifest["documents"]}
     for f in scout.get("files", []) or []:
         sp = f.get("source_path")
-        if sp and sp not in doc_sources:
+        if sp and _nfc(sp) not in doc_sources:
             # Most specific reason first.
             if f.get("action_required"):
                 reason = f"deferred: {f['action_required']}"

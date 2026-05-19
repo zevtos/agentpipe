@@ -505,7 +505,7 @@ def walk_corpus(root: Path) -> tuple[list[Path], list[dict]]:
                     except ValueError:
                         rel = path
                     escapes.append({
-                        "source_path": str(rel),
+                        "source_path": unicodedata.normalize("NFC", str(rel)),
                         "reason": "symlink escapes corpus root — refused (security)",
                     })
                     continue
@@ -518,9 +518,14 @@ def walk_corpus(root: Path) -> tuple[list[Path], list[dict]]:
 
 def scan_file(idx: int, path: Path, input_root: Path) -> dict[str, Any]:
     rel = path.relative_to(input_root)
+    # Normalize to Unicode NFC: macOS HFS+/APFS exposes filenames as NFD
+    # while extract scripts write frontmatter `source` as NFC and
+    # build_manifest matches by string equality. Without this, Cyrillic or
+    # accented filenames disagree byte-for-byte and merge_scout emits a
+    # spurious "extraction missing" entry.
     info: dict[str, Any] = {
         "id": f"doc-{idx:03d}",
-        "source_path": str(rel),
+        "source_path": unicodedata.normalize("NFC", str(rel)),
         "size_bytes": path.stat().st_size,
         "sha256": sha256_of(path),
         "mime": None,
@@ -638,7 +643,7 @@ def main() -> int:
             files.append(info)
         except Exception as e:
             skipped.append({
-                "source_path": str(p.relative_to(input_root)),
+                "source_path": unicodedata.normalize("NFC", str(p.relative_to(input_root))),
                 "reason": f"scout failed: {str(e)[:200]}",
             })
 
