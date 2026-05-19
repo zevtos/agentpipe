@@ -34,11 +34,14 @@ not the kb path. Example: "From `papers/transformer.pdf`, §2.1 …".
 - Files with `warnings` in their frontmatter were extracted with some issue
   (chart skipped, image-only fallback, low-confidence mime). Treat their
   content with appropriate care.
-- A warning starting with `mangled_visual_layout:` means the source PDF
-  used positional drawing for math/equations (e.g. fraction bars, primes,
-  stacked subscripts) and the text-layer extractor produced a fragmented
-  table. The body in that case is unreliable — fall back to the original
-  source file (`source` field in frontmatter) for any factual claims.
+- A warning starting with `mangled_visual_layout:` or `dropped_pictures:`
+  means the source PDF used positional drawing for math/equations
+  (fraction bars, primes, stacked subscripts, matrix brackets). The
+  text-layer extractor either produced a fragmented table
+  (`mangled_visual_layout`) or replaced the math with `==> picture [WxH]
+  intentionally omitted <==` placeholders (`dropped_pictures`). In both
+  cases the body is unreliable for any formula-related claim — fall back
+  to the original source file (`source` field in frontmatter).
 - A warning starting with `manual transcription` or
   `extraction_method: claude-pagewise-manual@1` means a human (or Claude
   in a prior session) re-extracted the file by reading the source PDF

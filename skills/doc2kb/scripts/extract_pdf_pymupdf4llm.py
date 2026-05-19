@@ -22,6 +22,7 @@ Notes:
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -58,6 +59,20 @@ MANGLED_CELL_FRAG_MAXLEN = 3      # fragments ≤ this many chars count as "orph
 MANGLED_CELL_ORPHAN_RATIO = 0.5   # ≥ this fraction of fragments must be orphans
 MANGLED_TABLE_RATIO = 0.25        # ≥ this fraction of data cells must be mangled
 MANGLED_MIN_TABLE_CELLS = 4       # tables smaller than this can't trip the flag
+
+# Dropped-pictures heuristic. The second failure mode for math-heavy PDFs
+# is that pymupdf4llm cannot extract positioned math at all and instead
+# emits `==> picture [W x H] intentionally omitted <==` placeholders.
+# Documents heavy with these placeholders are usually scientific PDFs where
+# the dropped pictures ARE the equations — body text references "уравнение
+# (1)", "формула", "матрица" but the formulas themselves are gone. The kb
+# document looks mostly intact but is missing the math the agent will be
+# asked about.
+PICTURE_PLACEHOLDER_RE = re.compile(
+    r"==>\s*picture\s*\[\s*\d+\s*x\s*\d+\s*\]\s*intentionally\s*omitted\s*<=="
+)
+DROPPED_PICTURES_PER_PAGE_MIN = 2.0  # avg pictures/page above this → suspicious
+DROPPED_PICTURES_ABS_MIN = 5         # OR: absolute count above this on any doc
 
 
 def _try_import():
@@ -130,6 +145,34 @@ def _detect_mangled_layout(body: str) -> dict | None:
     }
 
 
+def _detect_dropped_pictures(body: str, n_pages: int) -> dict | None:
+    """Detect PDFs where pymupdf4llm gave up on positioned math and emitted
+    placeholders instead — see test fixture `Преобразование математических
+    моделей динамической системы.pdf` in the regression corpus, where 16
+    equations across 5 pages came out as `==> picture [WxH] intentionally
+    omitted <==` markers (3.2 pictures/page). Such documents look fluent
+    but are missing the math the second-session agent will be asked about.
+
+    Returns None if the document looks healthy. Returns a stats dict if
+    picture-density crosses either the per-page or absolute threshold —
+    caller appends a `dropped_pictures` warning suggesting the same
+    re-extract-via-Read remediation as `mangled_visual_layout`.
+    """
+    matches = PICTURE_PLACEHOLDER_RE.findall(body)
+    count = len(matches)
+    if count == 0:
+        return None
+    per_page = count / n_pages if n_pages > 0 else float(count)
+    if (per_page >= DROPPED_PICTURES_PER_PAGE_MIN
+            or count >= DROPPED_PICTURES_ABS_MIN):
+        return {
+            "count": count,
+            "pages": n_pages,
+            "per_page": round(per_page, 2),
+        }
+    return None
+
+
 def extract(input_pdf: Path) -> tuple[str, dict, list[str]]:
     """Returns (body_markdown, frontmatter_extras, warnings)."""
     pymupdf4llm, pymupdf = _try_import()
@@ -188,6 +231,23 @@ def extract(input_pdf: Path) -> tuple[str, dict, list[str]]:
             "this PDF by reading the source file directly via the Read tool "
             "(Claude's PDF reading renders the page) and overwrite the body "
             "of this kb document with a manual transcription"
+        )
+
+    # Dropped-pictures guard. The complementary failure mode: positioned
+    # math survives as `==> picture [WxH] intentionally omitted <==`
+    # placeholders instead of mangled cells. Same remediation: re-read the
+    # PDF via the Read tool and transcribe manually.
+    dropped = _detect_dropped_pictures(body, n_pages)
+    if dropped is not None:
+        warnings.append(
+            f"dropped_pictures: pymupdf4llm omitted {dropped['count']} "
+            f"picture(s) over {dropped['pages']} page(s) "
+            f"({dropped['per_page']}/page); in scientific/lab PDFs these "
+            "placeholders typically hide equations, matrices, or block "
+            "diagrams — body text will reference formulas that aren't in "
+            "the extraction. Re-extract this PDF by reading the source file "
+            "directly via the Read tool and overwrite the body with a "
+            "manual transcription of the dropped figures"
         )
 
     # Top-level headings for the manifest. pymupdf4llm tends to emit
