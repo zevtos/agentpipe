@@ -39,6 +39,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# Top-N cells to scan inside very large notebooks during scout. Full scan
+# of a 5k-cell notebook is too slow for the scout phase; the count is
+# refined at extract time. Tuned to match the PDF sampling pattern (≤12).
+IPYNB_SCOUT_MAX_CELLS = 4000
+
 
 # Schema version of the scout JSON output. Bump on breaking changes.
 SCHEMA_VERSION = "1.0"
@@ -79,6 +84,7 @@ EXT_TO_TYPE = {
     ".txt": "txt",
     ".html": "html",
     ".htm": "html",
+    ".ipynb": "ipynb",
     ".epub": "epub",
     ".rtf": "rtf",
     ".odt": "odt",
@@ -92,7 +98,7 @@ EXT_TO_TYPE = {
 }
 
 # Source-types supported by MVP (have a dedicated extract_*.py).
-MVP_SUPPORTED = {"pdf", "docx", "pptx", "md", "txt", "html"}
+MVP_SUPPORTED = {"pdf", "docx", "pptx", "md", "txt", "html", "ipynb"}
 
 
 # ---------- low-level helpers ----------
@@ -166,6 +172,8 @@ def detect_source_type(path: Path, mime: str | None) -> tuple[str, str]:
             mime_type = "md"
         elif mime.startswith("text/html"):
             mime_type = "html"
+        elif mime in ("application/x-ipynb+json",):
+            mime_type = "ipynb"
         elif mime in ("application/epub+zip",):
             mime_type = "epub"
         elif mime in ("application/rtf", "text/rtf"):
@@ -354,6 +362,54 @@ def pptx_richness(path: Path) -> dict[str, Any]:
     return out
 
 
+def ipynb_richness(path: Path) -> dict[str, Any]:
+    """Counts cells without parsing outputs into the body — cheap enough on
+    large notebooks. `has_outputs` is True if any code cell has a non-empty
+    `outputs` array."""
+    out: dict[str, Any] = {
+        "cells": 0,
+        "code_cells": 0,
+        "markdown_cells": 0,
+        "raw_cells": 0,
+        "has_outputs": False,
+    }
+    try:
+        with path.open("rb") as fh:
+            data = fh.read()
+        nb = json.loads(data.decode("utf-8"))
+    except Exception as e:
+        out["warnings"] = [f"ipynb scout failed: {str(e)[:200]}"]
+        return out
+    if not isinstance(nb, dict):
+        out["warnings"] = ["ipynb scout: root is not an object"]
+        return out
+    cells = nb.get("cells")
+    if not isinstance(cells, list):
+        out["warnings"] = ["ipynb scout: no cells array"]
+        return out
+    for c in cells[:IPYNB_SCOUT_MAX_CELLS]:
+        if not isinstance(c, dict):
+            continue
+        out["cells"] += 1
+        ct = c.get("cell_type")
+        if ct == "code":
+            out["code_cells"] += 1
+            outs = c.get("outputs")
+            if isinstance(outs, list) and outs:
+                out["has_outputs"] = True
+        elif ct == "markdown":
+            out["markdown_cells"] += 1
+        elif ct == "raw":
+            out["raw_cells"] += 1
+    if len(cells) > IPYNB_SCOUT_MAX_CELLS:
+        out.setdefault("warnings", []).append(
+            f"ipynb has {len(cells)} cells; scout sampled the first "
+            f"{IPYNB_SCOUT_MAX_CELLS}"
+        )
+        out["cells"] = len(cells)  # report true count
+    return out
+
+
 def text_encoding(path: Path, sample_bytes: int = 65536) -> dict[str, Any]:
     out: dict[str, Any] = {"encoding": "utf-8"}
     try:
@@ -424,6 +480,14 @@ def set_strategy_and_tokens(info: dict[str, Any]) -> None:
     elif t == "html":
         info["extraction_strategy"] = "trafilatura"
         info["estimated_tokens"] = max(info.get("size_bytes", 0) // 6, 100)
+    elif t == "ipynb":
+        cells = info.get("cells") or 0
+        code_cells = info.get("code_cells") or 0
+        info["extraction_strategy"] = "ipynb"
+        # ~80 tok per cell average, +60 per code cell for outputs/comments.
+        info["estimated_tokens"] = (
+            max(cells * 80 + code_cells * 60, 200) if cells else None
+        )
     elif t in {"xlsx", "epub", "rtf", "odt", "image"}:
         info["extraction_strategy"] = "not_in_mvp"
         info["estimated_tokens"] = None
@@ -441,7 +505,7 @@ def set_strategy_and_tokens(info: dict[str, Any]) -> None:
         warnings.append(f"large file: {info['size_bytes'] // (1024 * 1024)} MB")
         if info.get("extraction_strategy") in (
             "pymupdf4llm", "mammoth", "python-pptx",
-            "passthrough-md", "passthrough-txt", "trafilatura",
+            "passthrough-md", "passthrough-txt", "trafilatura", "ipynb",
         ) and not info.get("action_required"):
             info["action_required"] = "ask_user_proceed_huge"
 
@@ -549,6 +613,8 @@ def scan_file(idx: int, path: Path, input_root: Path) -> dict[str, Any]:
         info.update(docx_richness(path))
     elif src_type == "pptx":
         info.update(pptx_richness(path))
+    elif src_type == "ipynb":
+        info.update(ipynb_richness(path))
     elif src_type in ("md", "txt"):
         info.update(text_encoding(path))
 
@@ -564,6 +630,13 @@ def scan_file(idx: int, path: Path, input_root: Path) -> dict[str, Any]:
     info.setdefault("has_equations", False)
     info.setdefault("encoding", None)
     info.setdefault("pdf_class", None)
+    info.setdefault("cells", None)
+    info.setdefault("code_cells", None)
+    info.setdefault("markdown_cells", None)
+    info.setdefault("raw_cells", None)
+    info.setdefault("has_outputs", None)
+    info.setdefault("language", None)
+    info.setdefault("kernelspec_name", None)
     return info
 
 

@@ -6,11 +6,27 @@ CLI:
     extract_pdf_pymupdf4llm.py <input_pdf> <output_md>
                               [--doc-id doc-NNN]
                               [--source-rel relative/path/in/corpus.pdf]
+                              [--assets-dir <abs_path>]
+                              [--assets-rel <rel_prefix_from_md>]
+                              [--no-extract-images]
 
 Effect:
     Writes <output_md> with YAML frontmatter + Markdown body. Page bodies are
     separated by `[page N]` anchors (research §3.4). Stdout receives a single
     JSON line summarizing the result.
+
+Image handling:
+    - By default, the extractor scans the PDF for embedded images and
+      replaces pymupdf4llm's `==> picture [WxH] intentionally omitted <==`
+      placeholders with Markdown image links pointing to JPEG/PNG files
+      saved under `<kb_dir>/assets/`. This recovers formulas, comparison
+      matrices, and result charts that pymupdf4llm cannot represent in
+      text. Use `--no-extract-images` to disable.
+    - The mapping placeholder→image uses pymupdf4llm's per-page emission
+      order, which matches `page.get_images(full=True)` in practice.
+    - The `dropped_pictures` warning is only emitted for placeholders that
+      could NOT be substituted (caller should re-run with a Read-tool
+      transcription as a last resort).
 
 Notes:
     - Uses pymupdf4llm.to_markdown(..., page_chunks=True) so we can inject
@@ -173,7 +189,109 @@ def _detect_dropped_pictures(body: str, n_pages: int) -> dict | None:
     return None
 
 
-def extract(input_pdf: Path) -> tuple[str, dict, list[str]]:
+def _replace_dropped_pictures_with_assets(
+    body: str,
+    input_pdf: Path,
+    doc_id: str,
+    assets_dir: Path,
+    assets_rel_prefix: str,
+) -> tuple[str, list[str], int, int]:
+    """Extract embedded images from the PDF and substitute pymupdf4llm's
+    `==> picture [WxH] intentionally omitted <==` placeholders with
+    Markdown image links pointing to the saved files.
+
+    Numbering: images are saved as `<doc_id>-pageNN-imgN.<ext>` and
+    placeholders are matched in pymupdf4llm's emission order, which
+    mirrors pymupdf's `page.get_images(full=True)` order. When the two
+    diverge (rare — would require pymupdf4llm to skip an image entirely),
+    captions can be off by one row; content is still present in
+    `assets/`.
+
+    Returns (new_body, saved_relpaths, replaced_count, total_placeholders).
+    The caller uses the counts to decide whether to keep or suppress the
+    `dropped_pictures` warning.
+    """
+    import pymupdf  # type: ignore
+
+    total = len(PICTURE_PLACEHOLDER_RE.findall(body))
+    if total == 0:
+        return body, [], 0, 0
+
+    saved: dict[tuple[int, int], str] = {}
+    saved_relpaths: list[str] = []
+    try:
+        assets_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise RuntimeError(f"cannot create assets dir {assets_dir}: {e}") from e
+
+    try:
+        doc = pymupdf.open(str(input_pdf))
+    except Exception as e:
+        raise RuntimeError(f"failed to reopen pdf for image extraction: {e}") from e
+    try:
+        for page_no in range(1, doc.page_count + 1):
+            page = doc[page_no - 1]
+            for idx, img_info in enumerate(page.get_images(full=True), 1):
+                xref = img_info[0]
+                try:
+                    info = doc.extract_image(xref)
+                except Exception:
+                    continue
+                ext = (info.get("ext") or "bin").lower()
+                filename = f"{doc_id}-page{page_no:02d}-img{idx}.{ext}"
+                try:
+                    (assets_dir / filename).write_bytes(info["image"])
+                except OSError:
+                    continue
+                saved[(page_no, idx)] = filename
+                saved_relpaths.append(f"{assets_rel_prefix}/{filename}")
+    finally:
+        doc.close()
+
+    if not saved:
+        return body, [], 0, total
+
+    page_anchor_re = re.compile(r"\[page (\d+)\]")
+    anchors = list(page_anchor_re.finditer(body))
+    if not anchors:
+        return body, saved_relpaths, 0, total
+
+    replaced = 0
+    out: list[str] = [body[: anchors[0].start()]]
+    for i, anchor in enumerate(anchors):
+        page_no = int(anchor.group(1))
+        section_end = anchors[i + 1].start() if i + 1 < len(anchors) else len(body)
+        section = body[anchor.start():section_end]
+        counter = {"n": 0}
+
+        def _sub(_match, _page_no=page_no, _counter=counter):
+            nonlocal replaced
+            _counter["n"] += 1
+            fname = saved.get((_page_no, _counter["n"]))
+            if not fname:
+                return _match.group(0)
+            replaced += 1
+            return (
+                f"![page {_page_no}, image {_counter['n']}]"
+                f"({assets_rel_prefix}/{fname})"
+            )
+
+        out.append(PICTURE_PLACEHOLDER_RE.sub(_sub, section))
+
+    new_body = "".join(out)
+    # Trim assets list to those actually referenced (anchors order).
+    used = {saved[(p, i)] for (p, i) in saved.keys()}
+    saved_relpaths = [r for r in saved_relpaths if r.rsplit("/", 1)[-1] in used]
+    return new_body, saved_relpaths, replaced, total
+
+
+def extract(
+    input_pdf: Path,
+    doc_id: str = "doc-000",
+    assets_dir: Path | None = None,
+    assets_rel_prefix: str = "../assets",
+    extract_images: bool = True,
+) -> tuple[str, dict, list[str]]:
     """Returns (body_markdown, frontmatter_extras, warnings)."""
     pymupdf4llm, pymupdf = _try_import()
 
@@ -233,22 +351,60 @@ def extract(input_pdf: Path) -> tuple[str, dict, list[str]]:
             "of this kb document with a manual transcription"
         )
 
-    # Dropped-pictures guard. The complementary failure mode: positioned
-    # math survives as `==> picture [WxH] intentionally omitted <==`
-    # placeholders instead of mangled cells. Same remediation: re-read the
-    # PDF via the Read tool and transcribe manually.
+    # Dropped-pictures recovery. pymupdf4llm replaces positioned figures with
+    # `==> picture [WxH] intentionally omitted <==` placeholders. In
+    # scientific/lab PDFs these placeholders typically hide equations,
+    # comparison matrices, or block diagrams that the body text references.
+    # If image extraction is enabled (default), pull the underlying images
+    # out of the PDF via pymupdf and substitute Markdown image links so the
+    # binary content lives on disk under `<kb_dir>/assets/`. The
+    # `dropped_pictures` warning is suppressed for placeholders that were
+    # successfully recovered.
+    if extract_images and assets_dir is not None:
+        try:
+            body, asset_relpaths, replaced, total_drops = (
+                _replace_dropped_pictures_with_assets(
+                    body=body,
+                    input_pdf=input_pdf,
+                    doc_id=doc_id,
+                    assets_dir=assets_dir,
+                    assets_rel_prefix=assets_rel_prefix,
+                )
+            )
+            if asset_relpaths:
+                extras["assets"] = asset_relpaths
+        except RuntimeError as e:
+            warnings.append(f"image extraction failed: {e}")
+            replaced, total_drops = 0, len(PICTURE_PLACEHOLDER_RE.findall(body))
+    else:
+        replaced, total_drops = 0, len(PICTURE_PLACEHOLDER_RE.findall(body))
+
+    # Re-run the heuristic on the (possibly substituted) body. If any
+    # placeholders remain above the threshold, emit the same loud warning
+    # the operator can act on.
     dropped = _detect_dropped_pictures(body, n_pages)
     if dropped is not None:
-        warnings.append(
-            f"dropped_pictures: pymupdf4llm omitted {dropped['count']} "
-            f"picture(s) over {dropped['pages']} page(s) "
-            f"({dropped['per_page']}/page); in scientific/lab PDFs these "
-            "placeholders typically hide equations, matrices, or block "
-            "diagrams — body text will reference formulas that aren't in "
-            "the extraction. Re-extract this PDF by reading the source file "
-            "directly via the Read tool and overwrite the body with a "
-            "manual transcription of the dropped figures"
+        remediation = (
+            "Re-extract this PDF by reading the source file directly via "
+            "the Read tool and overwrite the body with a manual "
+            "transcription of the remaining figures"
         )
+        if replaced > 0:
+            warnings.append(
+                f"dropped_pictures: {replaced}/{total_drops} placeholder(s) "
+                f"were auto-recovered as assets, but {dropped['count']} "
+                f"still remain over {dropped['pages']} page(s) "
+                f"({dropped['per_page']}/page). " + remediation
+            )
+        else:
+            warnings.append(
+                f"dropped_pictures: pymupdf4llm omitted {dropped['count']} "
+                f"picture(s) over {dropped['pages']} page(s) "
+                f"({dropped['per_page']}/page); in scientific/lab PDFs "
+                "these placeholders typically hide equations, matrices, "
+                "or block diagrams — body text will reference formulas "
+                "that aren't in the extraction. " + remediation
+            )
 
     # Top-level headings for the manifest. pymupdf4llm tends to emit
     # primary headings as `##` (no `#`), so include both `#` and `##`. Keep
@@ -276,6 +432,26 @@ def main() -> int:
     ap.add_argument("output_md")
     ap.add_argument("--doc-id", default="doc-000")
     ap.add_argument("--source-rel", default=None)
+    ap.add_argument(
+        "--assets-dir",
+        default=None,
+        help="Absolute directory to write extracted images into. Defaults "
+             "to <output_md>.parent.parent/assets (= <kb_dir>/assets).",
+    )
+    ap.add_argument(
+        "--assets-rel",
+        default="../assets",
+        help="Relative prefix used inside the Markdown body to link the "
+             "saved images (default: '../assets', matching the standard "
+             "kb_dir/docs/*.md → kb_dir/assets/ layout).",
+    )
+    ap.add_argument(
+        "--no-extract-images",
+        action="store_true",
+        help="Disable embedded image extraction; keep pymupdf4llm's "
+             "intentionally-omitted placeholders verbatim and re-enable "
+             "the original dropped_pictures warning.",
+    )
     args = ap.parse_args()
 
     in_path = Path(args.input_pdf).expanduser().resolve()
@@ -291,8 +467,23 @@ def main() -> int:
         emit_failure(f"input not found: {in_path}")
         return 1
 
+    if args.no_extract_images:
+        assets_dir: Path | None = None
+    elif args.assets_dir:
+        assets_dir = Path(args.assets_dir).expanduser().resolve()
+    else:
+        # Default: <output_md>.parent.parent / "assets". Standard layout is
+        # <kb_dir>/docs/<file>.md so two ascents land on <kb_dir>.
+        assets_dir = out_path.parent.parent / "assets"
+
     try:
-        body, extras, warnings = extract(in_path)
+        body, extras, warnings = extract(
+            in_path,
+            doc_id=args.doc_id,
+            assets_dir=assets_dir,
+            assets_rel_prefix=args.assets_rel,
+            extract_images=not args.no_extract_images,
+        )
     except Exception as e:
         emit_failure(f"extraction failed: {e}", extra={"input": str(in_path)})
         return 1
@@ -309,8 +500,13 @@ def main() -> int:
         "tokens_estimated": count_tokens(body),
         "warnings": warnings,
     }
+    if extras.get("assets"):
+        fm["assets"] = extras["assets"]
     write_md(out_path, fm, body)
-    emit_success(out_path, body, warnings, extra={"pages": extras.get("pages")})
+    emit_success(out_path, body, warnings, extra={
+        "pages": extras.get("pages"),
+        "assets_extracted": len(extras.get("assets", [])),
+    })
     return 0
 
 

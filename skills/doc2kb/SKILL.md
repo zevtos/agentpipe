@@ -1,6 +1,6 @@
 ---
 name: doc2kb
-description: Converts a heterogeneous corpus of raw documents (PDF, DOCX, PPTX, MD, TXT, HTML and more) into a structured, LLM-optimized knowledge base — per-source Markdown files + manifest.json + INDEX.md + AGENTS.md, ready for ingestion in a separate Claude / Codex session. USE THIS SKILL WHENEVER the user asks to ingest, index, prepare, preprocess, or build a knowledge base from a folder of mixed documents; to "feed files to Claude", "prepare a corpus", "build a doc index", "make a knowledge base", "RAG prep", "convert documents to markdown", or has a folder with many file types and wants them ready for an agent. Trigger also on Russian phrasing — "обработай папку с документами", "сделай базу знаний из папки", "подготовь корпус для LLM", "извлеки markdown из файлов". The output is for AI agents to consume, not for human reading. For single-file PDF operations prefer Anthropic's pre-built `pdf` skill.
+description: Converts a heterogeneous corpus of raw documents (PDF, DOCX, PPTX, IPYNB, MD, TXT, HTML and more) into a structured, LLM-optimized knowledge base — per-source Markdown files + manifest.json + INDEX.md + AGENTS.md, ready for ingestion in a separate Claude / Codex session. USE THIS SKILL WHENEVER the user asks to ingest, index, prepare, preprocess, or build a knowledge base from a folder of mixed documents; to "feed files to Claude", "prepare a corpus", "build a doc index", "make a knowledge base", "RAG prep", "convert documents to markdown", "ingest Jupyter notebooks", or has a folder with many file types and wants them ready for an agent. Trigger also on Russian phrasing — "обработай папку с документами", "сделай базу знаний из папки", "подготовь корпус для LLM", "извлеки markdown из файлов", "обработай ноутбуки". The output is for AI agents to consume, not for human reading. For single-file PDF operations prefer Anthropic's pre-built `pdf` skill.
 ---
 
 # doc2kb — Document Corpus → LLM Knowledge Base
@@ -47,6 +47,8 @@ python3 <skill_dir>/scripts/ensure_env.py
 
 **Системные зависимости (macOS):** `brew install libmagic` — обязательно, иначе python-magic не импортируется. На Linux: `apt install libmagic1`. На WSL то же. Без libmagic scout всё равно работает (fallback на расширение файла), но `mime_confidence` будет всегда `"high"` без перекрёстной проверки.
 
+**Опциональная зависимость для DOCX с математикой:** `pandoc` (`brew install pandoc` / `apt install pandoc`). Если установлен, `extract_docx.py` автоматически переключается на него для документов, помеченных scout'ом как `has_equations: true`, и сохраняет OOXML math как `$...$` LaTeX. Без pandoc такие документы извлекаются через mammoth и теряют формулы (warning будет в JSON output).
+
 ### Phase 2: Scout
 
 ```bash
@@ -80,6 +82,7 @@ python3 <skill_dir>/scripts/ensure_env.py scout_corpus.py <input_dir> <kb_dir>
 | `passthrough-md`  | `extract_md_txt.py --mode md` |
 | `passthrough-txt` | `extract_md_txt.py --mode txt` |
 | `trafilatura`     | `extract_html.py` |
+| `ipynb`           | `extract_ipynb.py` |
 
 Запускайте extract-скрипт через `ensure_env.py`:
 
@@ -93,16 +96,27 @@ python3 <skill_dir>/scripts/ensure_env.py extract_pdf_pymupdf4llm.py \
 
 Каждый extract-скрипт пишет один `.md` в `<kb_dir>/docs/` и возвращает JSON `{ok, out, tokens_estimated, warnings, ...}` в stdout. **Парсите этот JSON** — `warnings` непустые означают, что extraction прошёл с deficiency (пустой результат, charts dropped, и т.д.).
 
+**DOCX с математикой (автоматический pandoc-маршрут).** Если scout пометил DOCX как `has_equations: true` и `pandoc` есть на `PATH`, `extract_docx.py` автоматически переключается с mammoth на pandoc — он сохраняет OOXML math (`<m:oMath>`) как `$...$`/`$$...$$` LaTeX. Mammoth по-тихому дропает math элементы, и body после него ссылается на "формулу (1)", у которой нет содержимого. JSON `extractor` поле сообщит, какой маршрут был использован (`pandoc` или `mammoth+markdownify`). Если pandoc недоступен на машине с math-документом — будет warning с инструкцией установить (`brew install pandoc` / `apt install pandoc`).
+
+**PDF с встроенными картинками (автоматическое извлечение в `assets/`).** Когда pymupdf4llm эмиттит `==> picture [WxH] intentionally omitted <==` плейсхолдеры (формулы, матрицы, диаграммы, нарисованные как изображения), `extract_pdf_pymupdf4llm.py` теперь автоматически:
+1. Извлекает встроенные изображения через `pymupdf` в `<kb_dir>/assets/`.
+2. Заменяет плейсхолдеры на Markdown image links `![page N, image M](../assets/<doc_id>-pageNN-imgM.<ext>)`.
+3. Подавляет `dropped_pictures` warning для тех плейсхолдеров, которые удалось заменить.
+
+Дефолтное место для assets — `<output_md>.parent.parent / "assets"`, что соответствует стандартному layout `<kb_dir>/docs/*.md` → `<kb_dir>/assets/<file>`. Override: `--assets-dir <abs>` и `--assets-rel <prefix>`. Отключить: `--no-extract-images` (вернёт исходное поведение с loud warning).
+
 **Warnings `mangled_visual_layout` / `dropped_pictures` (PDF only).** Это два варианта одной и той же поломки — PDF использует визуальный layout для математики (формулы набраны позиционно: дроби как стек символов, штрихи отдельными glyph'ами). pymupdf4llm не может это восстановить и либо рассыпает выражения в `<br>`-цепочки одиночных символов внутри markdown-таблиц (`mangled_visual_layout`), либо выкидывает математические участки как `==> picture [WxH] intentionally omitted <==` плейсхолдеры (`dropped_pictures`). На лабораторных методичках, курсовых и научных статьях с формулами оба варианта частые; иногда в одном PDF встречаются оба сразу.
 
-Что делать в обоих случаях:
-1. Прочитайте исходный PDF напрямую через инструмент `Read` (Claude умеет читать PDF — рендерит страницы и видит математику визуально).
-2. Перепишите body соответствующего `<kb_dir>/docs/<id>-*.md` вручную, сохранив YAML frontmatter, но обновив:
+Авто-восстановление для `dropped_pictures` (default): extract-скрипт сначала пытается извлечь встроенные изображения через pymupdf и заменить плейсхолдеры на ссылки в `assets/`. Warning остаётся только для тех плейсхолдеров, которые не удалось заменить (картинка отсутствует в PDF stream — что редко). Для `mangled_visual_layout` авто-восстановления нет — формулы там вообще нет ни как текста, ни как picture-объекта.
+
+Что делать, если warning всё-таки появился:
+1. Прочитайте исходный PDF напрямую через инструмент `Read` (Claude умеет читать PDF — рендерит страницы и видит математику визуально). Для уже извлечённых картинок в `assets/` Read тоже работает.
+2. Перепишите body соответствующего `<kb_dir>/docs/<id>-*.md` вручную (или добавьте транскрипцию таблиц/формул из картинок рядом со ссылками), сохранив YAML frontmatter, но обновив:
    - `extraction_method: claude-pagewise-manual@1`
    - заменив warning на пояснение, что транскрипция ручная.
 3. После этого перезапустите `build_manifest.py`, чтобы обновить manifest/INDEX.
 
-Не пытайтесь "почистить" garbled output regex'ами или восстановить дропнутые картинки текстом из соседних абзацев — это путь к потере данных. Только переэкстракция через визуальное чтение даёт корректный результат.
+Не пытайтесь "почистить" garbled output regex'ами или галлюцинировать содержимое картинок из соседних абзацев — это путь к потере данных. Только переэкстракция через визуальное чтение даёт корректный результат.
 
 При желании сразу прогоните `normalize_md.py --write` на каждом извлечённом файле — он уберёт повторяющиеся headers/footers и стандартный boilerplate. Безопасно: idempotent, никогда не суммаризирует.
 
@@ -125,12 +139,26 @@ python3 <skill_dir>/scripts/ensure_env.py build_manifest.py <kb_dir>
 ├── docs/
 │   ├── doc-001-<slug>.md
 │   └── ...
+├── assets/           # embedded images extracted from PDFs (auto-populated
+│   ├── doc-002-page04-img1.jpeg   # only when PDFs contained pictures)
+│   └── ...
+├── raw/              # (optional, see Phase 5) original source files
+│   ├── README.md
+│   └── ...
 ├── _scout.json       # scout output (debugging artefact)
 └── _logs/
     └── errors.json   # extraction errors, if any
 ```
 
-Каждый `docs/<id>-<slug>.md` — YAML frontmatter (id, source, source_sha256, source_type, extraction_method, pages|slides, headings, tokens_estimated, warnings) + Markdown body. Полная схема — в `references/format-spec.md`.
+Каждый `docs/<id>-<slug>.md` — YAML frontmatter (id, source, source_sha256, source_type, extraction_method, pages|slides, headings, tokens_estimated, warnings, optionally `assets:` list of relative paths to images in `../assets/`) + Markdown body. Полная схема — в `references/format-spec.md`.
+
+**Опционально (после Phase 5): self-contain the kb by moving sources into `<kb_dir>/raw/`.** Это полезно для долгого хранения knowledge base — все артефакты живут в одной папке. Если перемещаете:
+1. `mkdir <kb_dir>/raw && mv <source files> <kb_dir>/raw/`
+2. Обновите `source` поле в каждом `docs/*.md` frontmatter: добавьте префикс `raw/`.
+3. Поправьте `source_path` в `_scout.json` тем же префиксом.
+4. Перезапустите `build_manifest.py` — manifest проверит соответствие путей фактическим extractions.
+
+Проверьте SHA256 источников после перемещения (`sha256sum <kb_dir>/raw/*`) — они должны совпасть с `source_sha256` в frontmatter.
 
 ## Scripts inventory
 
@@ -138,9 +166,10 @@ python3 <skill_dir>/scripts/ensure_env.py build_manifest.py <kb_dir>
 |---|---|
 | `ensure_env.py`              | idempotent venv bootstrap (run once or on requirements change) |
 | `scout_corpus.py`            | Phase 2 — classify corpus, emit `_scout.json` |
-| `extract_pdf_pymupdf4llm.py` | text-layer PDF → Markdown |
-| `extract_docx.py`            | DOCX → Markdown via mammoth + markdownify |
+| `extract_pdf_pymupdf4llm.py` | text-layer PDF → Markdown; auto-extracts embedded images to `<kb_dir>/assets/` and rewires `picture intentionally omitted` placeholders to those files |
+| `extract_docx.py`            | DOCX → Markdown via mammoth + markdownify; switches to pandoc when source contains OOXML math so formulas survive as LaTeX |
 | `extract_pptx.py`            | PPTX → Markdown, preserves speaker notes |
+| `extract_ipynb.py`           | Jupyter notebook (.ipynb) → Markdown; per-cell anchors, text outputs preserved, base64 images dropped |
 | `extract_md_txt.py`          | normalize Markdown/text, encoding-aware |
 | `extract_html.py`            | HTML → Markdown via trafilatura (boilerplate removal) |
 | `normalize_md.py`            | structural cleanup pass (idempotent, never summarizes) |
@@ -186,8 +215,11 @@ python3 <skill_dir>/scripts/ensure_env.py build_manifest.py <kb_dir>
 ## Что доступно out-of-the-box vs follow-up
 
 **MVP (этот release):**
-- PDF (text-layer), DOCX, PPTX (с speaker notes), MD, TXT, HTML.
-- Lightweight tier (без heavy ML моделей).
+- PDF (text-layer), DOCX, PPTX (с speaker notes), IPYNB (Jupyter notebook —
+  source + text outputs, base64-картинки заменяются placeholder),
+  MD, TXT, HTML.
+- Lightweight tier (без heavy ML моделей). `.ipynb` парсится stdlib `json`
+  — никаких jupyter/nbformat в venv.
 
 **Follow-up commits (не в этом MVP):**
 - XLSX, EPUB, RTF, ODT, standalone images.

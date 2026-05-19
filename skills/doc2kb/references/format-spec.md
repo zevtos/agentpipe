@@ -50,7 +50,7 @@ Emitted by `scout_corpus.py`. Schema:
       "size_bytes": int,
       "mime": "application/pdf" | null,
       "mime_confidence": "high" | "low",     // low if magic ↔ ext disagree
-      "source_type": "pdf"|"docx"|"pptx"|"xlsx"|"md"|"txt"|"html"|"epub"|"rtf"|"odt"|"image"|"unknown",
+      "source_type": "pdf"|"docx"|"pptx"|"xlsx"|"md"|"txt"|"html"|"ipynb"|"epub"|"rtf"|"odt"|"image"|"unknown",
       "pdf_class": "text"|"image_only"|"mixed"|"encrypted"|"corrupt" | null,
       "pages": int | null,
       "slides": int | null,
@@ -59,8 +59,13 @@ Emitted by `scout_corpus.py`. Schema:
       "inline_images": int,
       "has_tables": bool,
       "has_equations": bool,
+      "cells": int | null,                   // ipynb
+      "code_cells": int | null,              // ipynb
+      "markdown_cells": int | null,          // ipynb
+      "raw_cells": int | null,               // ipynb
+      "has_outputs": bool | null,            // ipynb
       "encoding": "utf-8" | "cp1251" | ... | null,
-      "extraction_strategy": "pymupdf4llm"|"mammoth"|"python-pptx"|"passthrough-md"|"passthrough-txt"|"trafilatura"|"needs_password"|"needs_ocr_or_vlm"|"not_in_mvp"|"skip",
+      "extraction_strategy": "pymupdf4llm"|"mammoth"|"python-pptx"|"passthrough-md"|"passthrough-txt"|"trafilatura"|"ipynb"|"needs_password"|"needs_ocr_or_vlm"|"not_in_mvp"|"skip",
       "estimated_tokens": int | null,
       "warnings": [string],
       "action_required": "ask_user_password_or_skip"|"ask_user_ocr_strategy"|"ask_user_proceed_huge"|"ask_user_skip_corrupt"|"ask_user_skip_unsupported" | null
@@ -88,7 +93,7 @@ Every extracted document has a YAML frontmatter block. Required fields:
 |---------------------|-------------|------------------|
 | `id`                | string      | scout-assigned doc-NNN |
 | `source`            | string      | relative path inside input corpus |
-| `source_type`       | string      | `pdf`/`docx`/`pptx`/`md`/`txt`/`html` |
+| `source_type`       | string      | `pdf`/`docx`/`pptx`/`ipynb`/`md`/`txt`/`html` |
 | `source_sha256`     | string      | sha256 of original bytes |
 | `extraction_method` | string      | `name@version` of the extractor used |
 | `extraction_date`   | string      | YYYY-MM-DD UTC |
@@ -110,7 +115,29 @@ Per-type optional fields:
 | `has_tracked_changes` | docx    | bool — `w:ins`/`w:del` present |
 | `paragraphs`       | docx       | total paragraph count |
 | `source_encoding`  | md/txt/html | detected source encoding |
+| `cells`            | ipynb      | total cell count |
+| `code_cells`       | ipynb      | code-cell count |
+| `markdown_cells`   | ipynb      | markdown-cell count |
+| `raw_cells`        | ipynb      | raw-cell count |
+| `has_outputs`      | ipynb      | bool — any code cell has non-empty `outputs[]` |
+| `language`         | ipynb      | language sniffed from `kernelspec`/`language_info`, allowlist-clamped (default `python`) |
+| `kernelspec_name`  | ipynb      | original kernel name (optional, sanitized) |
+| `assets`           | pdf        | list of relative paths to embedded images extracted into `<kb_dir>/assets/` and referenced from the body (only emitted when at least one image was recovered) |
 | `headings`         | all        | first up to 10 top-level headings, for fast index |
+
+`extraction_method` values that callers should recognise:
+
+- `pymupdf4llm@<ver>` — default PDF extractor.
+- `mammoth+markdownify@<ver>` — default DOCX extractor (no math).
+- `pandoc@<ver>` — DOCX extractor used when source has OOXML math and pandoc
+  is available; math is preserved as `$...$` / `$$...$$` LaTeX.
+- `python-pptx@<ver>` — PPTX extractor.
+- `passthrough-md@<ver>` / `passthrough-txt@<ver>` — plain text/markdown.
+- `trafilatura@<ver>` — HTML extractor.
+- `ipynb@<ver>` — Jupyter notebook extractor.
+- `claude-pagewise-manual@1` — reserved for manual Read-tool transcription
+  used to recover content that the automated extractors lost (`mangled_visual_layout`
+  warnings on PDFs, residual `dropped_pictures` after auto-recovery, etc.).
 
 ## Markdown body
 
@@ -145,9 +172,37 @@ speaker notes
 ...
 ```
 
+Notebook (`.ipynb`) bodies use per-cell anchors:
+
+```markdown
+## Cell 1 (markdown)
+
+# Notebook heading
+
+prose…
+
+---
+
+## Cell 2 (code) [execution_count=1]
+
+​```python
+import numpy as np
+​```
+
+### Output
+
+​```
+array([1, 2, 3])
+​```
+
+---
+```
+
 Image content is **never** stored as base64 inline. Inline images in DOCX are
 replaced with `<img src="" alt="image N: original alt text">` which markdownify
-renders as `![image N: ...]()`.
+renders as `![image N: ...]()`. Image outputs inside `.ipynb` code cells are
+collapsed into a single `*(image output omitted: N)*` placeholder per cell
+plus a warning surfaced in frontmatter.
 
 ## `manifest.json`
 

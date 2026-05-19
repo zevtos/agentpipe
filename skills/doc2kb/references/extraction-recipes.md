@@ -40,12 +40,13 @@ assert payload["ok"]
 
 | extraction_strategy | script                          | invocation |
 |---------------------|---------------------------------|------------|
-| `pymupdf4llm`       | `extract_pdf_pymupdf4llm.py`    | `<input> <output> --doc-id <id> --source-rel <rel>` |
-| `mammoth`           | `extract_docx.py`               | `<input> <output> --doc-id <id> --source-rel <rel>` |
+| `pymupdf4llm`       | `extract_pdf_pymupdf4llm.py`    | `<input> <output> --doc-id <id> --source-rel <rel>` (auto image extraction to `<kb_dir>/assets/`; override with `--assets-dir`/`--assets-rel`, disable with `--no-extract-images`) |
+| `mammoth`           | `extract_docx.py`               | `<input> <output> --doc-id <id> --source-rel <rel>` (auto-routes to `pandoc` when `has_equations: true` and pandoc is on PATH; force mammoth with `--force-mammoth`) |
 | `python-pptx`       | `extract_pptx.py`               | `<input> <output> --doc-id <id> --source-rel <rel>` |
 | `passthrough-md`    | `extract_md_txt.py --mode md`   | `<input> <output> --doc-id <id> --source-rel <rel> --mode md` |
 | `passthrough-txt`   | `extract_md_txt.py --mode txt`  | `<input> <output> --doc-id <id> --source-rel <rel> --mode txt` |
 | `trafilatura`       | `extract_html.py`               | `<input> <output> --doc-id <id> --source-rel <rel>` |
+| `ipynb`             | `extract_ipynb.py`              | `<input> <output> --doc-id <id> --source-rel <rel>` |
 | `skip`              | (none — file is skipped) | — |
 | `needs_password`    | (Phase 3 user decision; if password given, re-classify and use `pymupdf4llm`) | — |
 | `needs_ocr_or_vlm`  | (Phase 3 user decision; **not in MVP** — skip in this release) | — |

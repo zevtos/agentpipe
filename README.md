@@ -98,7 +98,7 @@ Vanilla Claude Code already ships agents, commands, and skills — but they're *
 | Skill | Purpose | Triggers on |
 |-------|---------|-------------|
 | `gost-report` | Generate Russian academic reports (`.docx`) formatted to GOST 7.32 — лабораторные, отчёты по практике, курсовые, ВКР. Two built-in profiles (`ITMO_PROFILE`, `GOST_PROFILE`) plus `UniversityProfile` for any other vuz. | Russian-language asks for «лабораторную», «отчёт по ГОСТ», «курсовую», «ИТМО», etc. |
-| `doc2kb` | Convert a folder of mixed documents (PDF text-layer, DOCX, PPTX with speaker notes, MD, TXT, HTML) into an LLM-optimized knowledge base — per-source Markdown + `manifest.json` + `INDEX.md` + `AGENTS.md`. Two-session pattern: extraction session prepares the kb, a second session ingests it. Local-first, no paid APIs. | «обработай папку с документами», «сделай базу знаний из папки», "build a knowledge base", "feed files to Claude", "RAG prep", "doc corpus". |
+| `doc2kb` | Convert a folder of mixed documents (PDF text-layer, DOCX, PPTX with speaker notes, IPYNB Jupyter notebooks, MD, TXT, HTML) into an LLM-optimized knowledge base — per-source Markdown + `manifest.json` + `INDEX.md` + `AGENTS.md`. Two-session pattern: extraction session prepares the kb, a second session ingests it. Local-first, no paid APIs. | «обработай папку с документами», «сделай базу знаний из папки», "build a knowledge base", "feed files to Claude", "RAG prep", "doc corpus", "ingest Jupyter notebooks". |
 
 Each release attaches every skill as a standalone `.zip` to the GitHub release page. Two install paths depending on where you use Claude:
 

@@ -74,6 +74,8 @@ def collect_docs(kb_dir: Path) -> list[dict[str, Any]]:
             "inline_images", "has_tables", "has_equations",
             "has_charts", "has_tracked_changes", "paragraphs",
             "source_encoding", "headings",
+            "cells", "code_cells", "markdown_cells", "raw_cells",
+            "has_outputs", "language", "kernelspec_name",
         ):
             if key in fm:
                 rec[key] = fm[key]
@@ -193,6 +195,10 @@ def write_index_md(kb_dir: Path, manifest: dict[str, Any]) -> None:
                     bits.append(f"{d['pages']}p")
                 if d.get("slides"):
                     bits.append(f"{d['slides']} slides")
+                if d.get("cells"):
+                    bits.append(f"{d['cells']} cells")
+                if d.get("has_outputs"):
+                    bits.append("with outputs")
                 if d.get("has_notes"):
                     bits.append("with notes")
                 if d.get("inline_images"):
@@ -241,6 +247,7 @@ def write_llms_txt(kb_dir: Path, manifest: dict[str, Any]) -> None:
         "pdf": "PDFs",
         "docx": "Word documents",
         "pptx": "Presentations",
+        "ipynb": "Jupyter notebooks",
         "md": "Markdown",
         "txt": "Plain text",
         "html": "HTML pages",
@@ -255,6 +262,8 @@ def write_llms_txt(kb_dir: Path, manifest: dict[str, Any]) -> None:
                 bits.append(f"{d['pages']} pages")
             elif d.get("slides"):
                 bits.append(f"{d['slides']} slides")
+            elif d.get("cells"):
+                bits.append(f"{d['cells']} cells")
             if d.get("tokens_estimated"):
                 bits.append(f"~{d['tokens_estimated']:,} tokens")
             desc = ", ".join(bits)
