@@ -1,0 +1,77 @@
+# ultrasearch Stage 1 — minimal viable end-to-end research pipeline.
+# Upper bounds match doc2kb discipline: pin majors, allow patches.
+
+# --- Academic discovery APIs ---
+pyalex>=0.18,<1.0
+semanticscholar>=0.10,<1.0
+arxiv>=2.1,<3.0
+
+# --- HTTP + async + retries ---
+httpx[http2]>=0.27,<1.0
+aiometer>=0.5,<1.0
+tenacity>=9.0,<10.0
+
+# --- OA PDF locator ---
+unpywall>=0.2,<1.0
+
+# --- PDF parsing (Stage 1: lightweight only; docling deferred to Stage 2).
+# pymupdf4llm pulls pymupdf — both AGPL v3; fine for an open-source skill.
+pymupdf4llm>=0.0.20,<2.0
+
+# --- Embeddings + vector store ---
+# torch wheel sizes: macos-arm64 ~150 MB, linux-cuda ~700 MB.
+torch>=2.4,<3.0
+sentence-transformers>=3.2,<5.0
+numpy>=1.26,<3.0
+
+# sqlite-vec ships pre-built macos-arm64 wheels (~165 KB). Pin tight — vec0
+# virtual table syntax has shifted between minor versions.
+sqlite-vec>=0.1.9,<0.2
+
+# --- Token counting (matches doc2kb tiktoken usage) ---
+tiktoken>=0.7.0,<1.0
+
+# === Stage 2 additions =====================================================
+
+# Crossref REST wrapper — backward references for citation traversal +
+# Retraction Watch via `filter=update-type:retraction`.
+habanero>=2.3,<3.0
+
+# bioRxiv / medRxiv / chemRxiv local dumps. Lightweight (~30 MB / 50K records).
+paperscraper>=0.3,<1.0
+
+# IBM docling — fallback parser for math/table-heavy pages.
+# First run downloads ~358 MB of layout + TableFormer models from
+# HuggingFace `ds4sd/docling-models`. Apple-Silicon MPS auto-detected.
+docling>=2.0,<3.0
+
+# Reference-list extractor (CERN, pure Python). Used by traverse.py to
+# augment Crossref backward references when DOIs missing.
+refextract>=1.1,<2.0
+
+# Zotero API client for --export-zotero.
+pyzotero>=1.5,<2.0
+
+# BibTeX serialization for the `.bib` file we always write next to the report.
+bibtexparser>=1.4,<3.0
+
+# === Stage 3 additions =====================================================
+
+# Argos Translate — offline en↔ru translation. First-call downloads ~50MB
+# per direction from argosopentech.com. Pure pip, no API key.
+argostranslate>=1.9,<2.0
+
+# Query-language detection (BSD-licensed Python port of Google's CLD2).
+langdetect>=1.0,<2.0
+
+# BM25 hybrid retrieval — Stage 3 stretch goal, kept in deps for forward-compat.
+rank-bm25>=0.2,<1.0
+
+# Optional: sci-hub fallback for --grey opt-in. Pinned to a known-stable
+# major; user must explicitly install if they want --grey to work:
+#   pip install scidownl
+# We do NOT include it by default — research §14 line 300 + the disclaimer
+# in fetch.py GREY_DISCLAIMER spell out the legal gray zone.
+# scidownl>=1.0,<2.0
+
+

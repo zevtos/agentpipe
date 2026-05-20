@@ -23,6 +23,18 @@ SCHEMA_VERSION_DOC = "1.0"
 _HEURISTIC_CHARS_PER_TOKEN_ASCII = 3.5
 _HEURISTIC_CHARS_PER_TOKEN_NONASCII = 2.0
 
+# Image-validator constants for save_image_safe(). Claude's vision encoder
+# rejects/garbles images where max(width, height) > ~2000 px — the model
+# returns a generic "image too large" response instead of analysing the
+# content. We downscale anything larger to stay inside the working range.
+# Min dimension filters obvious decorative pixels (1×1 spacers, 4×4 bullet
+# glyphs) that otherwise clutter the kb assets dir without adding signal.
+MAX_IMAGE_DIMENSION = 2000
+MIN_IMAGE_DIMENSION = 16
+# Default JPEG quality for downscaled photos. Re-encoding at 90 keeps file
+# size manageable while staying visually lossless to the vision model.
+DEFAULT_JPEG_QUALITY = 90
+
 
 # ---------- logging ----------
 
@@ -479,3 +491,208 @@ def emit_failure(reason: str, extra: dict[str, Any] | None = None) -> None:
     if extra:
         payload.update(extra)
     json_stdout(payload)
+
+
+# ---------- image validator + safe writer ----------
+
+# Vector / metafile formats the vision encoder cannot render. Emit a warning
+# and skip — re-encoding them as raster would require a rasterizer
+# (e.g. CairoSVG, Inkscape) outside the lightweight tier.
+_NON_VIEWABLE_EXTENSIONS = {"wmf", "emf", "svg", "pdf", "eps"}
+
+
+class ImageSaveResult:
+    """Outcome of save_image_safe(). Use bool(result) to test success.
+
+    Attributes:
+        path: Path the bytes were written to, or None if skipped.
+        reason: Short human-readable status ('saved', 'downscaled',
+                'skipped_too_small', 'skipped_format', 'skipped_corrupt',
+                'skipped_duplicate', 'passthrough').
+        width, height: Final raster dimensions, if known.
+        original_width, original_height: Pre-resize dimensions, if known.
+        downscaled: True iff the image was reduced to fit MAX_IMAGE_DIMENSION.
+        sha256: First-16-hex of content hash, used for dedup across calls.
+    """
+
+    __slots__ = (
+        "path", "reason", "width", "height",
+        "original_width", "original_height",
+        "downscaled", "sha256",
+    )
+
+    def __init__(self, path: Path | None, reason: str,
+                 width: int | None = None, height: int | None = None,
+                 original_width: int | None = None,
+                 original_height: int | None = None,
+                 downscaled: bool = False, sha256: str | None = None):
+        self.path = path
+        self.reason = reason
+        self.width = width
+        self.height = height
+        self.original_width = original_width
+        self.original_height = original_height
+        self.downscaled = downscaled
+        self.sha256 = sha256
+
+    def __bool__(self) -> bool:
+        return self.path is not None
+
+
+def _image_content_hash(image_bytes: bytes) -> str:
+    """Short SHA-256 prefix used by save_image_safe() for in-document dedup."""
+    return hashlib.sha256(image_bytes).hexdigest()[:16]
+
+
+def save_image_safe(
+    image_bytes: bytes,
+    target_path: Path,
+    *,
+    max_dim: int = MAX_IMAGE_DIMENSION,
+    min_dim: int = MIN_IMAGE_DIMENSION,
+    dedup_cache: dict[str, Path] | None = None,
+    source_ext: str | None = None,
+) -> ImageSaveResult:
+    """Validate, optionally downscale, and write an image extracted from a
+    source document. The single chokepoint every extractor must call instead
+    of `path.write_bytes(...)` so the kb never contains an image larger than
+    MAX_IMAGE_DIMENSION on its longer side (Claude's vision encoder breaks
+    on those) and never contains 1×1 spacer pixels (decorative noise).
+
+    Behaviour:
+      - min(width, height) < min_dim → skipped (likely spacer/decoration).
+      - max(width, height) > max_dim → resized with LANCZOS so that
+        max(width, height) == max_dim, aspect ratio preserved.
+      - Animated GIFs / multi-frame TIFFs → first frame only.
+      - Palette/RGBA images encoded as JPEG → converted to RGB first.
+      - Unsupported formats (WMF/EMF/SVG/PDF/EPS) → skipped (vision encoder
+        cannot render vector). Caller is expected to surface a warning.
+      - Corrupt / undecodable bytes → skipped.
+      - Identical bytes saved already this run (per dedup_cache) → returns
+        the existing path with reason='skipped_duplicate'. dedup is opt-in
+        so callers can disable when filenames must be unique per location.
+
+    The output extension may differ from `target_path.suffix` when Pillow
+    coerces a JPEG/palette combination — check `result.path` for the actual
+    location.
+
+    Returns ImageSaveResult. Callers should test truthiness (`if result:`)
+    rather than `result.path is not None` for readability.
+    """
+    if not image_bytes:
+        return ImageSaveResult(None, "skipped_empty")
+
+    digest = _image_content_hash(image_bytes)
+    if dedup_cache is not None and digest in dedup_cache:
+        return ImageSaveResult(
+            dedup_cache[digest], "skipped_duplicate", sha256=digest,
+        )
+
+    ext_lc = (source_ext or target_path.suffix.lstrip(".")).lower()
+    if ext_lc in _NON_VIEWABLE_EXTENSIONS:
+        return ImageSaveResult(None, "skipped_format", sha256=digest)
+
+    try:
+        from PIL import Image, ImageFile  # type: ignore
+        # Be tolerant of truncated streams (common in office docs that
+        # embed PNG/JPEG slightly past the IEND/EOI marker). LOAD_TRUNCATED
+        # lets us recover what's there instead of dropping the image.
+        ImageFile.LOAD_TRUNCATED_IMAGES = True
+        from io import BytesIO  # type: ignore
+    except ImportError:
+        # Pillow is part of the lightweight tier; if it's missing the venv
+        # is broken. Pass bytes through unchanged so we don't silently lose
+        # data, but flag with a 'passthrough' reason so caller can warn.
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(image_bytes)
+        if dedup_cache is not None:
+            dedup_cache[digest] = target_path
+        return ImageSaveResult(target_path, "passthrough", sha256=digest)
+
+    try:
+        img = Image.open(BytesIO(image_bytes))
+        img.load()  # force decode so corrupt streams fail here, not later
+    except Exception:
+        return ImageSaveResult(None, "skipped_corrupt", sha256=digest)
+
+    original_w, original_h = img.size
+    if min(original_w, original_h) < min_dim:
+        return ImageSaveResult(
+            None, "skipped_too_small",
+            original_width=original_w, original_height=original_h,
+            sha256=digest,
+        )
+
+    w, h = original_w, original_h
+    downscaled = False
+    if max(w, h) > max_dim:
+        scale = max_dim / max(w, h)
+        new_w = max(1, int(round(w * scale)))
+        new_h = max(1, int(round(h * scale)))
+        try:
+            img = img.resize((new_w, new_h), Image.LANCZOS)
+        except Exception:
+            try:
+                img = img.convert("RGB").resize((new_w, new_h), Image.LANCZOS)
+            except Exception:
+                return ImageSaveResult(
+                    None, "skipped_corrupt",
+                    original_width=original_w, original_height=original_h,
+                    sha256=digest,
+                )
+        w, h = new_w, new_h
+        downscaled = True
+
+    fmt = (img.format or "").upper()
+    if not fmt:
+        # No format on first decode — fall back to extension or PNG.
+        fmt = (target_path.suffix.lstrip(".") or "PNG").upper()
+    if fmt == "JPG":
+        fmt = "JPEG"
+    # JPEG cannot store alpha — flatten to RGB.
+    if fmt == "JPEG" and img.mode in ("RGBA", "LA", "P"):
+        img = img.convert("RGB")
+
+    # Match the saved extension to the actual format (some Office files
+    # mislabel a PNG as `.bin` etc.). Use the canonical lowercase mapping.
+    fmt_to_ext = {
+        "JPEG": "jpeg", "PNG": "png", "GIF": "gif",
+        "BMP": "bmp", "TIFF": "tiff", "WEBP": "webp",
+    }
+    target_ext = fmt_to_ext.get(fmt, target_path.suffix.lstrip(".").lower() or "png")
+    if target_path.suffix.lstrip(".").lower() != target_ext:
+        target_path = target_path.with_suffix(f".{target_ext}")
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    save_kwargs: dict[str, Any] = {"format": fmt}
+    if fmt == "JPEG":
+        save_kwargs["quality"] = DEFAULT_JPEG_QUALITY
+        save_kwargs["optimize"] = True
+    elif fmt == "PNG":
+        save_kwargs["optimize"] = True
+
+    try:
+        img.save(target_path, **save_kwargs)
+    except Exception:
+        # Last-ditch: try PNG with explicit RGB conversion.
+        try:
+            target_path = target_path.with_suffix(".png")
+            img.convert("RGB").save(target_path, format="PNG", optimize=True)
+            fmt = "PNG"
+        except Exception:
+            return ImageSaveResult(
+                None, "skipped_corrupt",
+                width=w, height=h,
+                original_width=original_w, original_height=original_h,
+                sha256=digest,
+            )
+
+    if dedup_cache is not None:
+        dedup_cache[digest] = target_path
+    return ImageSaveResult(
+        target_path,
+        "downscaled" if downscaled else "saved",
+        width=w, height=h,
+        original_width=original_w, original_height=original_h,
+        downscaled=downscaled, sha256=digest,
+    )

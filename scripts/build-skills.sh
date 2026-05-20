@@ -51,7 +51,10 @@ for d in "$SKILLS_SRC"/*/; do
     rm -f "$out"
     (cd "$SKILLS_SRC" && zip -qr "$out" "$name" \
         -x "*.DS_Store" "*/__pycache__/*" "*.pyc" \
-           "*/.venv/*" "*/.venv.lock" "*/.installed_hash")
+           "*/.venv/*" "*/.venv.lock" "*/.installed_hash" \
+           "*/data/corpus.db" "*/data/corpus.db-wal" "*/data/corpus.db-shm" \
+           "*/data/cache/*" "*/data/retraction_watch.csv" \
+           "*/data/retraction_watch.csv.tmp" "*/data/_logs/*")
     echo -e "${GREEN}✓${NC} dist/$name.zip"
     count=$((count + 1))
 done

@@ -51,6 +51,7 @@ from _common import (  # noqa: E402
     emit_success,
     log,
     sanitize_heading,
+    save_image_safe,
     sha256_of,
     today_iso,
     tool_version_string,
@@ -195,30 +196,33 @@ def _replace_dropped_pictures_with_assets(
     doc_id: str,
     assets_dir: Path,
     assets_rel_prefix: str,
-) -> tuple[str, list[str], int, int]:
+) -> tuple[str, list[str], int, int, list[str]]:
     """Extract embedded images from the PDF and substitute pymupdf4llm's
     `==> picture [WxH] intentionally omitted <==` placeholders with
-    Markdown image links pointing to the saved files.
+    Markdown image links pointing to the saved files. Images that pymupdf4llm
+    knows about but doesn't emit a placeholder for — most often table-cell
+    icons in BPMN-style reference docs — are appended to the bottom of each
+    `[page N]` section under an `### Additional page N images` heading so
+    they're not silently lost.
 
     Numbering: images are saved as `<doc_id>-pageNN-imgN.<ext>` and
     placeholders are matched in pymupdf4llm's emission order, which
     mirrors pymupdf's `page.get_images(full=True)` order. When the two
-    diverge (rare — would require pymupdf4llm to skip an image entirely),
-    captions can be off by one row; content is still present in
-    `assets/`.
+    diverge (common in table-heavy PDFs), unmatched images surface in the
+    additional-images block rather than being silently lost.
 
-    Returns (new_body, saved_relpaths, replaced_count, total_placeholders).
-    The caller uses the counts to decide whether to keep or suppress the
-    `dropped_pictures` warning.
+    Every image goes through save_image_safe(), enforcing the 2000-px
+    max-dimension cap and the decorative-pixel filter. Identical images
+    (logos, repeated icons) deduplicate to the first saved copy.
+
+    Returns (new_body, saved_relpaths, replaced_count, total_placeholders,
+             extractor_warnings).
     """
     import pymupdf  # type: ignore
 
     total = len(PICTURE_PLACEHOLDER_RE.findall(body))
-    if total == 0:
-        return body, [], 0, 0
+    warnings: list[str] = []
 
-    saved: dict[tuple[int, int], str] = {}
-    saved_relpaths: list[str] = []
     try:
         assets_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:
@@ -228,6 +232,12 @@ def _replace_dropped_pictures_with_assets(
         doc = pymupdf.open(str(input_pdf))
     except Exception as e:
         raise RuntimeError(f"failed to reopen pdf for image extraction: {e}") from e
+
+    # saved_per_page[page_no] = list[(image_idx, relpath, save_reason)]
+    saved_per_page: dict[int, list[tuple[int, str, str]]] = {}
+    saved_relpaths: list[str] = []
+    seen_relpaths: set[str] = set()
+    dedup_cache: dict = {}
     try:
         for page_no in range(1, doc.page_count + 1):
             page = doc[page_no - 1]
@@ -237,24 +247,44 @@ def _replace_dropped_pictures_with_assets(
                     info = doc.extract_image(xref)
                 except Exception:
                     continue
-                ext = (info.get("ext") or "bin").lower()
-                filename = f"{doc_id}-page{page_no:02d}-img{idx}.{ext}"
-                try:
-                    (assets_dir / filename).write_bytes(info["image"])
-                except OSError:
+                ext = (info.get("ext") or "png").lower()
+                blob = info.get("image")
+                if not blob:
                     continue
-                saved[(page_no, idx)] = filename
-                saved_relpaths.append(f"{assets_rel_prefix}/{filename}")
+                filename = f"{doc_id}-page{page_no:02d}-img{idx}.{ext}"
+                target = assets_dir / filename
+                result = save_image_safe(
+                    blob, target, dedup_cache=dedup_cache, source_ext=ext,
+                )
+                if not result:
+                    if result.reason == "skipped_format":
+                        warnings.append(
+                            f"page {page_no} image {idx}: skipped non-viewable "
+                            f"format ({ext})"
+                        )
+                    elif result.reason == "skipped_corrupt":
+                        warnings.append(
+                            f"page {page_no} image {idx}: corrupt image bytes — skipped"
+                        )
+                    # too-small: silent (decorative pixel)
+                    continue
+                rel = f"{assets_rel_prefix}/{result.path.name}"
+                saved_per_page.setdefault(page_no, []).append(
+                    (idx, rel, result.reason)
+                )
+                if rel not in seen_relpaths:
+                    seen_relpaths.add(rel)
+                    saved_relpaths.append(rel)
     finally:
         doc.close()
 
-    if not saved:
-        return body, [], 0, total
+    if not saved_per_page:
+        return body, [], 0, total, warnings
 
     page_anchor_re = re.compile(r"\[page (\d+)\]")
     anchors = list(page_anchor_re.finditer(body))
     if not anchors:
-        return body, saved_relpaths, 0, total
+        return body, saved_relpaths, 0, total, warnings
 
     replaced = 0
     out: list[str] = [body[: anchors[0].start()]]
@@ -262,27 +292,52 @@ def _replace_dropped_pictures_with_assets(
         page_no = int(anchor.group(1))
         section_end = anchors[i + 1].start() if i + 1 < len(anchors) else len(body)
         section = body[anchor.start():section_end]
+
+        page_imgs = saved_per_page.get(page_no, [])
+        used_idx: set[int] = set()
         counter = {"n": 0}
 
-        def _sub(_match, _page_no=page_no, _counter=counter):
+        def _sub(_match, _page_no=page_no, _counter=counter, _imgs=page_imgs,
+                 _used=used_idx):
             nonlocal replaced
             _counter["n"] += 1
-            fname = saved.get((_page_no, _counter["n"]))
-            if not fname:
+            # Look up the n-th image by its original idx (1-based).
+            target = next((t for t in _imgs if t[0] == _counter["n"]), None)
+            if target is None:
                 return _match.group(0)
+            _used.add(target[0])
             replaced += 1
             return (
-                f"![page {_page_no}, image {_counter['n']}]"
-                f"({assets_rel_prefix}/{fname})"
+                f"![page {_page_no}, image {_counter['n']}]({target[1]})"
             )
 
-        out.append(PICTURE_PLACEHOLDER_RE.sub(_sub, section))
+        substituted = PICTURE_PLACEHOLDER_RE.sub(_sub, section)
+
+        # Any images for this page that weren't referenced by a placeholder
+        # belong to table cells, watermarks, or otherwise sit outside the
+        # main text flow. Surface them in an explicit block so a downstream
+        # agent doesn't miss the BPMN icon next to a definition or a
+        # diagram embedded inside a table cell.
+        extras_block_lines: list[str] = []
+        for idx, rel, _reason in page_imgs:
+            if idx in used_idx:
+                continue
+            extras_block_lines.append(
+                f"![page {page_no}, image {idx} (additional)]({rel})"
+            )
+        if extras_block_lines:
+            # Trim a trailing newline from substituted so the heading sits
+            # on its own paragraph after the body text.
+            section_text = substituted.rstrip("\n")
+            section_text += "\n\n"
+            section_text += f"#### Additional embedded images on page {page_no}\n\n"
+            section_text += "\n\n".join(extras_block_lines) + "\n\n"
+            out.append(section_text)
+        else:
+            out.append(substituted)
 
     new_body = "".join(out)
-    # Trim assets list to those actually referenced (anchors order).
-    used = {saved[(p, i)] for (p, i) in saved.keys()}
-    saved_relpaths = [r for r in saved_relpaths if r.rsplit("/", 1)[-1] in used]
-    return new_body, saved_relpaths, replaced, total
+    return new_body, saved_relpaths, replaced, total, warnings
 
 
 def extract(
@@ -362,15 +417,15 @@ def extract(
     # successfully recovered.
     if extract_images and assets_dir is not None:
         try:
-            body, asset_relpaths, replaced, total_drops = (
-                _replace_dropped_pictures_with_assets(
-                    body=body,
-                    input_pdf=input_pdf,
-                    doc_id=doc_id,
-                    assets_dir=assets_dir,
-                    assets_rel_prefix=assets_rel_prefix,
-                )
+            (body, asset_relpaths, replaced, total_drops,
+             image_warnings) = _replace_dropped_pictures_with_assets(
+                body=body,
+                input_pdf=input_pdf,
+                doc_id=doc_id,
+                assets_dir=assets_dir,
+                assets_rel_prefix=assets_rel_prefix,
             )
+            warnings.extend(image_warnings)
             if asset_relpaths:
                 extras["assets"] = asset_relpaths
         except RuntimeError as e:

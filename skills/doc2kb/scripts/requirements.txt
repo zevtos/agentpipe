@@ -14,6 +14,13 @@ openpyxl>=3.1.0,<4.0
 trafilatura>=1.12.0,<3.0
 markdownify>=0.13.0,<2.0
 charset-normalizer>=3.3.0,<4.0
+# Pillow powers save_image_safe() — every extractor funnels image bytes
+# through it to enforce the 2000-px max-dimension cap (Claude's vision
+# encoder breaks above ~2 k px) and to re-encode palette/RGBA images that
+# would otherwise be unviewable. Pillow is a transitive dep of pymupdf and
+# pymupdf-layout but we pin it explicitly so the lightweight tier stays
+# resilient if a future pymupdf release drops the dependency.
+Pillow>=10.0,<14.0
 tiktoken>=0.7.0,<1.0
 # Pin lxml — transitive dep of trafilatura, historically XXE-vulnerable
 # before 4.9. Capping below 6 keeps us on tested majors.

@@ -2,18 +2,27 @@
 """
 extract_pptx.py — Phase 4 extractor for PPTX files. Critically, this
 preserves speaker notes — they often contain more semantic content than the
-slides themselves, and most off-the-shelf converters drop them.
+slides themselves, and most off-the-shelf converters drop them. Equally
+critical, this extracts embedded pictures to disk via save_image_safe() —
+without that, diagram-only slides ("Пример 1", "Пример 2", …) collapse to
+just the header and the second-session agent has no way to know what the
+slide was about.
 
 CLI:
     extract_pptx.py <input_pptx> <output_md>
                     [--doc-id doc-NNN]
                     [--source-rel relative/path/in/corpus.pptx]
+                    [--assets-dir <abs_path>]
+                    [--assets-rel <rel_prefix_from_md>]
+                    [--no-extract-images]
 
 Output layout (per slide):
 
     ## Slide N: <best-effort title>
 
     <body text from text frames, in shape order>
+
+    ![Slide N picture M](../assets/doc-NNN-slideNN-imgM.png)
 
     | header | cells |
     | ---    | ---   |
@@ -27,6 +36,16 @@ Output layout (per slide):
 
 The body intentionally interleaves shape contents in document order rather
 than re-ordering by position — readers care about semantics, not layout.
+
+Image handling:
+    - By default, embedded PICTURE shapes (and pictures nested in GROUP
+      shapes one level deep) are extracted via save_image_safe() to the
+      kb's `assets/` directory and referenced from the slide body as
+      Markdown image links. Animations, palette/RGBA-as-JPEG mismatches,
+      and tiny decorative pixels are filtered automatically.
+    - WMF/EMF (Visio paste, "vector clipart") cannot be rendered by the
+      vision encoder; they are skipped and recorded in `warnings`.
+    - `--no-extract-images` reverts to the old count-only behaviour.
 """
 from __future__ import annotations
 
@@ -41,6 +60,7 @@ from _common import (  # noqa: E402
     emit_failure,
     emit_success,
     sanitize_heading,
+    save_image_safe,
     sha256_of,
     today_iso,
     tool_version_string,
@@ -61,6 +81,28 @@ def _try_import():
     except Exception as e:
         emit_failure(f"python-pptx unavailable: {e}")
         sys.exit(1)
+
+
+def _is_picture_like(shape) -> bool:
+    """True if `shape` carries an embedded raster the way a Picture shape
+    does, even when its `shape_type` is PLACEHOLDER rather than PICTURE.
+    `PlaceholderPicture` inherits from `Picture` in python-pptx — both
+    expose `shape.image.blob`, but the placeholder is classified by
+    placeholder type and would otherwise fall through the PICTURE branch
+    silently. Catches the common "title + image" slide layout that
+    BPMN/UML tutorial decks use to show one diagram per slide."""
+    if shape is None:
+        return False
+    try:
+        from pptx.shapes.picture import Picture  # type: ignore
+    except Exception:
+        Picture = None  # noqa: N806
+    if Picture is not None and isinstance(shape, Picture):
+        return True
+    # Fallback duck-typing — some pptx variants expose `.image` on objects
+    # that don't subclass Picture.
+    img = getattr(shape, "image", None)
+    return img is not None and hasattr(img, "blob")
 
 
 # Placeholder types that contain layout chrome (slide number, header, footer,
@@ -145,7 +187,86 @@ def _best_title(slide, MSO_SHAPE_TYPE) -> str | None:
     return None
 
 
-def extract(input_pptx: Path) -> tuple[str, dict, list[str]]:
+def _picture_caption(shape) -> str:
+    """Pull a human-friendly caption from a PICTURE shape. Tries alt_text
+    first (set when authors describe the image for accessibility), falls
+    back to the shape name (often "Picture 12" — uninformative but stable),
+    then to "" so the caller can decide what to write."""
+    for attr in ("alt_text", "name"):
+        try:
+            val = getattr(shape, attr, "") or ""
+            val = val.strip()
+            if val and val.lower() not in ("picture", "image"):
+                return sanitize_heading(val, maxlen=120)
+        except Exception:
+            pass
+    return ""
+
+
+def _save_picture_shape(
+    shape,
+    doc_id: str,
+    slide_idx: int,
+    pic_idx: int,
+    assets_dir: Path,
+    assets_rel_prefix: str,
+    dedup_cache: dict,
+    warnings: list[str],
+) -> tuple[str, str] | None:
+    """Extract a single PICTURE shape's bytes, run them through
+    save_image_safe(), and return (markdown_image_ref, asset_relpath) on
+    success. Returns None when the image was filtered (too small, unviewable
+    format) — caller decides whether to emit a fallback marker.
+
+    The filename pattern is `<doc_id>-slideNN-imgM.<ext>`. Deduplication is
+    intra-document only: a logo repeated on every slide saves disk by
+    reusing the first occurrence, but two different documents that share a
+    bitwise-identical image still keep separate copies (cross-doc dedup
+    would require a manifest-level pass).
+    """
+    try:
+        image = shape.image  # type: ignore[attr-defined]
+        blob = image.blob
+        ext = (image.ext or "png").lower()
+    except Exception as e:
+        warnings.append(
+            f"slide {slide_idx} picture {pic_idx}: cannot read image blob ({e})"
+        )
+        return None
+
+    filename = f"{doc_id}-slide{slide_idx:02d}-img{pic_idx}.{ext}"
+    target = assets_dir / filename
+    result = save_image_safe(
+        blob, target, dedup_cache=dedup_cache, source_ext=ext,
+    )
+    if not result:
+        if result.reason == "skipped_format":
+            warnings.append(
+                f"slide {slide_idx} picture {pic_idx}: skipped non-viewable "
+                f"format ({ext}) — vector/metafile images cannot be rendered "
+                "by the vision encoder"
+            )
+        elif result.reason == "skipped_corrupt":
+            warnings.append(
+                f"slide {slide_idx} picture {pic_idx}: corrupt or unreadable "
+                "image bytes — skipped"
+            )
+        # too-small / duplicate-with-no-prior-path: silent, by design.
+        return None
+
+    rel = f"{assets_rel_prefix}/{result.path.name}"
+    caption = _picture_caption(shape) or f"Slide {slide_idx} picture {pic_idx}"
+    md_ref = f"![{caption}]({rel})"
+    return md_ref, rel
+
+
+def extract(
+    input_pptx: Path,
+    doc_id: str = "doc-000",
+    assets_dir: Path | None = None,
+    assets_rel_prefix: str = "../assets",
+    extract_images: bool = True,
+) -> tuple[str, dict, list[str]]:
     Presentation, MSO_SHAPE_TYPE = _try_import()
     warnings: list[str] = []
     extras: dict = {
@@ -168,6 +289,18 @@ def extract(input_pptx: Path) -> tuple[str, dict, list[str]]:
     n_tables = 0
     n_charts = 0
     total_notes = 0
+    asset_relpaths: list[str] = []
+    dedup_cache: dict = {}
+
+    do_extract = extract_images and assets_dir is not None
+    if do_extract:
+        try:
+            assets_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            warnings.append(
+                f"cannot create assets dir {assets_dir}: {e} — falling back to count-only"
+            )
+            do_extract = False
 
     for idx, slide in enumerate(prs.slides, start=1):
         title = _best_title(slide, MSO_SHAPE_TYPE)
@@ -190,6 +323,7 @@ def extract(input_pptx: Path) -> tuple[str, dict, list[str]]:
 
         body_text_pieces: list[str] = []
         table_pieces: list[str] = []
+        slide_pic_idx = 0  # 1-based counter for image refs within this slide
 
         for shape in slide.shapes:
             try:
@@ -200,9 +334,25 @@ def extract(input_pptx: Path) -> tuple[str, dict, list[str]]:
             if _is_chrome_placeholder(shape):
                 continue
 
-            # Pictures: count only, no embedding.
-            if stype == MSO_SHAPE_TYPE.PICTURE:
+            # Pictures (regular + placeholder-pictures, e.g. "Picture 2"
+            # filling a content placeholder on diagram-only slides).
+            if stype == MSO_SHAPE_TYPE.PICTURE or _is_picture_like(shape):
                 n_images += 1
+                slide_pic_idx += 1
+                if do_extract:
+                    saved = _save_picture_shape(
+                        shape, doc_id, idx, slide_pic_idx,
+                        assets_dir, assets_rel_prefix, dedup_cache, warnings,
+                    )
+                    if saved is not None:
+                        md_ref, relpath = saved
+                        body_text_pieces.append(md_ref)
+                        if relpath not in asset_relpaths:
+                            asset_relpaths.append(relpath)
+                    else:
+                        body_text_pieces.append(
+                            f"*[Slide {idx} picture {slide_pic_idx} skipped]*"
+                        )
                 continue
 
             # Tables.
@@ -237,8 +387,26 @@ def extract(input_pptx: Path) -> tuple[str, dict, list[str]]:
                             t = _shape_text(gsub).strip()
                             if t:
                                 body_text_pieces.append(t)
-                        elif gsub.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                        elif (gsub.shape_type == MSO_SHAPE_TYPE.PICTURE
+                              or _is_picture_like(gsub)):
                             n_images += 1
+                            slide_pic_idx += 1
+                            if do_extract:
+                                saved = _save_picture_shape(
+                                    gsub, doc_id, idx, slide_pic_idx,
+                                    assets_dir, assets_rel_prefix,
+                                    dedup_cache, warnings,
+                                )
+                                if saved is not None:
+                                    md_ref, relpath = saved
+                                    body_text_pieces.append(md_ref)
+                                    if relpath not in asset_relpaths:
+                                        asset_relpaths.append(relpath)
+                                else:
+                                    body_text_pieces.append(
+                                        f"*[Slide {idx} picture "
+                                        f"{slide_pic_idx} skipped]*"
+                                    )
                 except Exception:
                     pass
 
@@ -272,6 +440,8 @@ def extract(input_pptx: Path) -> tuple[str, dict, list[str]]:
     extras["inline_images"] = n_images
     extras["has_tables"] = n_tables > 0
     extras["has_charts"] = n_charts > 0
+    if asset_relpaths:
+        extras["assets"] = asset_relpaths
     if n_charts:
         warnings.append(f"{n_charts} chart(s) skipped (rendered as *(chart)* placeholder)")
 
@@ -305,6 +475,25 @@ def main() -> int:
     ap.add_argument("output_md")
     ap.add_argument("--doc-id", default="doc-000")
     ap.add_argument("--source-rel", default=None)
+    ap.add_argument(
+        "--assets-dir",
+        default=None,
+        help="Absolute directory to write extracted slide images into. "
+             "Defaults to <output_md>.parent.parent/assets (= <kb_dir>/assets).",
+    )
+    ap.add_argument(
+        "--assets-rel",
+        default="../assets",
+        help="Relative prefix used inside the Markdown body to link the "
+             "saved images (default: '../assets', matching the standard "
+             "kb_dir/docs/*.md → kb_dir/assets/ layout).",
+    )
+    ap.add_argument(
+        "--no-extract-images",
+        action="store_true",
+        help="Disable picture extraction; embedded images are counted but "
+             "not saved to disk and not referenced from the markdown body.",
+    )
     args = ap.parse_args()
 
     in_path = Path(args.input_pptx).expanduser().resolve()
@@ -320,8 +509,23 @@ def main() -> int:
         emit_failure(f"input not found: {in_path}")
         return 1
 
+    if args.no_extract_images:
+        assets_dir: Path | None = None
+    elif args.assets_dir:
+        assets_dir = Path(args.assets_dir).expanduser().resolve()
+    else:
+        # Default layout: <kb_dir>/docs/*.md + <kb_dir>/assets/. Two
+        # parent-ascents from the output file land on <kb_dir>.
+        assets_dir = out_path.parent.parent / "assets"
+
     try:
-        body, extras, warnings = extract(in_path)
+        body, extras, warnings = extract(
+            in_path,
+            doc_id=args.doc_id,
+            assets_dir=assets_dir,
+            assets_rel_prefix=args.assets_rel,
+            extract_images=not args.no_extract_images,
+        )
     except Exception as e:
         emit_failure(f"extraction failed: {e}", extra={"input": str(in_path)})
         return 1
@@ -343,10 +547,13 @@ def main() -> int:
         "tokens_estimated": count_tokens(body),
         "warnings": warnings,
     }
+    if extras.get("assets"):
+        fm["assets"] = extras["assets"]
     write_md(out_path, fm, body)
     emit_success(out_path, body, warnings, extra={
         "slides": extras.get("slides", 0),
         "has_notes": extras.get("has_notes", False),
+        "assets_extracted": len(extras.get("assets", [])),
     })
     return 0
 
