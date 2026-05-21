@@ -37,23 +37,21 @@ The installer supports two targets via `--target`:
     gost-report/
 ```
 
-**`--target codex`** — copies skills to Codex's open-agent-skills directory and Codex's native skills directory:
+**`--target codex`** — copies skills to Codex's native skills directory:
 
 ```
-~/.agents/
-  skills/                 <- skill folders (same format as Claude)
-    gost-report/
-
 ~/.codex/
-  skills/                 <- skill folders loaded by current Codex sessions
+  skills/                 <- skill folders (same format as Claude)
     gost-report/
 ```
 
 For Codex, agents and commands are intentionally skipped: Codex agents use a different TOML format (live in `~/.codex/agents/`), and Codex CLI has no custom slash commands. Both will be revisited in future releases.
 
+If an older agentpipe install left repo-owned skills under `~/.agents/skills/`, the Codex target removes only those legacy copies and leaves unrelated user content alone.
+
 If you use both clients, run the installer twice — once per target. The install paths don't conflict.
 
-On WSL, the Claude target still prefers an existing Windows-side `~/.claude` directory. The Codex target uses the current shell's `$HOME` for `~/.agents` and `~/.codex`; run `install.ps1` from Windows if you want a Windows-side Codex install.
+On WSL, the Claude target still prefers an existing Windows-side `~/.claude` directory. The Codex target uses the current shell's `$HOME` for `~/.codex`; run `install.ps1` from Windows if you want a Windows-side Codex install.
 
 ### Installing a Skill from a Release Zip
 
@@ -104,7 +102,7 @@ bash install.sh --target codex --dry        # preview Codex install
 bash install.sh --target codex --uninstall  # remove only Codex skills
 bash install.sh --diff                      # diff Claude install (default target)
 bash install.sh --skills-only                # update only skills/* under ~/.claude/
-bash install.sh --target codex --skills-only # update only skills/* under ~/.agents/
+bash install.sh --target codex --skills-only # update only skills/* under ~/.codex/
 ```
 
 ## Safe Defaults Layer

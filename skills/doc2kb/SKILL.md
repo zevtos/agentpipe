@@ -35,7 +35,7 @@ description: Converts a heterogeneous corpus of raw documents (PDF, DOCX, PPTX, 
 python3 <skill_dir>/scripts/ensure_env.py <target_script.py> [args ...]
 ```
 
-`<skill_dir>` is the folder containing `SKILL.md` — typically `~/.claude/skills/doc2kb/` or `~/.agents/skills/doc2kb/`. Never invoke extract scripts directly with system `python3` — they import `_common.py` from the venv site-packages.
+`<skill_dir>` is the folder containing `SKILL.md` — typically `~/.claude/skills/doc2kb/` or `~/.codex/skills/doc2kb/`. Never invoke extract scripts directly with system `python3` — they import `_common.py` from the venv site-packages.
 
 ### Phase 1: Bootstrap (один раз)
 
