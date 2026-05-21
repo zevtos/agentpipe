@@ -23,7 +23,7 @@ set -euo pipefail
 #
 # Targets:
 #   claude (default) — copies agents, commands, and skills to ~/.claude/
-#   codex            — copies skills to ~/.agents/skills/ (Codex's open-agent-skills path).
+#   codex            — copies skills to ~/.codex/skills/.
 #                      Agents and commands are NOT installed: Codex agents use a different
 #                      TOML format and Codex CLI doesn't support custom slash commands.
 
@@ -39,9 +39,10 @@ GIT_TEMPLATE_DIR="$HOME/.git-templates"
 GIT_HOOK_DST="$GIT_TEMPLATE_DIR/hooks/commit-msg"
 
 # Resolve $HOME or Windows USERPROFILE for the given dotfolder name.
-# Used for both ~/.claude (Claude Code) and ~/.agents (Codex skills).
+# Used for ~/.claude (Claude Code). Codex targets intentionally use the
+# current shell's $HOME for ~/.codex.
 detect_home_for() {
-    local subdir="$1"  # ".claude" or ".agents"
+    local subdir="$1"  # ".claude"
 
     # WSL accessing Windows-side dotfolder
     if grep -qi microsoft /proc/version 2>/dev/null; then
@@ -136,7 +137,7 @@ Usage: bash install.sh [--target <name>] [--dry|--diff|--pull|--update|--uninsta
 
 Targets:
   claude (default)  Install agents + commands + skills to ~/.claude/
-  codex             Install skills only to ~/.agents/skills/ (Codex CLI).
+  codex             Install skills only to ~/.codex/skills/ (Codex CLI).
                     Codex agents use TOML (different format) and Codex CLI
                     has no custom slash commands; both are skipped.
 
@@ -208,14 +209,16 @@ case "$TARGET" in
         AGENTS_DST="$BASE/agents"
         COMMANDS_DST="$BASE/commands"
         SKILLS_DST="$BASE/skills"
+        LEGACY_CODEX_SKILLS_DST=""
         ;;
     codex)
-        # Codex skills live in ~/.agents/skills/ (open-agent-skills standard),
-        # NOT in ~/.codex/skills/. ~/.codex/ is for config/agents only.
-        BASE="$(detect_home_for .agents)"
+        # Codex skills live in ~/.codex/skills/. WSL Codex sessions load
+        # Linux-side home paths; Windows-side installs should use install.ps1.
+        BASE="$HOME/.codex"
         AGENTS_DST=""    # Codex agents are TOML files in ~/.codex/agents/ — out of scope
         COMMANDS_DST=""  # Codex CLI does not support custom slash commands
         SKILLS_DST="$BASE/skills"
+        LEGACY_CODEX_SKILLS_DST="$HOME/.agents/skills"
         ;;
     *)
         err "Unknown target: $TARGET (use 'claude' or 'codex')"
@@ -250,6 +253,69 @@ codex_skip_notice() {
     if [[ "$TARGET" == "codex" ]]; then
         warn "Codex CLI has no custom slash commands — skipped commands/"
         warn "Codex agents use a different TOML format — skipped agents/. See README for details."
+        info "Codex skills installed to ~/.codex/skills/."
+    fi
+}
+
+legacy_codex_cleanup_active() {
+    [[ "$TARGET" == "codex" && -n "${LEGACY_CODEX_SKILLS_DST:-}" && -d "$LEGACY_CODEX_SKILLS_DST" && -d "$SKILLS_SRC" ]]
+}
+
+cleanup_empty_legacy_codex_dirs() {
+    local skills_dir="${LEGACY_CODEX_SKILLS_DST:-}"
+    [[ -n "$skills_dir" ]] || return 0
+
+    if [[ -d "$skills_dir" ]]; then
+        rmdir "$skills_dir" 2>/dev/null && log "removed legacy .agents/skills/"
+    fi
+
+    local agents_dir
+    agents_dir="$(dirname "$skills_dir")"
+    if [[ -d "$agents_dir" ]]; then
+        rmdir "$agents_dir" 2>/dev/null && log "removed legacy .agents/"
+    fi
+
+    return 0
+}
+
+cleanup_legacy_codex_skills() {
+    LEGACY_CODEX_CLEANED_COUNT=0
+    legacy_codex_cleanup_active || return 0
+
+    for d in "$SKILLS_SRC"/*/; do
+        [[ -d "$d" ]] || continue
+        local name
+        name=$(basename "$d")
+        if [[ -d "$LEGACY_CODEX_SKILLS_DST/$name" ]]; then
+            rm -rf "$LEGACY_CODEX_SKILLS_DST/$name"
+            log "removed legacy .agents/skills/$name/"
+            LEGACY_CODEX_CLEANED_COUNT=$((LEGACY_CODEX_CLEANED_COUNT + 1))
+        fi
+    done
+
+    cleanup_empty_legacy_codex_dirs
+    return 0
+}
+
+dry_legacy_codex_cleanup() {
+    legacy_codex_cleanup_active || return 0
+
+    local shown=0
+    for d in "$SKILLS_SRC"/*/; do
+        [[ -d "$d" ]] || continue
+        local name
+        name=$(basename "$d")
+        if [[ -d "$LEGACY_CODEX_SKILLS_DST/$name" ]]; then
+            if [[ "$shown" -eq 0 ]]; then
+                echo "Legacy Codex cleanup ($LEGACY_CODEX_SKILLS_DST):"
+                shown=1
+            fi
+            warn "  - $name/ (remove old .agents copy)"
+        fi
+    done
+
+    if [[ "$shown" -eq 1 ]]; then
+        echo ""
     fi
 }
 
@@ -863,6 +929,8 @@ do_install() {
         done
     fi
 
+    cleanup_legacy_codex_skills
+
     if attribution_active; then
         echo ""
         do_attribution_fix
@@ -958,6 +1026,9 @@ do_uninstall() {
         done
     fi
 
+    cleanup_legacy_codex_skills
+    count=$((count + ${LEGACY_CODEX_CLEANED_COUNT:-0}))
+
     # Remove directories only if empty
     for d in "$AGENTS_DST" "$COMMANDS_DST" "$SKILLS_DST"; do
         [[ -n "$d" && -d "$d" ]] || continue
@@ -1031,13 +1102,13 @@ do_dry() {
     fi
 
     if [[ -n "$SKILLS_DST" && -d "$SKILLS_SRC" ]]; then
-        echo "Skills:"
+        echo "Skills ($SKILLS_DST):"
         for d in "$SKILLS_SRC"/*/; do
             [[ -d "$d" ]] || continue
             local name
             name=$(basename "$d")
             if [[ -d "$SKILLS_DST/$name" ]]; then
-                if diff -rq "$d" "$SKILLS_DST/$name" >/dev/null 2>&1; then
+                if diff -rq -x .venv -x .venv.lock "$d" "$SKILLS_DST/$name" >/dev/null 2>&1; then
                     echo "  = $name/ (identical)"
                 else
                     warn "  ~ $name/ (CHANGED)"
@@ -1048,6 +1119,8 @@ do_dry() {
         done
         echo ""
     fi
+
+    dry_legacy_codex_cleanup
 
     do_attribution_dry
     do_config_defaults_dry
@@ -1113,10 +1186,10 @@ do_diff() {
             local name
             name=$(basename "$d")
             if [[ -d "$SKILLS_DST/$name" ]]; then
-                if ! diff -rq "$d" "$SKILLS_DST/$name" >/dev/null 2>&1; then
+                if ! diff -rq -x .venv -x .venv.lock "$d" "$SKILLS_DST/$name" >/dev/null 2>&1; then
                     echo ""
                     warn "skills/$name/ differs:"
-                    diff --color=auto -ru "$SKILLS_DST/$name" "$d" || true
+                    diff --color=auto -ru -x .venv -x .venv.lock "$SKILLS_DST/$name" "$d" || true
                     has_diff=1
                 fi
             else
@@ -1171,7 +1244,7 @@ do_pull() {
         done
     fi
 
-    if [[ -n "$SKILLS_DST" && -d "$SKILLS_SRC" ]]; then
+    if [[ -n "$SKILLS_DST" && -d "$SKILLS_DST" && -d "$SKILLS_SRC" ]]; then
         for d in "$SKILLS_SRC"/*/; do
             [[ -d "$d" ]] || continue
             local name

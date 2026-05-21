@@ -4,7 +4,7 @@
     agentpipe — Install Script (Windows PowerShell)
 .DESCRIPTION
     Copies agents, commands, and skills from this repo to ~/.claude/ (Claude Code, default)
-    or ~/.agents/skills/ (Codex CLI, with -Target codex; agents and commands are skipped
+    or ~/.codex/skills/ (Codex CLI, with -Target codex; agents and commands are skipped
     because Codex agents use a different TOML format and Codex CLI has no custom slash commands).
 .EXAMPLE
     .\install.ps1                          # install for Claude Code (default)
@@ -77,8 +77,8 @@ $ConfigDenyList = @(
     "Bash(dd * of=/dev/*)"
 )
 
-# Resolve destinations from target. Codex skills go to ~/.agents/skills/ (open-agent-skills
-# standard), NOT ~/.codex/skills/. ~/.codex/ holds config and TOML agents.
+# Resolve destinations from target. Codex skills go to ~/.codex/skills/.
+$LegacyCodexSkillsDst = $null
 switch ($Target) {
     "claude" {
         $Base = Join-Path $env:USERPROFILE ".claude"
@@ -87,10 +87,12 @@ switch ($Target) {
         $SkillsDst   = Join-Path $Base "skills"
     }
     "codex" {
-        $Base = Join-Path $env:USERPROFILE ".agents"
+        $Base = Join-Path $env:USERPROFILE ".codex"
+        $LegacyCodexBase = Join-Path $env:USERPROFILE ".agents"
         $AgentsDst   = $null
         $CommandsDst = $null
         $SkillsDst   = Join-Path $Base "skills"
+        $LegacyCodexSkillsDst = Join-Path $LegacyCodexBase "skills"
     }
 }
 
@@ -119,6 +121,7 @@ function Show-CodexSkipNotice {
     if ($Target -eq "codex") {
         Write-Warn "Codex CLI has no custom slash commands - skipped commands/"
         Write-Warn "Codex agents use a different TOML format - skipped agents/. See README for details."
+        Write-Info "Codex skills installed to ~/.codex/skills/."
     }
 }
 
@@ -126,6 +129,59 @@ function Show-SkillsOnlyNotice {
     if ($SkillsOnly -and $Target -eq "claude") {
         Write-Warn "-SkillsOnly - skipped agents/, commands/, and all settings.json layers"
     }
+}
+
+function Test-LegacyCodexCleanupActive {
+    return ($Target -eq "codex" -and $LegacyCodexSkillsDst -and (Test-Path $LegacyCodexSkillsDst) -and (Test-Path $SkillsSrc))
+}
+
+function Remove-EmptyLegacyCodexDirs {
+    if (-not $LegacyCodexSkillsDst) { return }
+
+    if ((Test-Path $LegacyCodexSkillsDst) -and (@(Get-ChildItem $LegacyCodexSkillsDst -Force).Count -eq 0)) {
+        Remove-Item $LegacyCodexSkillsDst -Force
+        Write-Ok "removed legacy .agents/skills/"
+    }
+
+    $legacyAgentsDir = Split-Path $LegacyCodexSkillsDst -Parent
+    if ((Test-Path $legacyAgentsDir) -and (@(Get-ChildItem $legacyAgentsDir -Force).Count -eq 0)) {
+        Remove-Item $legacyAgentsDir -Force
+        Write-Ok "removed legacy .agents/"
+    }
+}
+
+function Remove-LegacyCodexSkills {
+    $Script:LegacyCodexCleanedCount = 0
+    if (-not (Test-LegacyCodexCleanupActive)) { return }
+
+    Get-ChildItem $SkillsSrc -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        $legacyDst = Join-Path $LegacyCodexSkillsDst $_.Name
+        if (Test-Path $legacyDst) {
+            Remove-Item $legacyDst -Recurse -Force
+            Write-Ok "removed legacy .agents/skills/$($_.Name)/"
+            $Script:LegacyCodexCleanedCount++
+        }
+    }
+
+    Remove-EmptyLegacyCodexDirs
+}
+
+function Show-LegacyCodexCleanupDry {
+    if (-not (Test-LegacyCodexCleanupActive)) { return }
+
+    $shown = $false
+    Get-ChildItem $SkillsSrc -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        $legacyDst = Join-Path $LegacyCodexSkillsDst $_.Name
+        if (Test-Path $legacyDst) {
+            if (-not $shown) {
+                Write-Host "Legacy Codex cleanup ($LegacyCodexSkillsDst):"
+                $shown = $true
+            }
+            Write-Warn "- $($_.Name)/ (remove old .agents copy)"
+        }
+    }
+
+    if ($shown) { Write-Host "" }
 }
 
 # --- Attribution-fix layer (claude target only) ---
@@ -769,7 +825,7 @@ function Do-Install {
         }
     }
 
-    if ($SkillsDst -and (Test-Path $SkillsSrc)) {
+    if (Test-Path $SkillsSrc) {
         New-Item -ItemType Directory -Path $SkillsDst -Force | Out-Null
         Get-ChildItem $SkillsSrc -Directory | ForEach-Object {
             $dst = Join-Path $SkillsDst $_.Name
@@ -783,6 +839,8 @@ function Do-Install {
             $count++
         }
     }
+
+    Remove-LegacyCodexSkills
 
     if (Test-AttributionActive) {
         Write-Host ""
@@ -861,7 +919,7 @@ function Do-Uninstall {
         }
     }
 
-    if ($SkillsDst -and (Test-Path $SkillsSrc)) {
+    if (Test-Path $SkillsSrc) {
         Get-ChildItem $SkillsSrc -Directory -ErrorAction SilentlyContinue | ForEach-Object {
             $dst = Join-Path $SkillsDst $_.Name
             if (Test-Path $dst) {
@@ -871,6 +929,9 @@ function Do-Uninstall {
             }
         }
     }
+
+    Remove-LegacyCodexSkills
+    $count += $Script:LegacyCodexCleanedCount
 
     foreach ($d in @($AgentsDst, $CommandsDst, $SkillsDst)) {
         if ($d -and (Test-Path $d) -and (@(Get-ChildItem $d).Count -eq 0)) {
@@ -941,8 +1002,8 @@ function Do-Dry {
         Write-Host ""
     }
 
-    if ($SkillsDst -and (Test-Path $SkillsSrc)) {
-        Write-Host "Skills:"
+    if (Test-Path $SkillsSrc) {
+        Write-Host "Skills ($SkillsDst):"
         Get-ChildItem $SkillsSrc -Directory | ForEach-Object {
             $dst = Join-Path $SkillsDst $_.Name
             if (Test-Path $dst) {
@@ -962,6 +1023,8 @@ function Do-Dry {
         }
         Write-Host ""
     }
+
+    Show-LegacyCodexCleanupDry
 
     Do-AttributionDry
     Do-ConfigDefaultsDry
@@ -1010,7 +1073,7 @@ function Do-Diff {
         }
     }
 
-    if ($SkillsDst -and (Test-Path $SkillsSrc)) {
+    if (Test-Path $SkillsSrc) {
         Get-ChildItem $SkillsSrc -Directory | ForEach-Object {
             $dst = Join-Path $SkillsDst $_.Name
             if (Test-Path $dst) {
@@ -1108,7 +1171,7 @@ function Do-Pull {
         }
     }
 
-    if ($SkillsDst -and (Test-Path $SkillsSrc)) {
+    if ($SkillsDst -and (Test-Path $SkillsDst) -and (Test-Path $SkillsSrc)) {
         Get-ChildItem $SkillsSrc -Directory | ForEach-Object {
             $dst = Join-Path $SkillsDst $_.Name
             if (Test-Path $dst) {
