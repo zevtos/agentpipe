@@ -1,4 +1,4 @@
--- ultrasearch corpus schema (Stage 3 — schema_version 1.2)
+-- ultrasearch corpus schema (v2 Stage 1 — schema_version 1.3)
 -- ============================================================
 -- This file is loaded by skills/ultrasearch/scripts/index.py via
 -- `con.executescript(open(schema_path).read())` from `_ensure_schema()`.
@@ -88,10 +88,14 @@ CREATE TABLE IF NOT EXISTS papers (
     q_score               REAL,                                      -- Stage 2
     abstract_translated   TEXT,                                      -- Stage 3
     institution           TEXT,                                      -- Stage 3
+    profile               TEXT,                                      -- v2: 'academic'|'dev'|'docs'|'startup'|...
+    source_type           TEXT,                                      -- v2: 'paper'|'repo'|'qa'|'doc'|'forum'|'filing'|'page'
+    quality_score         REAL,                                      -- v2: 0-1, profile-specific (distinct from academic q_score)
+    url                   TEXT,                                      -- v2: canonical URL for non-DOI sources
+    external_id           TEXT,                                      -- v2: e.g. github:owner/repo, so:question:12345
     CHECK (paper_id <> ''),
     CHECK (title    <> ''),
-    CHECK (discovery_source IS NULL
-           OR discovery_source IN ('openalex', 's2', 'arxiv', 'manual')),
+    -- discovery_source was previously CHECK-constrained to academic sources; v2 uses source_type for non-academic (ADR-006)
     CHECK (year IS NULL OR (year BETWEEN 1800 AND 2100))
 );
 
@@ -117,6 +121,11 @@ CREATE INDEX IF NOT EXISTS papers_retracted_idx
     ON papers (retracted_at) WHERE retracted_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS papers_qscore_idx
     ON papers (q_score DESC) WHERE q_score IS NOT NULL;
+
+-- v2 indexes (papers_profile_idx, papers_external_id_idx) are created
+-- post-ALTER from index.py::_migrate_schema, since SQLite cannot create
+-- a partial index that references a column the table doesn't yet have on
+-- legacy 1.0/1.1/1.2 corpus.db files.
 
 -- ============================================================
 -- chunks — paper full-text split into ~500-token windows
@@ -255,9 +264,9 @@ CREATE TABLE IF NOT EXISTS schema_meta (
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
--- Fresh installs land directly on 1.2. Existing 1.0/1.1 corpus.db files are
--- bumped to 1.2 by index.py::_ensure_schema() after the ALTER TABLE pass.
-INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('schema_version', '1.2');
+-- Fresh installs land directly on 1.3. Existing 1.0/1.1/1.2 corpus.db files are
+-- bumped to 1.3 by index.py::_ensure_schema() after the ALTER TABLE pass.
+INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('schema_version', '1.3');
 INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('stage_min',      '1');
 INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('embedding_dim',  '768');
 INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('embedding_model','sentence-transformers/allenai-specter');
@@ -274,6 +283,8 @@ INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('embedding_model','senten
 --   papers_first_seen_idx       incremental sync ("what landed today")
 --   papers_retracted_idx        Stage 2 partial; scans only retracted rows (rare)
 --   papers_qscore_idx           Stage 2 partial DESC; backs "top-N by quality" rankings
+--   papers_profile_idx          v2 partial; profile-scoped scans ('dev', 'docs', ...)
+--   papers_external_id_idx      v2 partial; lookup by github:/so:/etc. composite id
 --   chunks_paper_idx            FK side; backs ON DELETE CASCADE + per-paper rebuilds
 --   chunks_model_idx            lets us migrate one embedding model at a time
 --   chunks (paper_id, seq)      implicit UNIQUE — idempotent re-index key

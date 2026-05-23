@@ -144,18 +144,27 @@ def _ensure_schema(con: sqlite3.Connection) -> None:
 # New tables introduced by later stages (e.g. Stage 3 `rcs_scores`) don't
 # belong here — `CREATE TABLE IF NOT EXISTS` in schema.sql adds them to
 # legacy DBs on every connection bootstrap, no Python migration needed.
+# SECURITY: every entry MUST be a hard-coded literal pair. Both `name` and
+# `sqltype` are interpolated raw into an `ALTER TABLE ... ADD COLUMN` f-string
+# (SQLite has no DDL parameterization). Never derive these from user input,
+# YAML, env vars, or any external source.
 _ADDITIVE_PAPER_COLUMNS: tuple[tuple[str, str], ...] = (
     ("retracted_at",        "TEXT"),   # Stage 2
     ("h_index",             "REAL"),   # Stage 2
     ("q_score",             "REAL"),   # Stage 2
     ("abstract_translated", "TEXT"),   # Stage 3
     ("institution",         "TEXT"),   # Stage 3
+    ("profile",             "TEXT"),   # v2 Stage 1
+    ("source_type",         "TEXT"),   # v2 Stage 1
+    ("quality_score",       "REAL"),   # v2 Stage 1
+    ("url",                 "TEXT"),   # v2 Stage 1
+    ("external_id",         "TEXT"),   # v2 Stage 1
 )
-_TARGET_SCHEMA_VERSION = "1.2"
+_TARGET_SCHEMA_VERSION = "1.3"
 
 
 def _migrate_schema(con: sqlite3.Connection) -> None:
-    """Probe-and-add migration for `papers` additive columns (target 1.2).
+    """Probe-and-add migration for `papers` additive columns (target 1.3).
 
     SQLite has no `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, and
     `CREATE TABLE IF NOT EXISTS` in schema.sql is a no-op once `papers`
@@ -176,8 +185,9 @@ def _migrate_schema(con: sqlite3.Connection) -> None:
     on "duplicate column name" is swallowed per-column.
     """
     # Fast path: probe outside the writer lock first. If nothing is
-    # missing AND the version marker is already current, skip the
-    # IMMEDIATE transaction entirely so read-only callers don't contend.
+    # missing AND the version marker is already current AND the v2
+    # post-ALTER indexes exist, skip the IMMEDIATE transaction entirely
+    # so read-only callers don't contend.
     existing = {row[1] for row in con.execute("PRAGMA table_info(papers)")}
     missing = [(name, sqltype) for (name, sqltype) in _ADDITIVE_PAPER_COLUMNS
                if name not in existing]
@@ -185,7 +195,11 @@ def _migrate_schema(con: sqlite3.Connection) -> None:
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
     current_version = current_version_row[0] if current_version_row else None
-    if not missing and current_version == _TARGET_SCHEMA_VERSION:
+    have_indexes = {row[0] for row in con.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='papers'"
+    )}
+    indexes_ok = {"papers_profile_idx", "papers_external_id_idx"}.issubset(have_indexes)
+    if not missing and current_version == _TARGET_SCHEMA_VERSION and indexes_ok:
         return
 
     con.execute("BEGIN IMMEDIATE")
@@ -209,6 +223,18 @@ def _migrate_schema(con: sqlite3.Connection) -> None:
                         prefix="index")
                     continue
                 raise
+
+        # v2 Stage 1 partial indexes — referenced columns may have just been
+        # added by the ALTER pass above, so they can't live in schema.sql
+        # (executescript() runs before this function on legacy DBs).
+        # CREATE INDEX IF NOT EXISTS is idempotent and cheap on empty cols.
+        for idx_sql in (
+            "CREATE INDEX IF NOT EXISTS papers_profile_idx "
+            "ON papers (profile) WHERE profile IS NOT NULL",
+            "CREATE INDEX IF NOT EXISTS papers_external_id_idx "
+            "ON papers (external_id) WHERE external_id IS NOT NULL",
+        ):
+            con.execute(idx_sql)
 
         current_row = con.execute(
             "SELECT value FROM schema_meta WHERE key = 'schema_version'"
