@@ -92,12 +92,58 @@ python3 ~/.claude/skills/ultrasearch/scripts/ensure_env.py ultrasearch.py \
 | `--refresh-retractions` | off | Stage 2: pull latest Retraction Watch CSV |
 | `--no-docling` | off | Stage 2: disable docling fallback (pymupdf4llm only) |
 | `--sources LIST` | all 6 | comma-separated subset of {openalex,s2,arxiv,crossref,europepmc,core,datacite,hf,kiberleninka,oatd,base} |
-| `--profile fast\|full` | fast | Stage 3: full = cross-encoder rerank + RCS-cached scoring + (planned) multi-section synth |
+| `--profile NAME` | `academic` | v2: pipeline profile (`auto`, `academic`, `dev`, `docs`). `auto` = classifier picks. `academic` = v1 pipeline (default). Other profiles use the generic flat orchestrator. |
+| `--retrieval-profile fast\|full` | fast | Renamed from v1 `--profile fast/full`. Old `--profile=fast`/`--profile=full` still works via deprecation shim. `full` = cross-encoder rerank + RCS-cached scoring + (planned) multi-section synth |
+| `--profiles-dir PATH` | `<skill>/profiles` | override profile YAML directory |
+| `--no-classifier` | off | skip classifier; require explicit `--profile` |
+| `--output-template NAME` | (profile default) | force a template (`library_matrix.md.j2`, `adr.md.j2`, ...) |
 | `--lang auto\|en\|ru` | auto | Stage 3: query-language detection + EN parallel for non-EN queries (argos-translate) |
 | `--render-graph` | off | Stage 3: embed Mermaid citation graph in the report |
 | `--grey` | off | Stage 3: sci-hub opt-in fallback (LEGAL GRAY ZONE — see disclaimer) |
 
-## Pipeline (Stage 2 — v0.5)
+## v2 profiles (v0.15+)
+
+v2 introduces profile-routed pipelines. The `academic` profile (default) is the v1 pipeline below, byte-identical. Other profiles use a generic flat orchestrator (`orchestrate.py`) over source clients in `scripts/sources/`.
+
+| Profile | Sources | Output template | Status |
+|---|---|---|---|
+| `academic` | OpenAlex, S2, arXiv, Crossref, EuropePMC, CORE | `literature_review.md.j2` | v1 (full, ships) |
+| `dev` | GitHub, Stack Exchange, HN Algolia, deps.dev, PyPI, docs_crawl | `library_matrix.md.j2` (alt: `adr.md.j2`) | Stage 1 (ships) |
+| `docs` | llms.txt → sitemap → Crawl4AI BFS → trafilatura | `literature_review.md.j2` | Stage 1 (ships; crawl4ai lazy-installed on first use) |
+| `auto` | (classifier picks) | (per primary profile) | Stage 1 ships keyword fallback; subagent integration is Stage 1.5 |
+
+**Routing logic**: `ultrasearch.py` resolves `--profile`:
+- omitted / `academic` / legacy `fast|full` → v1 `_pipeline()` (academic)
+- `auto` → classifier (keyword fallback for now) → picks primary profile
+- named profile with YAML → v2 `orchestrate.run_pipeline(profile)`
+- named profile without YAML (e.g. `--profile=regulatory` in Stage 1) → falls back to academic with a log line
+
+**Customizing**: drop a `<name>.yaml` into `<skill>/profiles/`, validated against `profiles/_schema.json`. Sources reference modules in `scripts/sources/<id>.py`. Scoring is a `scoring/<file>.py:<func>` reference. Output template is a Jinja2 file in `templates/`.
+
+**SSRF / XXE hardening**: `crawl/__init__.py:_url_is_safe()` rejects loopback / private / link-local / cloud-metadata IPs; `follow_redirects=False`; sitemap parsing uses regex (no XML parser). Source-client HTTP error logs sanitize URLs (`type(e).__name__` only).
+
+### v2 example invocations
+
+```bash
+# dev profile (force, skip classifier)
+python3 ~/.claude/skills/ultrasearch/scripts/ensure_env.py ultrasearch.py \
+    "best Python web framework 2026" \
+    --profile=dev --max-papers 25 --top-k 8 \
+    --out /tmp/web-frameworks.md
+
+# auto-classify, pure-academic query routes to v1 pipeline unchanged
+python3 ~/.claude/skills/ultrasearch/scripts/ensure_env.py ultrasearch.py \
+    "literature review on SSVEP BCI" \
+    --profile=auto --max-papers 30
+
+# docs profile with explicit root URLs (avoid query-only URL extraction)
+python3 ~/.claude/skills/ultrasearch/scripts/ensure_env.py orchestrate.py \
+    "API reference" --profile=docs \
+    --max-items 50 --top-k 20 --out /tmp/docs.md
+# Requires: ensure_env.py runs ensure_crawl4ai() to lazy-install Playwright
+```
+
+## Pipeline (academic profile — v1 / Stage 2)
 
 ```
 discover (async, 6 sources concurrent)

@@ -74,4 +74,38 @@ rank-bm25>=0.2,<1.0
 # in fetch.py GREY_DISCLAIMER spell out the legal gray zone.
 # scidownl>=1.0,<2.0
 
+# === v2 Stage 1 additions ==================================================
+
+# Profile YAML loader. Used by profile.py + classifier.py + orchestrate.py.
+# `safe_load` only — never `yaml.load`.
+pyyaml>=6.0,<7.0
+
+# JSON Schema validator for profiles/_schema.json. Optional — profile.py
+# falls back to a hand-rolled subset validator if jsonschema is missing.
+jsonschema>=4.21,<5.0
+
+# Jinja2 templating for the per-profile output templates in templates/*.j2.
+jinja2>=3.1,<4.0
+
+# --- Lazy-install groups (NOT auto-installed; pulled by ensure_env.py on
+#     first invocation of the profile that needs them) ----------------------
+#
+# docs profile (Crawl4AI + Playwright ~300 MB on first run):
+#   crawl4ai>=0.8.6,<1.0
+#   trafilatura>=2.0,<3.0
+#
+# dev profile (zero extra deps — pure httpx — already in core)
+#
+# Stage 2+ recursive crypto-wallet branches:
+#   bip_utils>=2.12,<3.0
+#   eth-account>=0.13,<1.0
+#   solders>=0.27,<1.0
+#   cosmpy>=0.11,<1.0
+#   pytoniq>=0.1,<1.0
+#   tronpy>=0.6,<1.0
+#
+# Stage 3 video/audio (faster-whisper / mlx-whisper):
+#   yt-dlp>=2024
+#   faster-whisper>=1.0,<2.0
+
 
