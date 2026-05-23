@@ -1,0 +1,24 @@
+#!/bin/sh
+# agentpipe: block commits that introduce a SKILL.md whose YAML `description:`
+# field exceeds Codex CLI's 1024-byte limit. See scripts/validate-skills.py.
+#
+# Enable per-clone with:
+#     git config core.hooksPath scripts/git-hooks
+#
+# Skip a single commit with: git commit --no-verify
+
+set -eu
+
+# Only run when a SKILL.md is staged — keeps unrelated commits instant.
+if ! git diff --cached --name-only --diff-filter=ACMR \
+        | grep -Eq '^skills/[^/]+/SKILL\.md$'; then
+    exit 0
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "pre-commit: python3 not found, skipping skill validation" >&2
+    exit 0
+fi
+
+repo_root=$(git rev-parse --show-toplevel)
+exec python3 "$repo_root/scripts/validate-skills.py"

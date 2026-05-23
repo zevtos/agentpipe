@@ -27,6 +27,8 @@ bash install.sh --model-profile opus  # all agents on opus (default: mixed; pers
 bash scripts/build-skills.sh          # package every skills/<name>/ into dist/<name>.zip
 bash scripts/eval.sh --list           # list local agent eval scenarios (no claude calls)
 bash scripts/eval.sh <agent>          # run agent prompt-quality eval (uses claude -p, ~2 msgs/scenario)
+python3 scripts/validate-skills.py    # enforce 1024-byte limit on every skills/*/SKILL.md description
+git config core.hooksPath scripts/git-hooks  # one-time per clone: enable repo pre-commit hooks
 ```
 
 ## Structure
@@ -38,6 +40,8 @@ skills/<name>/SKILL.md  Skills — folder with SKILL.md plus optional scripts/, 
 research/*.md           Reference docs, numbered 01-14. Not auto-imported by agents.
 docs/                   User-facing documentation (commands.md, agents.md, installation.md, eval.md)
 scripts/build-skills.*  Package skills/* into dist/*.zip for releases
+scripts/validate-skills.py  Enforces the 1024-byte cap on skills/*/SKILL.md descriptions (Codex limit)
+scripts/git-hooks/      Repo-local hooks (pre-commit runs validate-skills.py). Enable with `git config core.hooksPath scripts/git-hooks`
 scripts/eval.sh         Local prompt-quality eval runner (claude -p, no API key, no CI)
 tests/<agent>/<scenario>/  Agent eval scenarios (input.md + rubric.md). Empty by default.
 .github/workflows/      release.yml: on tag push, builds skill zips and attaches to GH release
@@ -111,6 +115,8 @@ Body structure of `SKILL.md`:
 - `## Checklist` (optional) — final verification steps before delivering output
 
 Skills are installed as folders to `~/.claude/skills/<name>/` and discovered by Claude through their description. Don't add new top-level frontmatter fields — Claude Code ignores them silently.
+
+**Description size limit:** the YAML `description:` field must be ≤ **1024 UTF-8 bytes** (not characters — cyrillic and em-dashes are multi-byte). Codex CLI silently skips skills that exceed this at load time. `scripts/validate-skills.py` enforces it; the `pre-commit` hook in `scripts/git-hooks/` blocks commits that break the rule. Push long workflow text into the body, not the description.
 
 ## Conventions
 

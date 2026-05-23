@@ -1,6 +1,6 @@
 ---
 name: gost-report
-description: Generate Russian academic reports (.docx) formatted to GOST 7.32 — лабораторные работы, отчёты по практике, курсовые проекты, ВКР, домашние задания для любого российского вуза (ИТМО, МГУ, СПбГУ, МФТИ, Бауманка, и т.д.). Use this skill whenever the user asks for a report по ГОСТ, лабораторную работу, отчёт по практике, курсовой проект, ВКР, или любой Russian-language student paper that needs proper title page, headings, page numbers, figure/table captions. Trigger this skill even if the user only mentions "лабораторная" or "отчёт" without naming a specific university — Russian-language context (references to ИТМО / МГУ / СПбГУ / университет / ГОСТ) is enough. ITMO is the default profile (preserves the original itmo-report behavior); other universities are supported via UniversityProfile.
+description: Generate Russian academic reports (.docx) formatted to GOST 7.32 — лабораторные, отчёты по практике, курсовые, ВКР, домашние задания для любого российского вуза (ИТМО, МГУ, СПбГУ, МФТИ, Бауманка, и т.д.). Use whenever the user asks for a report по ГОСТ, лабораторную, отчёт по практике, курсовой, ВКР, или любую Russian-language student paper needing proper title page, headings, page numbers, figure/table captions. Triggers even when only "лабораторная" or "отчёт" is mentioned — Russian-language context (ИТМО / МГУ / СПбГУ / университет / ГОСТ) is enough. ITMO is the default profile; other universities via UniversityProfile.
 ---
 
 # GOST report generator
