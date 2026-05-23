@@ -7,6 +7,16 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-05-23
+
+### Fixed
+- **Skills silently dropped by Codex CLI due to over-long descriptions.** Codex enforces a hard 1024-**byte** (not character) limit on the YAML `description:` field; skills exceeding it are rejected at load time with `invalid description: exceeds maximum length of 1024 characters` and never appear in the active skill list. All three shipped skills were over: `ultrasearch` (1263 B), `doc2kb` (1064 B), `gost-report` (1027 B) — cyrillic and em-dash characters are multi-byte in UTF-8, which made byte-count diverge sharply from visible length. Compressed descriptions to 825–856 B by moving implementation details (7-tier fetch cascade, SPECTER cosine gate, pymupdf4llm+docling chain, redundant trigger phrases, university list duplication) into the SKILL body where they were already documented. Trigger keywords (RU+EN) preserved.
+
+### Added
+- **`scripts/validate-skills.py` — byte-accurate description-length validator.** Reads each `skills/*/SKILL.md`, extracts the YAML `description:` field, fails fast (exit 1) if any exceeds 1024 UTF-8 bytes. Stdlib-only (no PyYAML dependency). Refuses multi-line YAML descriptions (`|`/`>` block scalars) with exit 2 to avoid silent under-counting. Run manually or wire into CI.
+- **`scripts/git-hooks/pre-commit` — repo-local commit gate.** Only fires when a `skills/*/SKILL.md` is in the staged set, so unrelated commits stay instant. Skips silently when `python3` is unavailable. Enable per-clone with `git config core.hooksPath scripts/git-hooks` (one-time setup, also activates the existing `commit-msg` attribution-stripper).
+- **CLAUDE.md: description-size-limit rule + setup instructions.** Skill Format section now documents the 1024-byte hard limit and points at the validator + hook; Structure and Commands sections list both new files.
+
 ## [0.15.0] - 2026-05-23
 
 ### Added
