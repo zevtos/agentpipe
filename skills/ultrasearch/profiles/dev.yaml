@@ -1,0 +1,55 @@
+# Dev profile — tools, libraries, frameworks comparison and build planning.
+# Wired to GitHub repo search, Stack Exchange Q&A, Hacker News Algolia,
+# deps.dev for dependency graphs, PyPI for Python-package metadata, plus a
+# fall-through to docs_crawl for project documentation.
+name: dev
+description: Tools, libraries, frameworks comparison and build planning
+
+sources:
+  - id: github
+    weight: 0.30
+    config:
+      stars_min: 50
+      last_commit_max_days: 730
+  - id: stackex
+    weight: 0.20
+    config:
+      sites:
+        - stackoverflow
+        - softwareengineering
+        - serverfault
+  - id: hn
+    weight: 0.10
+    config: {}
+  - id: deps_dev
+    weight: 0.10
+    config: {}
+  - id: pypi
+    weight: 0.10
+    config: {}
+  - id: docs_crawl
+    weight: 0.20
+    config: {}
+
+scoring: scoring/dev.py:score_dev
+output_template: library_matrix.md.j2
+output_alt:
+  - adr.md.j2
+
+# Lazy-install group. ensure_env.py:ensure_dev_profile() pulls these on
+# first invocation; cached afterwards.
+deps:
+  - PyGithub
+  - StackAPI
+
+# Dev queries like "crypto wallet supporting every L1" decompose by network.
+recursive_capable: true
+
+flat_defaults:
+  max_items: 50
+  top_k: 20
+
+recursive_defaults:
+  breadth: 4
+  depth: 2
+  max_branches: 12

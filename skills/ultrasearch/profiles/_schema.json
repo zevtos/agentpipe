@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/zevtos/agentpipe/skills/ultrasearch/profiles/_schema.json",
+  "title": "ultrasearch profile",
+  "description": "Schema for ultrasearch v2 profile YAML files (profiles/<name>.yaml). Each profile names a set of source clients, a scoring function, and an output template. Validation is performed at load time by scripts/profile.py.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "name",
+    "description",
+    "sources",
+    "scoring",
+    "output_template",
+    "deps"
+  ],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Profile identifier. Must match the YAML filename stem (e.g. 'dev' for profiles/dev.yaml).",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "minLength": 1,
+      "maxLength": 32
+    },
+    "description": {
+      "type": "string",
+      "description": "Trigger description used by the classifier subagent. One sentence.",
+      "minLength": 1,
+      "maxLength": 280
+    },
+    "sources": {
+      "type": "array",
+      "description": "Ordered list of source clients this profile invokes. Each entry refers to a module in scripts/sources/<id>.py.",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Source client identifier (matches scripts/sources/<id>.py).",
+            "pattern": "^[a-z][a-z0-9_]*$",
+            "minLength": 1,
+            "maxLength": 48
+          },
+          "weight": {
+            "type": "number",
+            "description": "Relative weight for cross-source ranking. Profile weights need not sum to 1.0 — normalization happens at ranking time.",
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "default": 1.0
+          },
+          "config": {
+            "type": "object",
+            "description": "Free-form per-source configuration passed through to the source client. Schema is owned by each source module.",
+            "additionalProperties": true,
+            "default": {}
+          }
+        }
+      }
+    },
+    "scoring": {
+      "type": "string",
+      "description": "Scoring function reference in the form '<path/to/file.py>:<funcname>' — resolved relative to skill_dir().",
+      "pattern": "^scoring/[a-z][a-z0-9_]*\\.py:[a-z_][a-z0-9_]*$"
+    },
+    "output_template": {
+      "type": "string",
+      "description": "Default Jinja2 template filename (relative to templates/) used by synthesize_v2.py.",
+      "pattern": "^[a-z][a-z0-9_]*\\.md\\.j2$",
+      "minLength": 1,
+      "maxLength": 96
+    },
+    "output_alt": {
+      "type": "array",
+      "description": "Alternative template filenames the classifier may pick instead of output_template (e.g. ['adr.md.j2']).",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]*\\.md\\.j2$",
+        "maxLength": 96
+      },
+      "uniqueItems": true,
+      "default": []
+    },
+    "deps": {
+      "type": "array",
+      "description": "List of pip package names this profile lazy-installs via ensure_env.py. Empty means the profile uses only the base v1 dependencies.",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._\\-\\[\\]]*$"
+      },
+      "uniqueItems": true,
+      "default": []
+    },
+    "recursive_capable": {
+      "type": "boolean",
+      "description": "Whether the profile can be run under --recursive (branching orchestrator).",
+      "default": false
+    },
+    "flat_defaults": {
+      "type": "object",
+      "description": "Default flag values when this profile runs in flat (non-recursive) mode.",
+      "additionalProperties": true,
+      "properties": {
+        "max_items": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "top_k": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        }
+      },
+      "default": {}
+    },
+    "recursive_defaults": {
+      "type": "object",
+      "description": "Default flag values when this profile runs in recursive mode. Ignored if recursive_capable is false.",
+      "additionalProperties": true,
+      "properties": {
+        "breadth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "depth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "max_branches": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        }
+      },
+      "default": {}
+    }
+  }
+}

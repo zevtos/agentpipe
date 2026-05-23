@@ -1,0 +1,43 @@
+# Backward-compat profile: --profile=academic triggers the v1 pipeline 1:1.
+# Source weights mirror the order in v1's DEFAULT_SOURCES (discover.py).
+# Scoring delegates to quality.compute_q_score via scoring/academic.py.
+name: academic
+description: Thesis-level literature review across open academic APIs (OpenAlex, Semantic Scholar, arXiv, Crossref, Europe PMC, CORE)
+
+sources:
+  - id: openalex
+    weight: 0.25
+    config: {}
+  - id: s2
+    weight: 0.20
+    config: {}
+  - id: arxiv
+    weight: 0.15
+    config: {}
+  - id: crossref
+    weight: 0.15
+    config: {}
+  - id: europepmc
+    weight: 0.15
+    config: {}
+  - id: core
+    weight: 0.10
+    config: {}
+
+scoring: scoring/academic.py:score_academic
+output_template: literature_review.md.j2
+output_alt: []
+
+# v1 deps are already in requirements.txt — academic profile adds nothing.
+deps: []
+
+# Academic queries do not decompose into branches (no "for all networks"
+# semantics). Stage 1 keeps this off; Stage 2 may explore section-wise
+# recursion for very large reviews.
+recursive_capable: false
+
+flat_defaults:
+  max_items: 30
+  top_k: 20
+
+recursive_defaults: {}

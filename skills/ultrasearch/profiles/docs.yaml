@@ -1,0 +1,40 @@
+# Docs profile — deep documentation crawl for SDK/API/framework references.
+# Uses llms.txt → sitemap.xml → Crawl4AI BFS as the discovery cascade
+# (see scripts/crawl/__init__.py). The single docs_crawl source covers all
+# three because Stage 1 keeps the crawler dispatch internal to one module.
+name: docs
+description: Deep documentation crawl (SDK, API, framework docs) via llms.txt, sitemap, and Crawl4AI BFS
+
+sources:
+  - id: docs_crawl
+    weight: 1.0
+    config:
+      root_urls: []
+      max_depth: 3
+      max_pages: 200
+
+scoring: scoring/docs.py:score_docs
+# Stage 1: reuse literature_review template. A dedicated docs_reference.md.j2
+# template lands in Stage 1.5 / 2.
+output_template: literature_review.md.j2
+output_alt: []
+
+# Lazy-install group. ensure_env.py:ensure_docs_profile() pulls these on
+# first invocation. crawl4ai brings Playwright as a transitive dep.
+deps:
+  - crawl4ai
+  - trafilatura
+  - lxml
+
+# Docs queries decompose by sub-area: "Stripe API" → ["payments", "webhooks",
+# "billing", "connect"] — fan-out via the recursive orchestrator.
+recursive_capable: true
+
+flat_defaults:
+  max_items: 200
+  top_k: 20
+
+recursive_defaults:
+  breadth: 4
+  depth: 3
+  max_branches: 12
