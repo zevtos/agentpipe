@@ -9,23 +9,31 @@
     output .docx — <project>/docs/report.docx
 
 Project root детектится обходом вверх до первого маркера: .git → Makefile → pyproject.toml → .claude.
+
+ФИО/группа/преподаватель/год берутся из ~/.config/gost-report/config (либо
+из переменных окружения GOST_REPORT_*). Если хочется захардкодить — передай
+явно в TitleConfig(...); env побеждает только когда значение в env непустое.
 """
 from gost_report import Report, TitleConfig, paths
 
 p = paths()  # доступно если нужны явные пути; для базовых сценариев не требуется
 
+# Минимальный вариант: всё про работу — здесь, всё про автора — в ~/.config/gost-report/config.
 r = Report(TitleConfig(
     work_type="Лабораторная работа",
     work_number="№N",
     topic="Тема работы",
-    student_name="Фамилия И.О.",
-    student_group="P3XXX",
-    teacher_name="Фамилия И.О.",
-    teacher_label="Проверил",  # женщине: "Проверила"; ВКР/курсовая: "Руководитель"
-    teacher_degree="к.т.н.",
-    teacher_position="доцент",
-    year="2026",
+    # student_name / student_group / teacher_* / year — из env
 ))
+
+# Командная работа: укажи всех участников.
+# r = Report(TitleConfig(
+#     work_type="Лабораторная работа",
+#     work_number="№N",
+#     topic="Тема работы",
+#     student_names=["Иванов И.И.", "Петров П.П.", "Сидоров С.С."],
+#     # student_group берётся из env (общая группа)
+# ))
 
 r.toc()
 

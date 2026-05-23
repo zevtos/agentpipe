@@ -61,6 +61,78 @@ python3 <skill_dir>/scripts/ensure_env.py твой_скрипт.py
 
 (`<skill_dir>` это папка где лежит `SKILL.md`. Bootstrap пробует `uv` → `conda --prefix` → `python -m venv`. Тёплые запуски ~30 мс, deps обновляются автоматически при апдейте скилла.)
 
+## Персональный конфиг (ФИО, группа, преподаватель)
+
+Чтобы не дублировать в каждом `build.py` своё ФИО, группу и преподавателя, скилл читает дефолты из `~/.config/gost-report/config` (`$XDG_CONFIG_HOME/gost-report/config` если задан). `install.sh` копирует шаблон при первой установке, существующий файл не перетирает.
+
+Формат — обычный `.env`:
+
+```
+GOST_REPORT_STUDENT_NAME="Иванов И.И."
+GOST_REPORT_STUDENT_GROUP="P3XXX"
+GOST_REPORT_TEACHER_NAME="Сидоров С.С."
+GOST_REPORT_TEACHER_DEGREE="к.т.н."
+GOST_REPORT_TEACHER_POSITION="доцент"
+GOST_REPORT_TEACHER_LABEL="Проверил"
+GOST_REPORT_YEAR="2026"
+```
+
+### Subject-уровневый конфиг (по предмету)
+
+Для каждого курса/предмета свой преподаватель, своя кафедра. Чтобы не дублировать это в каждом `build.py`, рядом с проектом курса можно положить `.gost-report.env` — он применяется **только** к работам этого предмета:
+
+```
+учёба/
+├── .git/
+├── математика/
+│   ├── .gost-report.env       ← препод по матану, степень, должность
+│   └── .claude/gost-report/
+│       └── build.py           ← все лабы по матану
+├── физика/
+│   ├── .gost-report.env       ← препод по физике
+│   └── .claude/gost-report/
+│       └── build.py
+```
+
+Скилл при запуске `build.py` идёт вверх по дереву от файла до project root (.git/Makefile/pyproject.toml/.claude — то же определение, что у `paths()`) и берёт первый найденный `.gost-report.env`. В отдельной репе по предмету — конфиг рядом с `.git/`. В монорепо — конфиг в папке конкретного предмета побеждает.
+
+Формат тот же — `KEY=VALUE`. Обычно сюда кладут только специфичное для предмета:
+
+```
+GOST_REPORT_TEACHER_NAME="Сидоров С.С."
+GOST_REPORT_TEACHER_DEGREE="к.т.н."
+GOST_REPORT_TEACHER_POSITION="доцент"
+```
+
+### Приоритет резолва (сверху вниз — первый непустой)
+
+1. `os.environ.GOST_REPORT_*` — реальные переменные окружения (например, экспорт в `.zshrc`)
+2. `<курс>/.gost-report.env` — subject-конфиг (поиск вверх от build.py)
+3. `~/.config/gost-report/config` — глобальный конфиг
+4. Явный аргумент `TitleConfig(student_name=..., ...)` в build.py
+
+То есть env **побеждает build.py**, если непустое. Пустое/отсутствующее значение в env-слое — оставляет слой пониже. Это удобно: ФИО/группа один раз в глобальном, преподаватель один раз в subject-конфиге курса, тема/номер — в `build.py` каждой работы.
+
+Перезаписать путь глобального конфига можно через `GOST_REPORT_CONFIG=/path/to/config`.
+
+## Командная работа
+
+Несколько участников — `student_names` (список):
+
+```python
+r = Report(TitleConfig(
+    work_type="Лабораторная работа",
+    work_number="№3",
+    topic="Командный проект",
+    student_names=["Иванов И.И.", "Петров П.П.", "Сидоров С.С."],
+    student_group="P3XXX",   # общая для всех; из env, если не задано тут
+))
+```
+
+На титульной странице автоматически пишется «Выполнили: …» вместо «Выполнил», все имена выровнены под первое. То же через env: `GOST_REPORT_STUDENT_NAMES="Иванов И.И., Петров П.П., Сидоров С.С."` (CSV).
+
+Если у участников разные группы — указывай это прямо в строке имени: `"Иванов И.И. (P3XXX)"`. Кастомный label (например, «Выполнила» для женщины-одиночки) — через `student_label="Выполнила"` или `GOST_REPORT_STUDENT_LABEL`.
+
 ## Project layout (рекомендуемая конвенция)
 
 Скрипт-генератор кладётся в `<project>/.claude/gost-report/build.py`. Артефакты идут в `<project>/docs/`:
@@ -89,17 +161,13 @@ Project root определяется автоматически (обход в�
 ```python
 from gost_report import Report, TitleConfig
 
+# ФИО, группа, преподаватель и год — из ~/.config/gost-report/config (env-формат).
+# install.sh кладёт туда шаблон при первой установке скилла. Если предпочитаешь
+# хардкод — передай аргументы явно в TitleConfig(...).
 r = Report(TitleConfig(
     work_type="Лабораторная работа",
     work_number="№1",
     topic="Основы работы в командной строке Unix",
-    student_name="Фамилия И.О.",
-    student_group="P3XXX",
-    teacher_name="Фамилия И.О.",
-    teacher_degree="к.т.н.",
-    teacher_position="доцент",
-    teacher_label="Проверил",   # женщине: "Проверила"; ВКР/курсовая: "Руководитель"
-    year="2026",
 ))
 
 r.toc()
@@ -122,7 +190,7 @@ r.save()  # без аргумента → <project>/docs/report.docx; mkdir pare
 
 | Method | What it does |
 |---|---|
-| `r.toc()` | Поле Word TOC. Скажи пользователю обновить через ПКМ → «Обновить поле». |
+| `r.toc()` | Поле Word TOC + флаг `updateFields=true` в settings.xml. Word/Pages при первом открытии файла спросит «Update fields?» — нажми «Yes», и оглавление с нумерацией обновится автоматически. |
 | `r.h1(text)`, `r.h2(text)`, `r.h3(text)` | Заголовки. h1 авто-капс и с новой страницы (профиль). |
 | `r.text(text, bold=False, italic=False)` | Абзац основного текста (justify, отступ 1.25 см). |
 | `r.task(text)` | Жирный «Задание N. ...». |

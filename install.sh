@@ -35,6 +35,7 @@ SKILLS_SRC="$SCRIPT_DIR/skills"
 HOOK_SRC="$SCRIPT_DIR/scripts/git-hooks/commit-msg"
 JSON_MERGE="$SCRIPT_DIR/scripts/json-merge.py"
 CLAUDE_MD_SRC="$SCRIPT_DIR/scripts/CLAUDE.md.example"
+GOST_CONFIG_SRC="$SCRIPT_DIR/skills/gost-report/scripts/config.env.example"
 GIT_TEMPLATE_DIR="$HOME/.git-templates"
 GIT_HOOK_DST="$GIT_TEMPLATE_DIR/hooks/commit-msg"
 
@@ -548,6 +549,52 @@ do_claude_md_dry() {
     echo ""
 }
 
+# --- gost-report persona config (XDG, install-if-missing) ---
+# Skill reads ~/.config/gost-report/config (or $XDG_CONFIG_HOME/...) at runtime
+# to fill TitleConfig defaults: FIO, group, teacher. Path is independent of
+# the skill install location, so it works for both claude and codex targets.
+
+gost_config_path() {
+    if [[ -n "${GOST_REPORT_CONFIG:-}" ]]; then
+        echo "$GOST_REPORT_CONFIG"
+    elif [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
+        echo "$XDG_CONFIG_HOME/gost-report/config"
+    else
+        echo "$HOME/.config/gost-report/config"
+    fi
+}
+
+gost_config_active() {
+    [[ -n "$SKILLS_DST" && -f "$GOST_CONFIG_SRC" ]]
+}
+
+do_gost_config() {
+    gost_config_active || return 0
+    local dst
+    dst=$(gost_config_path)
+    if [[ -f "$dst" ]]; then
+        log "gost-report/config already exists → $dst (not overwriting)"
+    else
+        mkdir -p "$(dirname "$dst")"
+        cp "$GOST_CONFIG_SRC" "$dst"
+        log "gost-report/config installed (template) → $dst"
+        info "  edit $dst to set FIO/group/teacher once, then omit them from build.py"
+    fi
+}
+
+do_gost_config_dry() {
+    gost_config_active || return 0
+    echo "gost-report persona config:"
+    local dst
+    dst=$(gost_config_path)
+    if [[ -f "$dst" ]]; then
+        echo "  = $dst (already exists, will not overwrite)"
+    else
+        info "  + $dst (template, install-if-missing)"
+    fi
+    echo ""
+}
+
 # --- Sound hooks (claude target only, opt-in) ---
 # Stop and Notification are independent audible cues. OS auto-detected.
 # --with-sound-hooks         → Stop only (one beep when Claude finishes a turn)
@@ -946,6 +993,11 @@ do_install() {
         do_claude_md
     fi
 
+    if gost_config_active; then
+        echo ""
+        do_gost_config
+    fi
+
     warn_sound_overlap
 
     if stop_sound_active; then
@@ -1125,6 +1177,7 @@ do_dry() {
     do_attribution_dry
     do_config_defaults_dry
     do_claude_md_dry
+    do_gost_config_dry
     warn_sound_overlap
     do_stop_sound_hook_dry
     do_notification_sound_hook_dry
