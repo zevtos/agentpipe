@@ -60,6 +60,7 @@ $CommandsSrc = Join-Path $ScriptDir "commands"
 $SkillsSrc = Join-Path $ScriptDir "skills"
 $HookSrc = Join-Path $ScriptDir "scripts/git-hooks/commit-msg"
 $ClaudeMdSrc = Join-Path $ScriptDir "scripts/CLAUDE.md.example"
+$GostConfigSrc = Join-Path $ScriptDir "skills/gost-report/scripts/config.env.example"
 $GitTemplateDir = Join-Path $env:USERPROFILE ".git-templates"
 $GitHookDst = Join-Path $GitTemplateDir "hooks/commit-msg"
 $ConfigSchemaUrl = "https://json.schemastore.org/claude-code-settings.json"
@@ -416,6 +417,45 @@ function Do-ClaudeMdDry {
         Write-Host "  = CLAUDE.md (already exists, will not overwrite)"
     } else {
         Write-Info "+ CLAUDE.md (neutral baseline, install-if-missing)"
+    }
+    Write-Host ""
+}
+
+# --- gost-report persona config (XDG, install-if-missing) ---
+# Skill reads the config at runtime to fill TitleConfig defaults: FIO, group,
+# teacher. Path independent of skill install location, works for claude+codex.
+
+function Get-GostConfigPath {
+    if ($env:GOST_REPORT_CONFIG) { return $env:GOST_REPORT_CONFIG }
+    if ($env:XDG_CONFIG_HOME)    { return (Join-Path $env:XDG_CONFIG_HOME "gost-report/config") }
+    return (Join-Path $env:USERPROFILE ".config/gost-report/config")
+}
+
+function Test-GostConfigActive {
+    return ($Script:SkillsDst -and (Test-Path $GostConfigSrc))
+}
+
+function Do-GostConfig {
+    if (-not (Test-GostConfigActive)) { return }
+    $dst = Get-GostConfigPath
+    if (Test-Path $dst) {
+        Write-Ok "gost-report/config already exists -> $dst (not overwriting)"
+    } else {
+        New-Item -ItemType Directory -Path (Split-Path $dst -Parent) -Force | Out-Null
+        Copy-Item -Path $GostConfigSrc -Destination $dst -Force
+        Write-Ok "gost-report/config installed (template) -> $dst"
+        Write-Info "edit $dst to set FIO/group/teacher once, then omit them from build.py"
+    }
+}
+
+function Do-GostConfigDry {
+    if (-not (Test-GostConfigActive)) { return }
+    Write-Host "gost-report persona config:"
+    $dst = Get-GostConfigPath
+    if (Test-Path $dst) {
+        Write-Host "  = $dst (already exists, will not overwrite)"
+    } else {
+        Write-Info "+ $dst (template, install-if-missing)"
     }
     Write-Host ""
 }
@@ -799,6 +839,11 @@ function Do-Install {
         Do-ClaudeMd
     }
 
+    if (Test-GostConfigActive) {
+        Write-Host ""
+        Do-GostConfig
+    }
+
     Warn-SoundOverlap
 
     if (Test-StopSoundActive) {
@@ -966,6 +1011,7 @@ function Do-Dry {
     Do-AttributionDry
     Do-ConfigDefaultsDry
     Do-ClaudeMdDry
+    Do-GostConfigDry
     Warn-SoundOverlap
     Do-StopSoundHookDry
     Do-NotificationSoundHookDry

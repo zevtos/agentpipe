@@ -36,12 +36,13 @@ gost_report — генератор студенческих/научных ра�
 Зависимости: pip install python-docx
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import os
 from pathlib import Path
 import re
 import sys
 import xml.etree.ElementTree as _ET
-from typing import List, Optional, Sequence, Union
+from typing import Dict, List, Optional, Sequence, Union
 
 from docx import Document
 from docx.document import Document as _Document
@@ -173,16 +174,24 @@ class GostValidationError(RuntimeError):
 class TitleConfig:
     """Содержимое титульного листа.
 
-    Обязательные: work_type, topic, student_name, student_group, year.
+    Обязательные по смыслу: work_type, topic, student_name (или student_names),
+    student_group, year. Любое из них можно опустить здесь и задать через
+    env-переменные (`~/.config/gost-report/config` или `os.environ`), см.
+    `_load_gost_env`. Env побеждает build.py, если задан и не пуст.
+
     Поля университета (university_*, faculty, city, ministry) можно оставить
     пустыми — тогда они подтянутся из активного UniversityProfile.
     """
-    # --- Обязательное ---
-    work_type: str
-    topic: str
-    student_name: str
-    student_group: str
-    year: str
+    # --- Обязательное по смыслу (env может заполнить) ---
+    work_type: str = ""
+    topic: str = ""
+    student_name: str = ""
+    student_group: str = ""
+    year: str = ""
+
+    # --- Команда (если задан student_names — рендерится список) ---
+    student_names: List[str] = field(default_factory=list)
+    student_label: str = ""                # пусто = авто: "Выполнили"/"Выполнил"
 
     # --- Опциональное ---
     work_number: str = ""
@@ -198,6 +207,136 @@ class TitleConfig:
     university_full: str = ""
     university_short: str = ""
     faculty: str = ""
+
+
+# ============================================================
+# Env-конфиг: ~/.config/gost-report/config + os.environ
+# ============================================================
+
+# Ключи env, которые накладываются на TitleConfig. Значение — имя атрибута
+# TitleConfig. Префикс "GOST_REPORT_" + UPPER(имя атрибута) для каждого.
+_ENV_PREFIX = "GOST_REPORT_"
+_ENV_STR_FIELDS = (
+    "work_type", "topic", "student_name", "student_group", "year",
+    "student_label",
+    "work_number", "variant",
+    "teacher_name", "teacher_label", "teacher_degree", "teacher_position",
+    "city", "ministry", "university_full", "university_short", "faculty",
+)
+
+
+def _config_file_path() -> Path:
+    """Стандартный путь конфига: $XDG_CONFIG_HOME/gost-report/config
+    либо ~/.config/gost-report/config. Можно переопределить через
+    GOST_REPORT_CONFIG."""
+    override = os.environ.get(f"{_ENV_PREFIX}CONFIG", "").strip()
+    if override:
+        return Path(override).expanduser()
+    base = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    if base:
+        return Path(base).expanduser() / "gost-report" / "config"
+    return Path.home() / ".config" / "gost-report" / "config"
+
+
+_CONFIG_LINE_RE = re.compile(r'^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$')
+
+
+def _parse_config_file(path: Path) -> Dict[str, str]:
+    """Простой парсер .env-формата: KEY=VALUE построчно. Поддерживает
+    `export KEY=...`, кавычки (' или "), комментарии (#) и пустые строки.
+    Никаких подстановок переменных или escape-последовательностей."""
+    if not path.is_file():
+        return {}
+    out: Dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = _CONFIG_LINE_RE.match(raw_line)
+        if not m:
+            continue
+        key, value = m.group(1), m.group(2)
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        out[key] = value
+    return out
+
+
+_SUBJECT_CONFIG_NAME = ".gost-report.env"
+
+
+def _find_subject_config() -> Optional[Path]:
+    """Subject-уровневый конфиг: обход вверх от build.py до project root,
+    ищем `.gost-report.env`. Возвращает ближайший. Покрывает и
+    отдельные репы по предмету, и монорепо с несколькими предметами:
+    конфиг в папке `физика/` побеждает конфиг в корне монорепо."""
+    try:
+        from _paths import _caller_file, _find_root  # type: ignore
+    except ImportError:
+        return None
+    start = _caller_file() or Path.cwd()
+    if start.is_file():
+        start = start.parent
+    start = start.resolve()
+    root = _find_root(start)
+    upper = root.resolve() if root else start
+
+    cur = start
+    while True:
+        candidate = cur / _SUBJECT_CONFIG_NAME
+        if candidate.is_file():
+            return candidate
+        if cur == upper or cur.parent == cur:
+            break
+        cur = cur.parent
+    return None
+
+
+def _load_gost_env() -> Dict[str, str]:
+    """Сливает три слоя env: global config → subject config → os.environ.
+    Каждый последующий перекрывает предыдущий. Пустые/отсутствующие
+    значения не затирают то, что выставлено выше по приоритету."""
+    merged = _parse_config_file(_config_file_path())
+    subject = _find_subject_config()
+    if subject is not None:
+        merged.update(_parse_config_file(subject))
+    for key, val in os.environ.items():
+        if key.startswith(_ENV_PREFIX) and val:
+            merged[key] = val
+    return merged
+
+
+def _apply_env_overrides(cfg: TitleConfig) -> TitleConfig:
+    """Накладывает env поверх TitleConfig. Env побеждает build.py, если
+    непустое. Пустое/отсутствующее env — оставляет значение из build.py.
+
+    Особый случай: GOST_REPORT_STUDENT_NAMES — список через запятую,
+    перекрывает только cfg.student_names (не student_name).
+    """
+    env = _load_gost_env()
+    for field_name in _ENV_STR_FIELDS:
+        env_key = f"{_ENV_PREFIX}{field_name.upper()}"
+        env_val = env.get(env_key, "")
+        if env_val:
+            setattr(cfg, field_name, env_val)
+    names_raw = env.get(f"{_ENV_PREFIX}STUDENT_NAMES", "")
+    if names_raw:
+        cfg.student_names = [n.strip() for n in names_raw.split(",") if n.strip()]
+    return cfg
+
+
+def _resolve_student_label(cfg: TitleConfig) -> str:
+    """Авто-выбор: команда — "Выполнили", иначе — "Выполнил".
+    Явно заданное cfg.student_label всегда побеждает."""
+    if cfg.student_label:
+        return cfg.student_label
+    if cfg.student_names:
+        return "Выполнили"
+    return "Выполнил"
 
 
 # ============================================================
@@ -846,7 +985,10 @@ class Report:
                  *,
                  project_root: Optional[Union[str, Path]] = None):
         self._doc = Document()
-        self._title = title
+        # Env побеждает build.py: накладываем перед валидацией обязательных
+        # полей, чтобы можно было опускать FIO/group/year в TitleConfig.
+        self._title = _apply_env_overrides(title)
+        self._check_required(self._title)
         self._profile = profile
         self._figure_counter = 0
         self._table_counter = 0
@@ -896,6 +1038,34 @@ class Report:
     # --------------------------------------------------------
     # Внутреннее: построение титульника
     # --------------------------------------------------------
+
+    @staticmethod
+    def _check_required(cfg: TitleConfig) -> None:
+        """После применения env-override проверяет, что обязательные по
+        смыслу поля заданы. Сообщение указывает на оба источника — build.py
+        и env, чтобы пользователь сразу понимал где править."""
+        problems = []
+        if not cfg.work_type:
+            problems.append("work_type (GOST_REPORT_WORK_TYPE)")
+        if not cfg.topic:
+            problems.append("topic (GOST_REPORT_TOPIC)")
+        if not cfg.student_name and not cfg.student_names:
+            problems.append(
+                "student_name или student_names "
+                "(GOST_REPORT_STUDENT_NAME / GOST_REPORT_STUDENT_NAMES)"
+            )
+        if not cfg.student_group:
+            problems.append("student_group (GOST_REPORT_STUDENT_GROUP)")
+        if not cfg.year:
+            problems.append("year (GOST_REPORT_YEAR)")
+        if problems:
+            raise ValueError(
+                "TitleConfig: не заданы обязательные поля: "
+                + ", ".join(problems)
+                + ". Укажи их в TitleConfig(...) либо в "
+                  "~/.config/gost-report/config (env-формат) "
+                  "или через переменные окружения."
+            )
 
     def _resolve(self, attr: str) -> str:
         """TitleConfig.<attr> если задано, иначе UniversityProfile.<attr>."""
@@ -1051,14 +1221,26 @@ class Report:
             align=WD_ALIGN_PARAGRAPH.LEFT,
             left_indent=right_block_indent,
         )
+        student_label = _resolve_student_label(cfg)
+        names = cfg.student_names or ([cfg.student_name] if cfg.student_name else [])
+        first, *rest = names
         self._add_runs_paragraph(
             [
-                {"text": "Выполнил", "underline": True},
-                {"text": f": {cfg.student_name}"},
+                {"text": student_label, "underline": True},
+                {"text": f": {first}"},
             ],
             align=WD_ALIGN_PARAGRAPH.LEFT,
             left_indent=right_block_indent,
         )
+        # Дополнительные участники: визуально выравниваются под первое имя
+        # через немного больший left_indent (≈ ширина "Выполнили: " в TNR 14pt).
+        rest_indent = right_block_indent + Cm(2.2)
+        for extra_name in rest:
+            self._add_runs_paragraph(
+                [{"text": extra_name}],
+                align=WD_ALIGN_PARAGRAPH.LEFT,
+                left_indent=rest_indent,
+            )
 
         if cfg.teacher_name:
             self._add_paragraph(left_indent=right_block_indent,
@@ -1096,13 +1278,29 @@ class Report:
     # Публичный API: контент основного текста
     # --------------------------------------------------------
 
+    def _enable_update_fields_on_open(self):
+        """Ставит <w:updateFields w:val="true"/> в settings.xml. Word, Pages
+        и LibreOffice при первом открытии файла обновят все поля (включая
+        TOC и нумерацию). Идемпотентно: повторный r.toc() не дублирует."""
+        settings = self._doc.settings.element
+        existing = settings.find(qn("w:updateFields"))
+        if existing is None:
+            uf = OxmlElement("w:updateFields")
+            uf.set(qn("w:val"), "true")
+            settings.insert(0, uf)
+        elif existing.get(qn("w:val")) != "true":
+            existing.set(qn("w:val"), "true")
+
     def toc(self):
         """Вставляет автоматическое оглавление (поле Word TOC). Заголовок
         — `profile.toc_title` (по умолчанию «СОДЕРЖАНИЕ» в GOST_PROFILE,
         «ОГЛАВЛЕНИЕ» в ITMO_PROFILE).
 
-        После открытия файла в Word: ПКМ по полю → «Обновить поле».
+        Также ставит флаг `updateFields=true` в settings.xml — Word/Pages
+        при первом открытии файла предложит обновить поля (один клик
+        «Yes» в диалоге), без ручного ПКМ по полю TOC.
         """
+        self._enable_update_fields_on_open()
         heading = self._doc.add_paragraph()
         heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
         heading.paragraph_format.line_spacing = LINE_SPACING_BODY
