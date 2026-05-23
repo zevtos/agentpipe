@@ -1,0 +1,45 @@
+# ADR — {{ query }}
+
+*Auto-drafted by ultrasearch (v2 / dev profile) from {{ entries | length }} candidates. Each citation `[Sn]` resolves to a URL in the References section below. **This is a draft — review before adoption.***
+
+## Status
+
+Proposed — {{ generated_at or "now" }}
+
+## Context
+
+{% if context %}{{ context }}{% elif entries %}
+{{ query }} has multiple viable solutions. Top candidates by score (descending):
+
+{% for e in entries[:5] %}- {{ e.title }} (score {{ "%.2f"|format(e.score or 0.0) }}) — {{ e.summary | compact | truncate_chars(140) }} {{ loop.index0 | ref_label }}
+{% endfor %}{% else %}
+*No candidates returned for this query. Re-run with broader query or different `--profile`.*
+{% endif %}
+
+## Decision
+
+{% if decision %}{{ decision }}{% elif entries %}
+Adopt **{{ entries[0].title }}** based on {{ entries | length }} surveyed alternatives. The candidate scored highest on the dev profile's combined metric (stars, recency, health, license, downloads). {{ "0" | ref_label }}
+{% else %}
+*Decision deferred — no candidates surveyed.*
+{% endif %}
+
+## Alternatives considered
+
+{% if entries|length > 1 %}
+{% for e in entries[1:6] %}- **{{ e.title }}** {{ loop.index | ref_label }} — score {{ "%.2f"|format(e.score or 0.0) }}. {{ e.summary | compact | truncate_chars(160) }}
+{% endfor %}
+{% else %}
+*None.*
+{% endif %}
+
+## Consequences
+
+- **Positive:** {{ positive or "TBD by reviewer based on chosen candidate's strengths" }}
+- **Negative:** {{ negative or "TBD — note any deferred capability vs. alternatives above" }}
+- **Risks:** {{ risks or "Adoption velocity / community support drift; revisit in 6 months." }}
+
+## References
+
+{% for e in entries %}- {{ loop.index0 | ref_label }} {{ e.external_id }} — *{{ e.title }}*{% if e.year %}, {{ e.year }}{% endif %} → <{{ e.url }}>
+{% endfor %}

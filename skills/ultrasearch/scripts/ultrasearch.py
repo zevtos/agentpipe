@@ -101,9 +101,25 @@ def _build_parser() -> argparse.ArgumentParser:
                         "{openalex,s2,arxiv,crossref,europepmc,core,"
                         "datacite,hf,kiberleninka,oatd,base}")
     # Stage 3 flags
-    p.add_argument("--profile", choices=("fast", "full"), default="fast",
+    # v2 NOTE: --profile now selects pipeline routing (academic/dev/docs/...).
+    # The legacy v1 retrieval-depth flag was renamed to --retrieval-profile to
+    # avoid the collision. Old usage --profile=fast|full is detected and shimmed
+    # in main() with a deprecation warning.
+    p.add_argument("--profile", default=None,
+                   help="pipeline profile: auto (classifier picks), academic "
+                        "(v1 pipeline), dev, docs, ... See profiles/ for list. "
+                        "Default: academic. (Old --profile=fast|full is shimmed.)")
+    p.add_argument("--retrieval-profile", choices=("fast", "full"), default="fast",
                    help="fast=single-vec retrieval (Stage 1+2); "
-                        "full=3-stage retrieval + multi-section synth (Stage 3)")
+                        "full=3-stage retrieval + multi-section synth (Stage 3). "
+                        "Academic profile only.")
+    p.add_argument("--profiles-dir", type=Path, default=None,
+                   help="override the profile YAML directory (default: <skill>/profiles)")
+    p.add_argument("--no-classifier", action="store_true",
+                   help="skip classifier subagent; require --profile or use keyword fallback")
+    p.add_argument("--output-template", default=None,
+                   help="override the profile's default output template "
+                        "(filename in templates/, e.g. adr.md.j2)")
     p.add_argument("--lang", choices=("auto", "en", "ru"), default="auto",
                    help="query language; if non-English, ultrasearch generates "
                         "an EN parallel query for English-only sources")
@@ -304,14 +320,14 @@ async def _pipeline(args) -> dict[str, Any]:
             "seconds":        round(time.monotonic() - t0, 2),
         }
 
-    # 5. retrieve (Stage 3: --profile full triggers cross-encoder + RCS-cache)
+    # 5. retrieve (--retrieval-profile full triggers cross-encoder + RCS-cache)
     t0 = time.monotonic()
-    if args.profile == "full":
+    if args.retrieval_profile == "full":
         hits = _retrieve.retrieve_3stage(con, args.query, final_k=args.top_k)
     else:
         hits = _retrieve.topk(con, args.query, k=args.top_k)
     stats["retrieve"] = {
-        "profile": args.profile,
+        "retrieval_profile": args.retrieval_profile,
         "n_hits": len(hits),
         "seconds": round(time.monotonic() - t0, 2),
     }
@@ -458,10 +474,147 @@ async def _pipeline(args) -> dict[str, Any]:
     return stats
 
 
+# ---------- v2 profile dispatch ----------
+
+_V1_RETRIEVAL_VALUES = {"fast", "full"}
+_V2_PROFILE_DEFAULT = "academic"
+
+
+def _resolve_profile(args) -> tuple[str, str]:
+    """Resolve --profile to (pipeline_profile, dispatch_target).
+
+    Returns:
+        pipeline_profile: 'academic' | 'dev' | 'docs' | ... (which YAML to load)
+        dispatch_target:  'academic' (v1 _pipeline) | 'v2' (orchestrate.run_pipeline)
+
+    Handles the v1 collision: --profile=fast|full are remapped to
+    --retrieval-profile and a deprecation warning is emitted. The pipeline
+    profile defaults to academic.
+    """
+    raw = args.profile
+    if raw is None:
+        # no --profile given — keep v1 behavior (academic pipeline)
+        return _V2_PROFILE_DEFAULT, "academic"
+
+    if raw in _V1_RETRIEVAL_VALUES:
+        log(f"DEPRECATION: --profile={raw} is the v1 retrieval-depth flag and "
+            f"has been renamed to --retrieval-profile={raw} in v2. Treating "
+            f"as --profile=academic --retrieval-profile={raw}.")
+        args.retrieval_profile = raw
+        return "academic", "academic"
+
+    if raw == "auto":
+        # Classifier path. For Stage 1 we delegate to classifier.py keyword
+        # fallback; subagent integration is Stage 1.5.
+        try:
+            import classifier as _classifier
+        except ImportError as e:
+            log(f"classifier import failed ({e}); defaulting to academic")
+            return "academic", "academic"
+        result = _classifier.classify(args.query, no_classifier=args.no_classifier)
+        log(f"classifier: primary={result.primary_profile} "
+            f"recursive={result.is_recursive} source={result.source} "
+            f"confidence={result.confidence:.2f}")
+        chosen = _resolve_to_available(result.primary_profile, args.profiles_dir)
+        if chosen == "academic":
+            return "academic", "academic"
+        return chosen, "v2"
+
+    if raw == "academic":
+        return "academic", "academic"
+
+    # Any other named profile → v2 dispatch (verify YAML exists)
+    resolved = _resolve_to_available(raw, args.profiles_dir, fall_back_silent=False)
+    if resolved == "academic":
+        return "academic", "academic"
+    return resolved, "v2"
+
+
+_PROFILE_NAME_RE = __import__("re").compile(r"^[a-z][a-z0-9_]*$")
+
+
+def _resolve_to_available(
+    chosen: str,
+    profiles_dir: Path | None,
+    *,
+    fall_back_silent: bool = True,
+) -> str:
+    """Verify `chosen` profile has a YAML on disk; fall back to academic if not.
+
+    Classifier's 8 PROFILE_KEYS (academic/dev/product/startup/regulatory/docs/
+    community/meta) are not all shipped as YAMLs in Stage 1. When the classifier
+    picks an unshipped profile, we degrade gracefully to academic with a log
+    line rather than crashing in orchestrate.run_pipeline.
+    """
+    # Belt-and-braces: if `chosen` ever comes from an untrusted source
+    # (subagent JSON via $ULTRASEARCH_CLASSIFIER_RESULT) reject anything
+    # that doesn't match the canonical profile-name regex BEFORE doing any
+    # filesystem work. load_profile() has the same check, but keep this
+    # local so future refactors can't accidentally bypass it.
+    if not isinstance(chosen, str) or not _PROFILE_NAME_RE.match(chosen):
+        log(f"profile name rejected (regex): {chosen!r}; using academic")
+        return "academic"
+    try:
+        from profile import list_profiles
+        available = set(list_profiles(profiles_dir))
+    except Exception as e:
+        log(f"profile listing failed ({e}); using academic")
+        return "academic"
+    if chosen in available:
+        return chosen
+    if not fall_back_silent:
+        log(f"profile {chosen!r} has no YAML in profiles/; available: "
+            f"{sorted(available)}. Falling back to academic.")
+    else:
+        log(f"classifier picked {chosen!r} but no YAML exists; "
+            f"falling back to academic. Available: {sorted(available)}")
+    return "academic"
+
+
 def main() -> int:
     args = _build_parser().parse_args()
     _check_env(args.quiet)
 
+    try:
+        pipeline_profile, dispatch_target = _resolve_profile(args)
+    except Exception as e:
+        log(f"profile resolution failed: {e}", prefix="ultrasearch")
+        return 2
+
+    log(f"dispatch: profile={pipeline_profile} target={dispatch_target}")
+
+    if dispatch_target == "v2":
+        # v2 generic flat pipeline — orchestrate.run_pipeline owns it
+        try:
+            import orchestrate as _orchestrate
+        except ImportError as e:
+            log(f"orchestrate import failed: {e}", prefix="ultrasearch")
+            return 4
+        try:
+            result = asyncio.run(_orchestrate.run_pipeline(
+                args.query,
+                pipeline_profile,
+                profiles_dir=args.profiles_dir,
+                max_items=args.max_papers,
+                top_k=args.top_k,
+                out_path=args.out,
+                output_template=args.output_template,
+            ))
+        except KeyboardInterrupt:
+            emit_failure("interrupted")
+            return 130
+        except Exception as e:
+            log(f"v2 pipeline crashed: {type(e).__name__}: {e}", prefix="ultrasearch")
+            return 4
+        # Emit markdown to stdout if no --out
+        if args.out is None and result.get("markdown"):
+            sys.stdout.write(result["markdown"])
+        if args.json:
+            public = {k: v for k, v in result.items() if k != "markdown"}
+            log(json.dumps(public, ensure_ascii=False))
+        return 0 if result.get("ok") else 1
+
+    # academic (v1) pipeline
     try:
         stats = asyncio.run(_pipeline(args))
     except KeyboardInterrupt:
