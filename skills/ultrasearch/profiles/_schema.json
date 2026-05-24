@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/zevtos/agentpipe/skills/ultrasearch/profiles/_schema.json",
   "title": "ultrasearch profile",
-  "description": "Schema for ultrasearch v2 profile YAML files (profiles/<name>.yaml). Each profile names a set of source clients, a scoring function, and an output template. Validation is performed at load time by scripts/profile.py.",
+  "description": "Schema for ultrasearch v2 profile YAML files (profiles/<name>.yaml). Each profile names a set of source clients, a scoring function, and an output template. Validation is performed at load time by scripts/_profile.py.",
   "type": "object",
   "additionalProperties": false,
   "required": [

@@ -555,7 +555,7 @@ def _resolve_to_available(
         log(f"profile name rejected (regex): {chosen!r}; using academic")
         return "academic"
     try:
-        from profile import list_profiles
+        from _profile import list_profiles
         available = set(list_profiles(profiles_dir))
     except Exception as e:
         log(f"profile listing failed ({e}); using academic")

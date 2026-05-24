@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from _common import casefold_title, log, iso_now
-from profile import load_profile, ProfileConfig, ConfigError
+from _profile import load_profile, ProfileConfig, ConfigError
 from sources import load_source, SourceError
 from scoring import load_scorer, safe_score
 from synthesize_v2 import synthesize

@@ -7,6 +7,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-05-24
+
+### Fixed
+- **`ultrasearch` pipeline crashed on Python 3.14 with a misleading `sentence-transformers/torch not importable: cannot import name 'GenerationMixin' from 'transformers.generation'` error.** Root cause: `scripts/profile.py` shadowed the stdlib `profile` module when `scripts/` was prepended to `sys.path` (via `ensure_env.py` writing `ultrasearch.pth` to site-packages AND setting `PYTHONPATH=scripts_dir + os.pathsep + ...` before `os.execv`). Python 3.14's `cProfile.py:23` does `run.__doc__ = _pyprofile.run.__doc__` where `_pyprofile` is `import profile` — when the stdlib `profile` was replaced by our YAML loader, the AttributeError propagated up through `torch._dynamo.convert_frame` (which imports `cProfile`) into the lazy `transformers.models.auto.auto_factory` chain that resolves `GenerationMixin`, finally surfacing inside `index.load_embedder()` as the cryptic `transformers.generation` ImportError. Fix: rename `scripts/profile.py` → `scripts/_profile.py` (matches the `_common.py` convention), update the two imports in `scripts/orchestrate.py` and `scripts/ultrasearch.py`, and adjust the docstring + JSON Schema description that referenced the old filename. Verified by running a full `--profile=academic` pipeline end-to-end (discovery → fetch → index on MPS → retrieve → traverse → synthesize) without errors. The bug was latent in 0.16.0; it manifested on any fresh install whose Python interpreter exhibits the cProfile→profile attribute lookup at module-init time (3.14 confirmed; earlier 3.x likely affected too once `torch._dynamo.aot_compile` triggers `cProfile` import).
+
 ## [0.16.0] - 2026-05-23
 
 ### Added

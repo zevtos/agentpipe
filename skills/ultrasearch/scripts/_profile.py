@@ -1,6 +1,13 @@
 """
-profile.py — YAML loader, validator, and ProfileConfig dataclass for
+_profile.py — YAML loader, validator, and ProfileConfig dataclass for
 ultrasearch v2 profiles.
+
+Note: this module is named `_profile.py` (not `profile.py`) to avoid
+shadowing the stdlib `profile` module when `scripts/` is prepended to
+sys.path. The stdlib `cProfile` imports `profile` as `_pyprofile` during
+its module init, so a local `profile.py` on sys.path breaks any later
+`torch._dynamo` / `sentence_transformers` import chain that touches
+`cProfile`.
 
 Each profile lives at `profiles/<name>.yaml` next to the skill root. This
 module parses one, validates it against `profiles/_schema.json`, and returns
@@ -13,7 +20,7 @@ types, enum/pattern checks, min/max ranges, and additionalProperties=false
 at the top level. This keeps the profile loader self-contained for v1
 installs that haven't lazy-installed Stage 1 deps yet.
 
-CLI: `python3 profile.py [name]` — dumps the loaded ProfileConfig as JSON.
+CLI: `python3 _profile.py [name]` — dumps the loaded ProfileConfig as JSON.
 """
 from __future__ import annotations
 
