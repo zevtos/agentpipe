@@ -1,0 +1,19 @@
+# Opt-in heavy tier — VLM-grade PDF parsing via opendatalab/MinerU.
+#
+# Install with:
+#     python3 <skill_dir>/scripts/ensure_env.py --tier mineru
+#
+# Default doc2kb bootstrap does NOT read this file. Adding `mineru[all]` to
+# the lightweight tier would pull torch + transformers + ~3 GB of CV models
+# into every `ensure_env.py` run, which we explicitly do not want.
+#
+# Apple Silicon notes:
+#   - `mlx` and `mlx-lm` are needed for the `vlm-auto-engine` backend to use
+#     the MLX accelerator on M-series Macs (+100–200 % throughput vs the
+#     transformers fallback). They wheel-install cleanly on darwin/arm64.
+#   - `sys_platform == "darwin"` markers keep Linux/Windows installs from
+#     trying to pull MLX wheels that aren't published for them; mineru on
+#     those platforms uses CUDA or pure-CPU pipeline backends instead.
+mineru[all]>=2.5,<4.0
+mlx; sys_platform == "darwin"
+mlx-lm; sys_platform == "darwin"
