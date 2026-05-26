@@ -302,10 +302,25 @@ lab2_advanced.pdf 10 p, math-heavy):
   Fastest, least accurate. Right choice on CPU-only boxes or when you
   just need a structural pass.
 
-VLM inference is the bottleneck regardless of backend on M-series:
-expect roughly **~20 s per page** for math/diagram-heavy content.
-A 50-page lecture takes ~15 minutes; only run mineru when pymupdf4llm
-warns about `dropped_pictures` or `mangled_visual_layout`.
+VLM inference is the bottleneck regardless of backend on M-series.
+Reference numbers from community + own benchmarks:
+
+| Hardware | vlm-mlx (s/page) | pipeline (s/page) | source |
+|---|---|---|---|
+| M2 Max (~38 GPU cores, 64+ GB) | ~0.3 | ~0.9 | community |
+| M5 Pro (≈16 GPU cores, 24 GB) | ~20 | not measured | own |
+| Mac mini M4 (10 GPU cores, 16 GB) | ~38 | ~32 | community |
+
+So a 50-page lecture takes ~15 minutes on M-series "pro" laptops, and
+upper-tier desktop chips (M2 Max +) blow past that by an order of
+magnitude thanks to wider GPU/memory pipelines. On RAM-constrained
+M-series (mac mini class), `--backend pipeline` is actually competitive
+with vlm-mlx on speed and can be the right call for prose-heavy
+corpora.
+
+Only run mineru when pymupdf4llm warns about `dropped_pictures` or
+`mangled_visual_layout` — for clean text-layer PDFs it isn't worth the
+minutes-per-document cost.
 
 If the `mineru` CLI isn't on PATH the script exits 2 with the install
 hint above — the parent loop must treat that as "user action required",

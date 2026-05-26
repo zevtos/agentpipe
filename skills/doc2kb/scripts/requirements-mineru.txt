@@ -20,5 +20,9 @@
 #     those platforms uses CUDA or pure-CPU pipeline backends instead.
 mineru[all]>=2.5,<4.0
 mlx-vlm; sys_platform == "darwin"
-mlx; sys_platform == "darwin"
+# Pin mlx below 0.32 — version 0.31.2 introduced a regression where the
+# mlx-engine throws "RuntimeError: There is no Stream(gpu, N) in current
+# thread" inside multi-threaded inference; confirmed safe range is the
+# 0.31.x line up to but not including 0.32. See MinerU discussion #4842.
+mlx>=0.31,<0.32; sys_platform == "darwin"
 mlx-lm; sys_platform == "darwin"
