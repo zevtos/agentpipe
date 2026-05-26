@@ -362,6 +362,17 @@ def main() -> int:
         scripts_dir + os.pathsep + existing if existing else scripts_dir
     )
 
+    # Prepend the venv's bin (or Scripts on Windows) to PATH so target
+    # scripts can locate console entry points installed by their tier
+    # (e.g. the `mineru` CLI from the opt-in mineru tier) via
+    # shutil.which / subprocess without needing an absolute path.
+    venv_bin = str(venv_python().parent)
+    existing_path = os.environ.get("PATH", "")
+    if venv_bin not in existing_path.split(os.pathsep):
+        os.environ["PATH"] = (
+            venv_bin + os.pathsep + existing_path if existing_path else venv_bin
+        )
+
     if os.name == "nt":
         rc = subprocess.run([py, *args]).returncode
         return rc

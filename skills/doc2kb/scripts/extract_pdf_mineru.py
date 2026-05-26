@@ -87,16 +87,27 @@ from _common import (  # noqa: E402
 
 
 EXTRACTOR_NAME = "mineru"
-# Supported backends. Defaults to `auto` so MinerU picks vlm-auto-engine on
-# CUDA/MPS-capable boxes (including Apple Silicon with the mlx tier) and
-# falls back to pipeline on pure CPU.
+# Supported backends. MinerU 3.1.x exposes:
+#   pipeline           — CPU/GPU CV stack, no VLM, most permissive
+#   vlm-auto-engine    — local VLM (vLLM/LMDeploy on Linux, MLX on darwin
+#                        when mlx-lm is installed)
+#   hybrid-auto-engine — pipeline layout + VLM crops, MinerU's CLI default
+#   vlm-http-client    — talks to a remote vlm server
+#   hybrid-http-client — talks to a remote hybrid server
+# We default to `vlm-auto-engine` because the doc2kb mineru tier installs
+# mlx + mlx-lm on darwin (the only path where MinerU silently uses MLX);
+# on Linux/Windows boxes without CUDA the user should pass `--backend
+# pipeline` explicitly. We accept `auto` as a friendly alias for
+# `vlm-auto-engine` so the legacy contract of older mineru releases keeps
+# working.
 SUPPORTED_BACKENDS = (
     "auto",
     "pipeline",
     "vlm-auto-engine",
     "hybrid-auto-engine",
 )
-DEFAULT_BACKEND = "auto"
+_BACKEND_ALIASES = {"auto": "vlm-auto-engine"}
+DEFAULT_BACKEND = "vlm-auto-engine"
 DEFAULT_LANG = "cyrillic"  # doc2kb users primarily work with RU/EN material
 # Time budget for the mineru subprocess. VLM runs at ~0.5–2 s/page on Apple
 # Silicon and the pipeline backend at ~1–3 s/page on CPU — even a 500-page
@@ -158,7 +169,8 @@ def _run_mineru(
     the caller to surface in warnings on failure. Timeout is enforced —
     a stuck VLM job shouldn't block the parent corpus run forever.
     """
-    cmd = [binary, "-p", str(input_pdf), "-o", str(out_dir), "-b", backend]
+    resolved_backend = _BACKEND_ALIASES.get(backend, backend)
+    cmd = [binary, "-p", str(input_pdf), "-o", str(out_dir), "-b", resolved_backend]
     if lang:
         cmd.extend(["-l", lang])
     log(f"$ {' '.join(cmd)}", prefix="mineru")
@@ -267,24 +279,26 @@ def _copy_images_and_rewrite(
     seen_relpaths: set[str] = set()
     dedup_cache: dict[str, Path] = {}
 
-    # Walk the actual images directory — any image referenced in markdown
-    # MUST be on disk, otherwise the kb would link to a broken asset.
-    # Files not referenced in content_list (rare) keep their hash basename
-    # and get a synthetic page_no=0/ordinal that won't collide.
-    fallback_counter = 0
+    # Copy only images referenced by content_list — MinerU's images/ dir
+    # also contains crops used internally by the VLM (formula glyphs,
+    # decorative elements) that aren't part of the document content.
+    # Without this filter a 10-page lab can leak 30+ ghost assets into
+    # the kb (observed on lab2_advanced.pdf: 7 real images vs 32 internal
+    # crops). Falling back to all-images would defeat the kb's purpose.
+    skipped_unreferenced = 0
     for src in sorted(images_src.iterdir()):
         if not src.is_file():
             continue
         basename = src.name
+        if basename not in page_seq:
+            skipped_unreferenced += 1
+            continue
         try:
             blob = src.read_bytes()
         except OSError as e:
             warnings.append(f"failed to read {basename}: {e}")
             continue
-        page_no, ordinal = page_seq.get(basename, (0, 0))
-        if (page_no, ordinal) == (0, 0):
-            fallback_counter += 1
-            ordinal = fallback_counter
+        page_no, ordinal = page_seq[basename]
         ext = src.suffix.lower().lstrip(".") or "jpg"
         target_name = (
             f"{doc_id}-page{page_no:02d}-img{ordinal}.{ext}"
