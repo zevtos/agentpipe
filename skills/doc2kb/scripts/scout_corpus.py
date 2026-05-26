@@ -429,8 +429,17 @@ def text_encoding(path: Path, sample_bytes: int = 65536) -> dict[str, Any]:
 
 # ---------- strategy + token estimate ----------
 
-def set_strategy_and_tokens(info: dict[str, Any]) -> None:
-    """Sets extraction_strategy and estimated_tokens on info in place."""
+def set_strategy_and_tokens(info: dict[str, Any], *, enable_mineru: bool = False) -> None:
+    """Sets extraction_strategy and estimated_tokens on info in place.
+
+    Args:
+        info: per-file scout record.
+        enable_mineru: opt-in switch. When True, image_only PDFs are routed
+            directly to the `mineru` extractor instead of being surfaced as
+            an `ask_user_ocr_strategy` decision group. The default (False)
+            keeps the legacy lightweight-only behaviour — heavy ML deps are
+            never silently activated.
+    """
     t = info.get("source_type", "unknown")
     warnings: list[str] = info.get("warnings", []) or []
 
@@ -442,9 +451,17 @@ def set_strategy_and_tokens(info: dict[str, Any]) -> None:
             info["estimated_tokens"] = None
             info["action_required"] = "ask_user_password_or_skip"
         elif pdf_class == "image_only":
-            info["extraction_strategy"] = "needs_ocr_or_vlm"
-            info["estimated_tokens"] = None
-            info["action_required"] = "ask_user_ocr_strategy"
+            if enable_mineru:
+                # Opt-in VLM route — bypass the user-decision step and run
+                # mineru directly. Token estimate is a rough proxy (VLM
+                # tends to extract more body than pymupdf4llm, especially
+                # on math-heavy or table-heavy pages).
+                info["extraction_strategy"] = "mineru"
+                info["estimated_tokens"] = pages * 800 if pages else None
+            else:
+                info["extraction_strategy"] = "needs_ocr_or_vlm"
+                info["estimated_tokens"] = None
+                info["action_required"] = "ask_user_ocr_strategy"
         elif pdf_class == "mixed":
             info["extraction_strategy"] = "pymupdf4llm"
             info["estimated_tokens"] = pages * 500 if pages else None
@@ -580,7 +597,8 @@ def walk_corpus(root: Path) -> tuple[list[Path], list[dict]]:
     return out, escapes
 
 
-def scan_file(idx: int, path: Path, input_root: Path) -> dict[str, Any]:
+def scan_file(idx: int, path: Path, input_root: Path,
+              *, enable_mineru: bool = False) -> dict[str, Any]:
     rel = path.relative_to(input_root)
     # Normalize to Unicode NFC: macOS HFS+/APFS exposes filenames as NFD
     # while extract scripts write frontmatter `source` as NFC and
@@ -618,7 +636,7 @@ def scan_file(idx: int, path: Path, input_root: Path) -> dict[str, Any]:
     elif src_type in ("md", "txt"):
         info.update(text_encoding(path))
 
-    set_strategy_and_tokens(info)
+    set_strategy_and_tokens(info, enable_mineru=enable_mineru)
 
     # Normalize: ensure known keys present even when None — keeps schema stable.
     info.setdefault("pages", None)
@@ -690,6 +708,16 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Scan a document corpus and emit _scout.json.")
     ap.add_argument("input_dir", help="Path to the corpus root")
     ap.add_argument("kb_dir", help="Path to the kb/ output directory (will be created)")
+    ap.add_argument(
+        "--enable-mineru",
+        action="store_true",
+        help="Opt-in: route image-only PDFs through the MinerU VLM "
+             "extractor instead of surfacing them as an "
+             "ask_user_ocr_strategy decision group. Requires the mineru "
+             "tier installed (`ensure_env.py --tier mineru`). Without "
+             "this flag scout behaviour is unchanged — heavy ML deps are "
+             "never silently activated.",
+    )
     args = ap.parse_args()
 
     input_root = Path(args.input_dir).expanduser().resolve()
@@ -712,7 +740,7 @@ def main() -> int:
     skipped: list[dict[str, Any]] = list(escapes)
     for idx, p in enumerate(paths, start=1):
         try:
-            info = scan_file(idx, p, input_root)
+            info = scan_file(idx, p, input_root, enable_mineru=args.enable_mineru)
             files.append(info)
         except Exception as e:
             skipped.append({
@@ -724,12 +752,20 @@ def main() -> int:
     total_tokens = sum((f.get("estimated_tokens") or 0) for f in files)
     elapsed = time.time() - t0
     # Cheap per-file extraction estimate (very rough — agent will refine).
-    est_seconds = sum(
-        2 if f.get("source_type") == "pdf" else 1
-        for f in files
-        if f.get("extraction_strategy") not in ("not_in_mvp", "skip",
-                                                "needs_ocr_or_vlm", "needs_password")
-    )
+    # mineru is much slower than pymupdf4llm even on a GPU; bump the
+    # estimate so users see the cost before kicking off a large corpus run.
+    def _est_per_file(f: dict[str, Any]) -> int:
+        strategy = f.get("extraction_strategy")
+        if strategy in ("not_in_mvp", "skip", "needs_ocr_or_vlm", "needs_password"):
+            return 0
+        if strategy == "mineru":
+            pages = f.get("pages") or 1
+            return max(pages * 2, 30)  # ~2 s/page on Apple Silicon VLM
+        if f.get("source_type") == "pdf":
+            return 2
+        return 1
+
+    est_seconds = sum(_est_per_file(f) for f in files)
 
     scout: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -737,6 +773,7 @@ def main() -> int:
         "scanned_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "input_root": str(input_root),
         "kb_root": str(kb_root),
+        "flags": {"enable_mineru": bool(args.enable_mineru)},
         "corpus": {
             "total_files": len(files),
             "total_size_bytes": total_size,
