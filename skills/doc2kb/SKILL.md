@@ -247,21 +247,23 @@ fast MLX backend when `mlx-vlm` is importable; without it, mineru
 silently falls back to the much slower transformers path.
 
 **Apple Silicon tuning (M-series).** With the mineru tier installed,
-mineru auto-detects MLX. Performance knobs that help on M1/M2/M3/M4/M5:
-- `MINERU_PDF_RENDER_THREADS=8` (or `nproc/2`) — default is 4; raising
-  it speeds up the PDF→image render stage on 8+-core boxes.
-- `MINERU_PROCESSING_WINDOW_SIZE=128` (default 64) — larger window
-  reduces overhead on long documents when RAM ≥ 24 GB.
-- `MINERU_FORMULA_ENABLE=true` / `MINERU_TABLE_ENABLE=true` (default
-  on) — keep on for math/lab PDFs, set `false` to shave time on
-  pure-prose corpora.
+mineru auto-detects MLX. The official tuning knobs (`MINERU_PDF_RENDER_THREADS`,
+`MINERU_PROCESSING_WINDOW_SIZE`, `MINERU_FORMULA_ENABLE`,
+`MINERU_TABLE_ENABLE`) target long-document throughput on multi-GPU
+serving setups. **Measured on M5 Pro / 24 GB**, lab2_advanced.pdf (10 p):
+setting `MINERU_PDF_RENDER_THREADS=8` and `MINERU_PROCESSING_WINDOW_SIZE=128`
+made the same vlm-auto-engine run go from ~65 s to ~207 s with bit-for-bit
+identical output. The likely cause: render-stage threads contend with
+MLX for unified-memory bandwidth, and the larger window adds batch-setup
+overhead a 10-page document never recoups.
 
-Apply via env, e.g.:
-
-```bash
-MINERU_PDF_RENDER_THREADS=8 MINERU_PROCESSING_WINDOW_SIZE=128 \
-    python3 <skill_dir>/scripts/ensure_env.py extract_pdf_mineru.py ...
-```
+Recommendation: **don't set these env vars globally on a laptop class
+M-series machine**. If you ever process a long book/dissertation (100+ p)
+and want to experiment, set them per-invocation and measure — don't
+trust the upstream docs blindly here. For everything else, leave
+mineru's own defaults alone; `MINERU_FORMULA_ENABLE=false` /
+`MINERU_TABLE_ENABLE=false` are the only knobs worth flipping when you
+know your corpus is pure prose and want to shave VLM calls.
 
 **Usage in scout:**
 
@@ -286,20 +288,24 @@ python3 <skill_dir>/scripts/ensure_env.py extract_pdf_mineru.py \
     [--keep-raw]    # cache raw mineru output for postprocess_popo.py
 ```
 
-Backend trade-off (measured on M5 Pro / 24 GB, lab2_advanced.pdf 10 p):
-- `vlm-auto-engine` (default) — pure VLM end-to-end via MLX. **~65 s**
+Backend trade-off (measured back-to-back on M5 Pro / 24 GB,
+lab2_advanced.pdf 10 p, math-heavy):
+- `vlm-auto-engine` (default) — pure VLM end-to-end via MLX. **206 s**
   on the sample doc, produces clean `$X_{sp}$` LaTeX, recovered three
   state-space matrices and the PixHawk block diagram as Mermaid.
 - `hybrid-auto-engine` — pipeline does layout, VLM does crops. Mineru's
-  own CLI default, but on Apple Silicon with MLX it's measurably worse:
-  **~243 s** on the same doc (pipeline-model load + per-block reprompt
-  overheads dominate), LaTeX subscripts come out as `$X _ { s p } ,$`
-  with extra spaces and occasional trailing-punct adhesion. Use when
-  the box doesn't have MLX (CUDA Linux server) — there hybrid genuinely
-  wins.
+  own CLI default. **243 s** on the same doc (~18% slower than vlm on
+  M-series); LaTeX subscripts come out as `$X _ { s p } ,$` with extra
+  spaces and occasional trailing-punct adhesion. Reportedly 2-3× faster
+  than VLM on CUDA Linux without MLX — flip the default there.
 - `pipeline` — CPU/GPU CV stack, no VLM, no big model download.
   Fastest, least accurate. Right choice on CPU-only boxes or when you
   just need a structural pass.
+
+VLM inference is the bottleneck regardless of backend on M-series:
+expect roughly **~20 s per page** for math/diagram-heavy content.
+A 50-page lecture takes ~15 minutes; only run mineru when pymupdf4llm
+warns about `dropped_pictures` or `mangled_visual_layout`.
 
 If the `mineru` CLI isn't on PATH the script exits 2 with the install
 hint above — the parent loop must treat that as "user action required",

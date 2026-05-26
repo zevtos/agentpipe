@@ -95,17 +95,18 @@ EXTRACTOR_NAME = "mineru"
 #   vlm-http-client    — talks to a remote vlm server
 #   hybrid-http-client — talks to a remote hybrid server
 # We default to `vlm-auto-engine`, which on Apple Silicon picks the MLX
-# backend (`mlx-engine`) via mineru/utils/engine_utils.py. Measured on
-# M5 Pro / 24 GB, lab2_advanced.pdf (10 pages, math-heavy):
-#   vlm-auto-engine    ~65 s real, clean `$X_{sp}$` LaTeX
-#   hybrid-auto-engine ~243 s real, `$X _ { s p } ,$` (extra spaces and
+# backend (`mlx-engine`) via mineru/utils/engine_utils.py. Measured
+# back-to-back on M5 Pro / 24 GB, lab2_advanced.pdf (10 pages, math-heavy):
+#   vlm-auto-engine    206 s real, clean `$X_{sp}$` LaTeX
+#   hybrid-auto-engine 243 s real, `$X _ { s p } ,$` (extra spaces and
 #                                    occasional trailing-punct adhesion)
-# Hybrid is mineru's own CLI default and on paper "splits layout to
-# pipeline, VLM only for crops" — but on M-series with MLX the two
-# overheads (loading pipeline models + per-block re-prompting) dominate,
-# and pure VLM end-to-end wins on both wall time AND LaTeX quality.
-# Keep this default until benchmark data on other architectures argues
-# otherwise. `auto` is accepted as a friendly alias.
+# Both backends sit in the same 3-4 min ballpark on this hardware class
+# — VLM inference is the bottleneck regardless of which path mineru
+# takes. vlm-auto-engine wins by ~18% wall time AND produces noticeably
+# cleaner LaTeX (no spurious spaces in subscripts, no trailing-punct
+# adhesion). On CUDA Linux servers without MLX, hybrid is reportedly
+# 2-3× faster than VLM — flip the default there if you fork this skill.
+# `auto` is accepted as a friendly alias.
 SUPPORTED_BACKENDS = (
     "auto",
     "pipeline",
