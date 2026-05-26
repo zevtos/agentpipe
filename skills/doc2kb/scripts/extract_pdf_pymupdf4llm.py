@@ -45,14 +45,17 @@ from pathlib import Path
 # Local-only import — _common lives next to this script (loaded via the
 # doc2kb.pth that ensure_env.py wrote).
 from _common import (  # noqa: E402
+    _RESIDUAL_LIGATURE_RE,
     clean_whitespace,
     count_tokens,
     emit_failure,
     emit_success,
     log,
+    recover_ligatures,
     sanitize_heading,
     save_image_safe,
     sha256_of,
+    strip_page_footer_numbers,
     today_iso,
     tool_version_string,
     validate_source_rel,
@@ -380,6 +383,42 @@ def extract(
 
     body = "\n\n".join(pieces).strip() + "\n"
     body = clean_whitespace(body)
+
+    # pymupdf4llm ≤1.27.x drops one letter from fi/ff/fl ligature glyphs
+    # whose PDF ToUnicode CMap maps to a single ASCII char. Raw
+    # pymupdf.Page.get_text returns the words correctly; the bug is in
+    # pymupdf4llm's higher-level reassembly. Apply our known-pattern fix
+    # list and surface a warning whenever any replacement fires, so the
+    # operator can see that the body was healed automatically.
+    body, lig_fixed = recover_ligatures(body)
+    if lig_fixed:
+        warnings.append(
+            f"ligatures_recovered: pymupdf4llm dropped letters from {lig_fixed} "
+            "word(s) with fi/ff/fl glyphs (e.g. 'Ofcial'→'Official', "
+            "'fexible'→'flexible'); fixed via the doc2kb ligature-recovery "
+            "table — no manual action needed"
+        )
+        residual = _RESIDUAL_LIGATURE_RE.findall(body)
+        # Filter to *new* broken patterns: any residual that looks like
+        # `f<consonant>` inside a real word and that wasn't already a
+        # known English `aft`/`oft`/`soft` cluster (regex covers that).
+        # Cap the sample at 5 to keep the warning short.
+        if residual:
+            sample = sorted(set(residual))[:5]
+            warnings.append(
+                f"ligature_residual: {len(residual)} suspicious word(s) "
+                f"with f-consonant patterns still present (sample: "
+                f"{', '.join(sample)}); if these are broken ligatures, "
+                "extend _LIGATURE_FIXES in scripts/_common.py"
+            )
+
+    # Drop standalone footer page numbers that sit between consecutive
+    # [page N] anchors. normalize_md's detect_recurring_lines cannot see
+    # them because each footer is unique (1, 2, 3, …), so we strip them
+    # here using a positional pattern.
+    body, footer_stripped = strip_page_footer_numbers(body)
+    if footer_stripped:
+        log(f"stripped {footer_stripped} footer page number(s)")
 
     # Min-length guard (R2 in risk register).
     total_chars = len(body)

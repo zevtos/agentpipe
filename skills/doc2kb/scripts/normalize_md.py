@@ -41,7 +41,9 @@ from _common import (  # noqa: E402
     log,
     read_body,
     read_frontmatter,
+    recover_ligatures,
     render_frontmatter,
+    strip_page_footer_numbers,
 )
 
 
@@ -142,6 +144,13 @@ def filter_lines(lines: list[str], drop_set: set[str]) -> tuple[list[str], dict[
 
 
 def normalize(body: str, threshold: float = 0.7) -> tuple[str, dict]:
+    # Drop standalone footer page numbers between [page N] anchors first,
+    # so detect_recurring_lines doesn't see them as candidate-content.
+    body, n_footer = strip_page_footer_numbers(body)
+    # Repair any residual ligature drops left by pymupdf4llm. Safe to run
+    # on already-clean text — recover_ligatures is idempotent.
+    body, n_lig = recover_ligatures(body)
+
     chunks = _split_by_pages(body)
     recurring = detect_recurring_lines(chunks, threshold=threshold)
 
@@ -158,6 +167,10 @@ def normalize(body: str, threshold: float = 0.7) -> tuple[str, dict]:
     new_body, n_ctrl = _CONTROL_RE.subn("", new_body)
     if n_ctrl:
         total_removed["control_chars"] = n_ctrl
+    if n_footer:
+        total_removed["footer_page_numbers"] = n_footer
+    if n_lig:
+        total_removed["ligatures_recovered"] = n_lig
     new_body = clean_whitespace(new_body)
 
     report = {

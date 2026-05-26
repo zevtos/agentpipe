@@ -162,7 +162,66 @@ binary blob (chart, OLE object) — он добавляет placeholder типа
 - автоматически попробовать `pymupdf.get_text()` без markdown layout —
   тот же бэкенд, та же проблема.
 
-## 14. Нормализуй имена файлов в Unicode NFC
+## 14. Не доверяй pymupdf4llm на лигатуры `fi`/`ff`/`fl`
+
+pymupdf4llm ≤ 1.27.x теряет одну букву из лигатурных glyph'ов в его
+spans→markdown сборке. Поведение зависит от того, как PDF ToUnicode CMap
+маппит glyph:
+
+- `fi` glyph → один символ `f`: даёт `frst` (от `first`), `fnal` (от
+  `final`), `defning` (от `defining`), `fexible` (от `flexible`),
+  `Ofcial` (от `Official`), `signifcant` (от `significant`);
+- `ff` glyph → один `f`: даёт `efort` (от `effort`), `efect` (от
+  `effect`), `aford` (от `afford`);
+- `ffi` glyph → один `f`: даёт `trafc` (от `traffic`), `sufcient` (от
+  `sufficient`), `coefcient` (от `coefficient`), `Efcient` (от
+  `Efficient`);
+- `ffi` glyph → `ff` (два символа): даёт `Diffculty` (от `Difficulty`),
+  `diffcult` (от `difficult`);
+- `fi` glyph → `f` в составе `-fier` суффиксов: `quantifers` (от
+  `quantifiers`), `modifers` (от `modifiers`).
+
+Это **не баг самого PDF и не баг pymupdf** — raw `pymupdf.Page.get_text`
+отдаёт буквы корректно. Баг локален в pymupdf4llm — в его higher-level
+сборке spans → markdown. Тестовая проверка занимает 10 строк:
+
+```python
+import pymupdf, pymupdf4llm
+page = pymupdf.open(pdf)[0]
+raw = page.get_text("text")            # → "Official", "flexible"
+md  = pymupdf4llm.to_markdown(pdf, pages=[0])  # → "Ofcial", "fexible"
+```
+
+Что делает `_common.recover_ligatures()`:
+- Применяет hard-coded таблицу `(regex, replacement)` для всех известных
+  broken prefix'ов; replacement сохраняет регистр первой буквы
+  (`Ofcial` → `Official`, `ofcial` → `official`);
+- Lookbehind `(?<![A-Za-z])` срабатывает и когда broken слово обёрнуто
+  в markdown italic (`_fnd_` → `_find_`) — обычный `\b` ломается на
+  underscore;
+- Lookahead disambiguates legit prefixes (`\bdif(?=cult|er)` фиксит
+  только broken cases — `differ`/`different` имеют `dif`+`f`, lookahead
+  падает, замены нет);
+- `extract_pdf_pymupdf4llm.py` вызывает после `clean_whitespace` и
+  эмитит warning `ligatures_recovered: N word(s) ...`;
+- `normalize_md.py` тоже вызывает (idempotent), так что повторные
+  прогоны на старых kb-файлах тоже зачинят их.
+
+Если warning `ligature_residual: ...` появляется — это значит в PDF
+встретился новый класс broken-pattern, не покрытый таблицей. Расширьте
+`_LIGATURE_FIXES` в `scripts/_common.py` новым (regex, replacement)
+кортежем. Чего делать **нельзя**:
+
+- предлагать пользователю самому переписывать body вручную — это
+  десятки правок и они должны быть автоматическими;
+- использовать spell-checker как замену hardcoded таблице — false
+  positives на технических терминах, именах собственных, multilingual
+  корпусах;
+- общие regex'ы вроде `\Bfer\b` → `fier` без lookbehind — снесут
+  легитимные `defer`/`prefer`/`refer`/`transfer`/`confer`/`infer`/
+  `differ`/`offer`/`buffer`.
+
+## 15. Нормализуй имена файлов в Unicode NFC
 
 macOS HFS+/APFS возвращает Cyrillic/accented filenames в NFD (decomposed)
 форме: `й` идёт как `и + ́` (U+0438 + U+0306). Большинство YAML-парсеров

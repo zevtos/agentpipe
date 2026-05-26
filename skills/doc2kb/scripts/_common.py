@@ -295,6 +295,157 @@ def clean_whitespace(text: str) -> str:
     return text.strip() + "\n"
 
 
+# ---------- ligature recovery ----------
+
+# pymupdf4llm (≤1.27.x) drops one letter from PDF ligature glyphs in its
+# spans→markdown pipeline: PDFs whose ToUnicode CMap maps the "fi"/"ff"/"fl"
+# glyph to a single ASCII char come out with the second letter missing
+# ("Official" → "Ofcial", "flexible" → "fexible", "traffic" → "trafc").
+# Raw `pymupdf.Page.get_text("dict")` returns the words correctly — the bug
+# is in pymupdf4llm's higher-level reassembly — so we patch it on our side
+# with a hard-coded word-prefix list. Patterns match at word boundaries
+# only; replacements preserve the original case of the first character so
+# "Ofcial" → "Official" but "ofcial" → "official".
+#
+# The list covers the broken ligatures observed in real PDF corpora
+# (academic papers, English-language reference books, lab manuals). Adding
+# a new pattern is safe as long as: (a) the broken prefix does not appear
+# as a legitimate English word, and (b) the fix only modifies the prefix —
+# the rest of the word (suffix capture group, if any) survives intact.
+# Each entry is (compiled regex, replacement-for-matched-prefix). The
+# regex matches a *prefix* of a broken word at a soft word boundary;
+# any trailing letters (suffixes like `ly`, `ity`, `s`, `ed`, `ing`, …)
+# survive untouched because they sit outside the match. We use a
+# negative-lookbehind `(?<![A-Za-z])` instead of `\b` so the pattern
+# also fires when the broken word is wrapped in markdown italic
+# (`_fnd_` → `_find_`); `\b` would fail because `_` is a word char.
+# Lookaheads disambiguate prefixes that double as legitimate English
+# (`dif` → legit when followed by `f`; broken only when followed by
+# `cult` / `eren`).
+_LB = r"(?<![A-Za-z])"
+_LIGATURE_FIXES: list[tuple[re.Pattern[str], str]] = [
+    # fi-drop: middle `i` missing from the original `fi` ligature
+    (re.compile(_LB + r"fexib",           re.IGNORECASE), "flexib"),
+    (re.compile(_LB + r"ofcial",          re.IGNORECASE), "official"),
+    (re.compile(_LB + r"specifc",         re.IGNORECASE), "specific"),
+    (re.compile(_LB + r"signifc",         re.IGNORECASE), "signific"),
+    (re.compile(_LB + r"infnit",          re.IGNORECASE), "infinit"),
+    (re.compile(_LB + r"fnit(?=e|es)",    re.IGNORECASE), "finit"),
+    (re.compile(_LB + r"fgure",           re.IGNORECASE), "figure"),
+    (re.compile(_LB + r"fnal",            re.IGNORECASE), "final"),
+    (re.compile(_LB + r"fnish",           re.IGNORECASE), "finish"),
+    (re.compile(_LB + r"fnding",          re.IGNORECASE), "finding"),
+    (re.compile(_LB + r"frst",            re.IGNORECASE), "first"),
+    (re.compile(_LB + r"confrm",          re.IGNORECASE), "confirm"),
+    (re.compile(_LB + r"defn(?=[a-z])",   re.IGNORECASE), "defin"),
+    (re.compile(_LB + r"fnd(?![A-Za-z])", re.IGNORECASE), "find"),
+    (re.compile(_LB + r"fnd(?=s|ing)",    re.IGNORECASE), "find"),
+    (re.compile(_LB + r"fts(?![A-Za-z])", re.IGNORECASE), "fits"),
+    (re.compile(_LB + r"fle(?=s?(?![A-Za-z])|d(?![A-Za-z]))", re.IGNORECASE), "file"),
+    (re.compile(_LB + r"fxed",            re.IGNORECASE), "fixed"),
+    (re.compile(_LB + r"fve(?![A-Za-z])", re.IGNORECASE), "five"),
+    (re.compile(_LB + r"ftt(?=ing|ed)",   re.IGNORECASE), "fitt"),
+    (re.compile(_LB + r"beneft",          re.IGNORECASE), "benefit"),
+    (re.compile(_LB + r"clarifc",         re.IGNORECASE), "clarific"),
+    # ff-drop: one of two `f`s missing
+    (re.compile(_LB + r"efect",           re.IGNORECASE), "effect"),
+    (re.compile(_LB + r"efort",           re.IGNORECASE), "effort"),
+    (re.compile(_LB + r"afect",           re.IGNORECASE), "affect"),
+    (re.compile(_LB + r"aford",           re.IGNORECASE), "afford"),
+    # `dif` (3 chars, broken from `diff` where one `f` was dropped) — the
+    # `er` lookahead is safe for legit `different`/`differ`/`difference`
+    # because they have `diff` (4 chars), so position 3 is `f`, not `e`,
+    # and the lookahead fails for them.
+    (re.compile(_LB + r"dif(?=cult|er)",  re.IGNORECASE), "diff"),
+    # ffi-drop: `i` dropped from `ffi`. Only `cul` lookahead (`difficult`
+    # → broken `diffcul`); `eren` lookahead would over-correct legit
+    # `different` → `diffierent`.
+    (re.compile(_LB + r"diff(?=cul)",     re.IGNORECASE), "diffi"),
+    # Agentive `-fier` nouns where the `fi` ligature dropped its `i`:
+    # `quantifier` → `quantifer`, `modifier` → `modifer`. Hardcoded list
+    # because a general `\Bfer\b` pattern would clobber legit `defer`,
+    # `prefer`, `refer`, `transfer`, `confer`, `infer`, etc.
+    (re.compile(_LB + r"quantifer",       re.IGNORECASE), "quantifier"),
+    (re.compile(_LB + r"modifer",         re.IGNORECASE), "modifier"),
+    (re.compile(_LB + r"identifer",       re.IGNORECASE), "identifier"),
+    (re.compile(_LB + r"classifer",       re.IGNORECASE), "classifier"),
+    (re.compile(_LB + r"specifer",        re.IGNORECASE), "specifier"),
+    (re.compile(_LB + r"amplifer",        re.IGNORECASE), "amplifier"),
+    (re.compile(_LB + r"verifer",         re.IGNORECASE), "verifier"),
+    (re.compile(_LB + r"eficien",         re.IGNORECASE), "efficien"),
+    (re.compile(_LB + r"efcien",          re.IGNORECASE), "efficien"),
+    (re.compile(_LB + r"trafc",           re.IGNORECASE), "traffic"),
+    (re.compile(_LB + r"sufcient",        re.IGNORECASE), "sufficient"),
+    (re.compile(_LB + r"cofcient",        re.IGNORECASE), "coefficient"),
+]
+
+
+# Residual-broken-ligature detector: matches any word with `f` followed
+# by a non-l/r/aeiou consonant. We filter out the legitimate English
+# `<vowel>ft` cluster (aft, ift, oft, uft — gift, lift, shift, draft, …)
+# and `lf`/`rf` endings via a negative lookbehind so the warning only
+# fires on truly suspicious patterns. When the warning triggers,
+# operator should extend _LIGATURE_FIXES with the new broken word(s).
+_RESIDUAL_LIGATURE_RE = re.compile(
+    r"\b[a-z]*(?<![aiou])f[bcdgkmnpqsvwxz][a-z]+\b",
+    re.IGNORECASE,
+)
+
+
+def _preserve_first_case(matched: str, replacement: str) -> str:
+    """If the matched text starts uppercase, capitalize the replacement."""
+    if matched and matched[0].isupper() and replacement and replacement[0].islower():
+        return replacement[0].upper() + replacement[1:]
+    return replacement
+
+
+def recover_ligatures(text: str) -> tuple[str, int]:
+    """Repair pymupdf4llm's dropped-ligature words via known patterns.
+
+    Returns (new_text, total_replacements). Idempotent: re-running on
+    already-fixed text yields zero replacements. Case of the first
+    character is preserved (`Ofcial`→`Official`, `ofcial`→`official`)."""
+    total = 0
+    for pattern, replacement in _LIGATURE_FIXES:
+        def _sub(m: re.Match, _repl: str = replacement) -> str:
+            new = m.expand(_repl)
+            return _preserve_first_case(m.group(0), new)
+        text, n = pattern.subn(_sub, text)
+        total += n
+    return text, total
+
+
+# ---------- page footer cleanup ----------
+
+# Footer page numbers in PDFs typically appear as a standalone integer line
+# right before the next `[page N]` anchor (the number itself is the page
+# being closed, the anchor introduces the next page). detect_recurring_lines
+# in normalize_md cannot catch them because each footer line is unique
+# (1, 2, 3, …). This regex grabs the standalone number that sits *between*
+# two consecutive page anchors with only whitespace around it, plus any
+# stray number at the very end of the body (last-page footer).
+_PAGE_FOOTER_BETWEEN_RE = re.compile(
+    r"\n\n\d{1,4}\n+(?=\[page \d+\])",
+)
+_PAGE_FOOTER_TAIL_RE = re.compile(
+    r"\n\n\d{1,4}\n*\Z",
+)
+
+
+def strip_page_footer_numbers(body: str) -> tuple[str, int]:
+    """Remove standalone footer page numbers that sit between two
+    `[page N]` anchors (or at the document tail). Preserves the anchors
+    themselves — they're used by the second-session agent for navigation.
+
+    Returns (new_body, removed_count)."""
+    removed = 0
+    body, n1 = _PAGE_FOOTER_BETWEEN_RE.subn("\n\n", body)
+    removed += n1
+    body, n2 = _PAGE_FOOTER_TAIL_RE.subn("\n", body)
+    removed += n2
+    return body, removed
+
+
 # ---------- file writer ----------
 
 def write_md(out_path: Path, frontmatter: dict[str, Any], body: str) -> None:
