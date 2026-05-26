@@ -41,6 +41,7 @@ assert payload["ok"]
 | extraction_strategy | script                          | invocation |
 |---------------------|---------------------------------|------------|
 | `pymupdf4llm`       | `extract_pdf_pymupdf4llm.py`    | `<input> <output> --doc-id <id> --source-rel <rel>` (auto image extraction to `<kb_dir>/assets/`; override with `--assets-dir`/`--assets-rel`, disable with `--no-extract-images`) |
+| `mineru`            | `extract_pdf_mineru.py`         | **Opt-in tier** — requires `ensure_env.py --tier mineru` once. `<input> <output> --doc-id <id> --source-rel <rel>` (default backend `auto`, language `cyrillic`; pass `--backend pipeline` for CPU-only, `--lang en` for English-only; `--keep-raw` preserves MinerU output under `<kb_dir>/_mineru/<doc_id>/` for follow-up `postprocess_popo.py`). Exits 2 with install hint when mineru CLI is missing — parent loop should mark the file as needing install rather than skipping silently. |
 | `mammoth`           | `extract_docx.py`               | `<input> <output> --doc-id <id> --source-rel <rel>` (auto-routes to `pandoc` when `has_equations: true` and pandoc is on PATH; force mammoth with `--force-mammoth`) |
 | `python-pptx`       | `extract_pptx.py`               | `<input> <output> --doc-id <id> --source-rel <rel>` |
 | `passthrough-md`    | `extract_md_txt.py --mode md`   | `<input> <output> --doc-id <id> --source-rel <rel> --mode md` |
@@ -49,8 +50,37 @@ assert payload["ok"]
 | `ipynb`             | `extract_ipynb.py`              | `<input> <output> --doc-id <id> --source-rel <rel>` |
 | `skip`              | (none — file is skipped) | — |
 | `needs_password`    | (Phase 3 user decision; if password given, re-classify and use `pymupdf4llm`) | — |
-| `needs_ocr_or_vlm`  | (Phase 3 user decision; **not in MVP** — skip in this release) | — |
+| `needs_ocr_or_vlm`  | (Phase 3 user decision; pick `vlm_mlx` to route through `mineru` strategy — requires opt-in tier; default behaviour is `skip`) | — |
 | `not_in_mvp`        | (XLSX/EPUB/RTF/ODT/image — Phase 3 user decision; skip in MVP) | — |
+
+## Opt-in MinerU tier
+
+The `mineru` strategy is opt-in by design: heavy ML deps and a ~3 GB model
+download never enter the lightweight default tier. To enable:
+
+```bash
+# One-time, installs mineru[all] + MLX wheels on Apple Silicon
+python3 <skill_dir>/scripts/ensure_env.py --tier mineru
+
+# Auto-route image_only PDFs through mineru when scanning a corpus
+python3 <skill_dir>/scripts/ensure_env.py scout_corpus.py \
+    <input_dir> <kb_dir> --enable-mineru
+```
+
+Without `--enable-mineru` scout behaves exactly as before — `image_only`
+PDFs surface as the `scanned_pdf` user-decision group and default to
+`skip`. The flag is also recorded in `_scout.flags.enable_mineru` so
+follow-up tools see the choice.
+
+## Stage 2 (optional): MinerU-Popo post-processing
+
+If long-document hierarchy / cross-page table merging still looks wrong
+after MinerU, the opt-in `postprocess_popo.py` script runs the upstream
+MinerU-Popo pipeline over the cached `<kb_dir>/_mineru/<doc_id>/`
+artefacts and writes a document tree as a sidecar JSON next to each kb
+doc. See `postprocess_popo.py --help` and the SKILL.md "Optional stage 2"
+section for the exact setup steps (the Popo conda env and HF model
+download are handled by the user, not by doc2kb).
 
 ## Post-extraction normalization
 

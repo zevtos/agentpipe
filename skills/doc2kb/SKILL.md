@@ -57,6 +57,8 @@ python3 <skill_dir>/scripts/ensure_env.py scout_corpus.py <input_dir> <kb_dir>
 
 Производит `<kb_dir>/_scout.json` с классификацией каждого файла. **Никогда не пропускайте эту фазу.** Schema файла зафиксирована в `references/format-spec.md`. Ключевые поля: `files[].extraction_strategy`, `files[].action_required`, `user_decisions_needed`.
 
+**Опциональный флаг `--enable-mineru`.** Если установлен mineru tier (см. ниже «Optional MinerU VLM backend»), `scout_corpus.py --enable-mineru` автоматически роутит `image_only` PDF на extractor `mineru` вместо surfacing'а как `ask_user_ocr_strategy`. Без флага поведение не меняется — heavy ML deps никогда не активируются по-умолчанию.
+
 ### Phase 3: Decide
 
 1. Прочитайте `<kb_dir>/_scout.json`.
@@ -77,6 +79,7 @@ python3 <skill_dir>/scripts/ensure_env.py scout_corpus.py <input_dir> <kb_dir>
 | extraction_strategy | script |
 |---|---|
 | `pymupdf4llm`     | `extract_pdf_pymupdf4llm.py` |
+| `mineru`          | `extract_pdf_mineru.py` *(opt-in tier, see below)* |
 | `mammoth`         | `extract_docx.py` |
 | `python-pptx`     | `extract_pptx.py` |
 | `passthrough-md`  | `extract_md_txt.py --mode md` |
@@ -168,15 +171,17 @@ python3 <skill_dir>/scripts/ensure_env.py build_manifest.py <kb_dir>
 
 | script | purpose |
 |---|---|
-| `ensure_env.py`              | idempotent venv bootstrap (run once or on requirements change) |
-| `scout_corpus.py`            | Phase 2 — classify corpus, emit `_scout.json` |
+| `ensure_env.py`              | idempotent venv bootstrap (run once or on requirements change). Accepts `--tier mineru` for the opt-in heavy install. |
+| `scout_corpus.py`            | Phase 2 — classify corpus, emit `_scout.json`. `--enable-mineru` opt-in routes `image_only` PDFs through the mineru extractor. |
 | `extract_pdf_pymupdf4llm.py` | text-layer PDF → Markdown; auto-extracts embedded images to `<kb_dir>/assets/` and rewires `picture intentionally omitted` placeholders to those files |
+| `extract_pdf_mineru.py`      | **opt-in** VLM-grade PDF → Markdown via the opendatalab/MinerU CLI; mirrors the other extractors' single-file contract, copies images to `<kb_dir>/assets/` via `save_image_safe`, optionally caches raw mineru output under `<kb_dir>/_mineru/<doc_id>/` for follow-up Popo runs. Requires `ensure_env.py --tier mineru`. |
 | `extract_docx.py`            | DOCX → Markdown via mammoth + markdownify; switches to pandoc when source contains OOXML math so formulas survive as LaTeX |
 | `extract_pptx.py`            | PPTX → Markdown, preserves speaker notes |
 | `extract_ipynb.py`           | Jupyter notebook (.ipynb) → Markdown; per-cell anchors, text outputs preserved, base64 images dropped |
 | `extract_md_txt.py`          | normalize Markdown/text, encoding-aware |
 | `extract_html.py`            | HTML → Markdown via trafilatura (boilerplate removal) |
 | `normalize_md.py`            | structural cleanup pass (idempotent, never summarizes) |
+| `postprocess_popo.py`        | **opt-in stage 2** — runs upstream opendatalab/MinerU-Popo over cached mineru outputs to rebuild document trees (heading hierarchy, cross-page table merging, paragraph truncation repair). Strictly opt-in; requires a user-provided Popo checkout + conda env. |
 | `token_count.py`             | count tokens in an extracted .md file |
 | `build_manifest.py`          | Phase 5 — assemble manifest, INDEX, llms.txt, AGENTS.md |
 | `_common.py`                 | shared helpers — imported by all extract scripts |
@@ -216,17 +221,120 @@ python3 <skill_dir>/scripts/ensure_env.py build_manifest.py <kb_dir>
 - Не задавать пользователю серию отдельных вопросов — батчите все решения в одно сообщение.
 - Не использовать `markitdown` или `unstructured` как "более простую альтернативу" — они теряют speaker notes в PPTX и таблицы в DOCX.
 
+## Optional MinerU VLM backend (opt-in)
+
+The default lightweight tier covers text-layer PDFs well. For image-only
+(scanned) PDFs, or text-layer PDFs that produce `mangled_visual_layout`
+/ `dropped_pictures` warnings from pymupdf4llm, you can opt into the
+[opendatalab/MinerU](https://github.com/opendatalab/MinerU) VLM-grade
+extractor. It is intentionally **never** activated automatically — heavy
+ML deps (~3 GB model + MLX wheels on macOS) must be installed by an
+explicit user action.
+
+**One-time install:**
+
+```bash
+python3 <skill_dir>/scripts/ensure_env.py --tier mineru
+```
+
+This adds `mineru[all]` plus (on Apple Silicon) `mlx` and `mlx-lm` into
+the same venv as the lightweight base. A separate hash file
+(`.venv/.installed_hash_mineru`) keeps the install idempotent — re-running
+`--tier mineru` is a no-op unless `requirements-mineru.txt` changes.
+
+**Usage in scout:**
+
+```bash
+python3 <skill_dir>/scripts/ensure_env.py scout_corpus.py \
+    <input_dir> <kb_dir> --enable-mineru
+```
+
+With the flag, `image_only` PDFs get `extraction_strategy: "mineru"`
+instead of surfacing as an `ask_user_ocr_strategy` decision group. Text
+PDFs continue going through pymupdf4llm. The flag choice is recorded in
+`_scout.flags.enable_mineru`.
+
+**Direct extraction:**
+
+```bash
+python3 <skill_dir>/scripts/ensure_env.py extract_pdf_mineru.py \
+    "<absolute input>" "<kb_dir>/docs/<id>-<slug>.md" \
+    --doc-id <id> --source-rel "<rel/path.pdf>" \
+    [--backend auto|pipeline|vlm-auto-engine] \
+    [--lang cyrillic|en|ch|...] \
+    [--keep-raw]    # cache raw mineru output for postprocess_popo.py
+```
+
+If the `mineru` CLI isn't on PATH the script exits 2 with the install
+hint above — the parent loop must treat that as "user action required",
+not as a corrupt-PDF failure. `extraction_method` lands in frontmatter as
+`mineru-<resolved_backend>@<version>` so the audit trail distinguishes
+which backend actually ran (MinerU may resolve `auto` to `vlm` or
+`pipeline` depending on local hardware).
+
+## Optional stage 2: MinerU-Popo post-processing (opt-in)
+
+[opendatalab/MinerU-Popo](https://github.com/opendatalab/MinerU-Popo) is a
+4B post-processing model that reconstructs document-level tree structure
+(heading hierarchy, cross-page table merging, paragraph truncation
+repair) from page-level OCR output. Use only when long-document
+hierarchy still looks broken after MinerU — for short PDFs the gain is
+negligible and the infra cost (separate conda env, 4B model download,
+optional external LLM API for enrichment) isn't justified.
+
+doc2kb ships only the *glue* — `postprocess_popo.py`. The Popo conda
+env, the HF model download, and any `qwen_generate`/`gpt_generate`
+configuration are handled by the user per the upstream Popo README.
+Without the glue knowing where Popo lives the script exits 2 with
+exact install instructions.
+
+**Setup (one-time, by the user):**
+
+```bash
+git clone https://github.com/opendatalab/MinerU-Popo.git
+cd MinerU-Popo
+conda create -n popo python=3.10 && conda activate popo
+pip install -r requirements.txt
+hf download DreamEternal/MinerU-Popo --local-dir models/Mineru-Popo
+# Edit post_processing/model_utils.py to point POPO_MODEL_PATH at the
+# downloaded model. Optionally configure qwen_generate/gpt_generate.
+export DOC2KB_POPO_REPO="$PWD"
+```
+
+**Usage:**
+
+```bash
+# First, run mineru with --keep-raw so the per-doc cache is preserved
+# under <kb_dir>/_mineru/<doc_id>/.
+python3 <skill_dir>/scripts/ensure_env.py extract_pdf_mineru.py \
+    "<input.pdf>" "<kb_dir>/docs/<id>-<slug>.md" \
+    --doc-id <id> --source-rel "<rel>" --keep-raw
+
+# Then post-process. Reads <kb_dir>/_mineru/, runs Popo's 3 bash scripts
+# (normalize → inference → build_tree), writes
+# <kb_dir>/docs/<id>-<slug>.tree.json sidecars for each doc.
+python3 <skill_dir>/scripts/ensure_env.py postprocess_popo.py <kb_dir>
+```
+
+Pass `--doc-id <id>` to process a single doc, `--popo-repo /abs/path`
+instead of the env var, or `--skip-normalization` / `--skip-inference`
+to iterate without redoing earlier steps.
+
 ## Что доступно out-of-the-box vs follow-up
 
-**MVP (этот release):**
+**MVP lightweight tier (всегда установлен):**
 - PDF (text-layer), DOCX, PPTX (с speaker notes), IPYNB (Jupyter notebook —
   source + text outputs, base64-картинки заменяются placeholder),
   MD, TXT, HTML.
-- Lightweight tier (без heavy ML моделей). `.ipynb` парсится stdlib `json`
-  — никаких jupyter/nbformat в venv.
+- `.ipynb` парсится stdlib `json` — никаких jupyter/nbformat в venv.
 
-**Follow-up commits (не в этом MVP):**
+**Opt-in heavy tier (`ensure_env.py --tier mineru`):**
+- VLM-grade PDF extraction через MinerU 2.5+ (`extract_pdf_mineru.py`).
+- На Apple Silicon — MLX-accelerated backend (`vlm-auto-engine`).
+- Optional stage 2: MinerU-Popo для document-level tree reconstruction
+  (`postprocess_popo.py`, требует пользовательской установки Popo).
+
+**Follow-up (ещё не в скилле):**
 - XLSX, EPUB, RTF, ODT, standalone images.
-- Scanned PDFs (OCR через OCRmyPDF + Tesseract).
-- VLM-route (mlx-vlm + Qwen2-VL / DeepSeek-OCR / olmOCR-2 для Apple Silicon).
-- Heavy tier (docling, marker-pdf) для сложных layout / таблиц.
+- Scanned PDFs через OCRmyPDF + Tesseract (альтернатива MinerU без VLM).
+- Heavy tier на базе docling / marker-pdf для специфических layout-кейсов.

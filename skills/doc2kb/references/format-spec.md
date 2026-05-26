@@ -35,6 +35,11 @@ Emitted by `scout_corpus.py`. Schema:
   "scanned_at": "ISO-8601 UTC",
   "input_root": "/abs/path/to/input",
   "kb_root": "/abs/path/to/kb",
+  "flags": {
+    "enable_mineru": bool                  // opt-in heavy tier — image_only
+                                           // PDFs auto-route to `mineru`
+                                           // strategy when true
+  },
   "corpus": {
     "total_files": int,
     "total_size_bytes": int,
@@ -65,7 +70,7 @@ Emitted by `scout_corpus.py`. Schema:
       "raw_cells": int | null,               // ipynb
       "has_outputs": bool | null,            // ipynb
       "encoding": "utf-8" | "cp1251" | ... | null,
-      "extraction_strategy": "pymupdf4llm"|"mammoth"|"python-pptx"|"passthrough-md"|"passthrough-txt"|"trafilatura"|"ipynb"|"needs_password"|"needs_ocr_or_vlm"|"not_in_mvp"|"skip",
+      "extraction_strategy": "pymupdf4llm"|"mineru"|"mammoth"|"python-pptx"|"passthrough-md"|"passthrough-txt"|"trafilatura"|"ipynb"|"needs_password"|"needs_ocr_or_vlm"|"not_in_mvp"|"skip",
       "estimated_tokens": int | null,
       "warnings": [string],
       "action_required": "ask_user_password_or_skip"|"ask_user_ocr_strategy"|"ask_user_proceed_huge"|"ask_user_skip_corrupt"|"ask_user_skip_unsupported" | null
