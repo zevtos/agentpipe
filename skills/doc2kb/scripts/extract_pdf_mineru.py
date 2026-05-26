@@ -94,23 +94,26 @@ EXTRACTOR_NAME = "mineru"
 #   hybrid-auto-engine — pipeline layout + VLM crops, MinerU's CLI default
 #   vlm-http-client    — talks to a remote vlm server
 #   hybrid-http-client — talks to a remote hybrid server
-# We default to `hybrid-auto-engine` to match MinerU's own CLI default
-# (see mineru/cli/client.py — "Without method specified, hybrid-auto-engine
-# will be used by default"). On Apple Silicon with the doc2kb mineru tier
-# installed, hybrid routes layout detection through the lightweight
-# pipeline stack and reserves the MLX VLM for the content crops that
-# benefit from it — typically 2-3× faster than pure `vlm-auto-engine`
-# on text-layer PDFs with equivalent extraction quality.
-# `auto` is accepted as a friendly alias for users who want the legacy
-# behaviour from older mineru releases.
+# We default to `vlm-auto-engine`, which on Apple Silicon picks the MLX
+# backend (`mlx-engine`) via mineru/utils/engine_utils.py. Measured on
+# M5 Pro / 24 GB, lab2_advanced.pdf (10 pages, math-heavy):
+#   vlm-auto-engine    ~65 s real, clean `$X_{sp}$` LaTeX
+#   hybrid-auto-engine ~243 s real, `$X _ { s p } ,$` (extra spaces and
+#                                    occasional trailing-punct adhesion)
+# Hybrid is mineru's own CLI default and on paper "splits layout to
+# pipeline, VLM only for crops" — but on M-series with MLX the two
+# overheads (loading pipeline models + per-block re-prompting) dominate,
+# and pure VLM end-to-end wins on both wall time AND LaTeX quality.
+# Keep this default until benchmark data on other architectures argues
+# otherwise. `auto` is accepted as a friendly alias.
 SUPPORTED_BACKENDS = (
     "auto",
     "pipeline",
     "vlm-auto-engine",
     "hybrid-auto-engine",
 )
-_BACKEND_ALIASES = {"auto": "hybrid-auto-engine"}
-DEFAULT_BACKEND = "hybrid-auto-engine"
+_BACKEND_ALIASES = {"auto": "vlm-auto-engine"}
+DEFAULT_BACKEND = "vlm-auto-engine"
 DEFAULT_LANG = "cyrillic"  # doc2kb users primarily work with RU/EN material
 # Time budget for the mineru subprocess. VLM runs at ~0.5–2 s/page on Apple
 # Silicon and the pipeline backend at ~1–3 s/page on CPU — even a 500-page

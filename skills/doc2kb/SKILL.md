@@ -281,19 +281,25 @@ PDFs continue going through pymupdf4llm. The flag choice is recorded in
 python3 <skill_dir>/scripts/ensure_env.py extract_pdf_mineru.py \
     "<absolute input>" "<kb_dir>/docs/<id>-<slug>.md" \
     --doc-id <id> --source-rel "<rel/path.pdf>" \
-    [--backend hybrid-auto-engine|vlm-auto-engine|pipeline] \
+    [--backend vlm-auto-engine|hybrid-auto-engine|pipeline] \
     [--lang cyrillic|en|ch|...] \
     [--keep-raw]    # cache raw mineru output for postprocess_popo.py
 ```
 
-Backend trade-off:
-- `hybrid-auto-engine` (default, matches mineru's own CLI default) —
-  pipeline does layout, VLM (MLX on Mac) does content crops. Fastest
-  high-accuracy option for text-layer PDFs.
-- `vlm-auto-engine` — pure VLM end-to-end. Higher accuracy on heavily
-  scanned PDFs, but 2-3× slower than hybrid.
-- `pipeline` — CPU/GPU CV stack, no VLM, no model download. Fastest,
-  least accurate; falls back path when MLX isn't available.
+Backend trade-off (measured on M5 Pro / 24 GB, lab2_advanced.pdf 10 p):
+- `vlm-auto-engine` (default) — pure VLM end-to-end via MLX. **~65 s**
+  on the sample doc, produces clean `$X_{sp}$` LaTeX, recovered three
+  state-space matrices and the PixHawk block diagram as Mermaid.
+- `hybrid-auto-engine` — pipeline does layout, VLM does crops. Mineru's
+  own CLI default, but on Apple Silicon with MLX it's measurably worse:
+  **~243 s** on the same doc (pipeline-model load + per-block reprompt
+  overheads dominate), LaTeX subscripts come out as `$X _ { s p } ,$`
+  with extra spaces and occasional trailing-punct adhesion. Use when
+  the box doesn't have MLX (CUDA Linux server) — there hybrid genuinely
+  wins.
+- `pipeline` — CPU/GPU CV stack, no VLM, no big model download.
+  Fastest, least accurate. Right choice on CPU-only boxes or when you
+  just need a structural pass.
 
 If the `mineru` CLI isn't on PATH the script exits 2 with the install
 hint above — the parent loop must treat that as "user action required",
