@@ -94,20 +94,23 @@ EXTRACTOR_NAME = "mineru"
 #   hybrid-auto-engine — pipeline layout + VLM crops, MinerU's CLI default
 #   vlm-http-client    — talks to a remote vlm server
 #   hybrid-http-client — talks to a remote hybrid server
-# We default to `vlm-auto-engine` because the doc2kb mineru tier installs
-# mlx + mlx-lm on darwin (the only path where MinerU silently uses MLX);
-# on Linux/Windows boxes without CUDA the user should pass `--backend
-# pipeline` explicitly. We accept `auto` as a friendly alias for
-# `vlm-auto-engine` so the legacy contract of older mineru releases keeps
-# working.
+# We default to `hybrid-auto-engine` to match MinerU's own CLI default
+# (see mineru/cli/client.py — "Without method specified, hybrid-auto-engine
+# will be used by default"). On Apple Silicon with the doc2kb mineru tier
+# installed, hybrid routes layout detection through the lightweight
+# pipeline stack and reserves the MLX VLM for the content crops that
+# benefit from it — typically 2-3× faster than pure `vlm-auto-engine`
+# on text-layer PDFs with equivalent extraction quality.
+# `auto` is accepted as a friendly alias for users who want the legacy
+# behaviour from older mineru releases.
 SUPPORTED_BACKENDS = (
     "auto",
     "pipeline",
     "vlm-auto-engine",
     "hybrid-auto-engine",
 )
-_BACKEND_ALIASES = {"auto": "vlm-auto-engine"}
-DEFAULT_BACKEND = "vlm-auto-engine"
+_BACKEND_ALIASES = {"auto": "hybrid-auto-engine"}
+DEFAULT_BACKEND = "hybrid-auto-engine"
 DEFAULT_LANG = "cyrillic"  # doc2kb users primarily work with RU/EN material
 # Time budget for the mineru subprocess. VLM runs at ~0.5–2 s/page on Apple
 # Silicon and the pipeline backend at ~1–3 s/page on CPU — even a 500-page

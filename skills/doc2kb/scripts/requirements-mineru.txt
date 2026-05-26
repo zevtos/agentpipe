@@ -8,12 +8,17 @@
 # into every `ensure_env.py` run, which we explicitly do not want.
 #
 # Apple Silicon notes:
-#   - `mlx` and `mlx-lm` are needed for the `vlm-auto-engine` backend to use
-#     the MLX accelerator on M-series Macs (+100–200 % throughput vs the
-#     transformers fallback). They wheel-install cleanly on darwin/arm64.
+#   - `mlx-vlm` is the package mineru's auto-engine selector probes for to
+#     decide between mlx-engine and the much slower transformers fallback
+#     (see mineru/utils/engine_utils.py::_select_mac_engine). Pin it
+#     explicitly so we don't silently regress when mineru drops it from
+#     its transitive deps.
+#   - `mlx` + `mlx-lm` are needed by mineru_vl_utils.mlx_compat for actual
+#     inference and by the LLM-aided title hierarchy feature (when used).
 #   - `sys_platform == "darwin"` markers keep Linux/Windows installs from
 #     trying to pull MLX wheels that aren't published for them; mineru on
 #     those platforms uses CUDA or pure-CPU pipeline backends instead.
 mineru[all]>=2.5,<4.0
+mlx-vlm; sys_platform == "darwin"
 mlx; sys_platform == "darwin"
 mlx-lm; sys_platform == "darwin"

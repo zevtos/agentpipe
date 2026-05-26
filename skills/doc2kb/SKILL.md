@@ -237,10 +237,31 @@ explicit user action.
 python3 <skill_dir>/scripts/ensure_env.py --tier mineru
 ```
 
-This adds `mineru[all]` plus (on Apple Silicon) `mlx` and `mlx-lm` into
-the same venv as the lightweight base. A separate hash file
-(`.venv/.installed_hash_mineru`) keeps the install idempotent — re-running
-`--tier mineru` is a no-op unless `requirements-mineru.txt` changes.
+This adds `mineru[all]` plus (on Apple Silicon) `mlx-vlm`, `mlx`, and
+`mlx-lm` into the same venv as the lightweight base. A separate hash
+file (`.venv/.installed_hash_mineru`) keeps the install idempotent —
+re-running `--tier mineru` is a no-op unless `requirements-mineru.txt`
+changes. The `mlx-vlm` pin matters: mineru's auto-engine selector
+(`mineru/utils/engine_utils.py::_select_mac_engine`) only picks the
+fast MLX backend when `mlx-vlm` is importable; without it, mineru
+silently falls back to the much slower transformers path.
+
+**Apple Silicon tuning (M-series).** With the mineru tier installed,
+mineru auto-detects MLX. Performance knobs that help on M1/M2/M3/M4/M5:
+- `MINERU_PDF_RENDER_THREADS=8` (or `nproc/2`) — default is 4; raising
+  it speeds up the PDF→image render stage on 8+-core boxes.
+- `MINERU_PROCESSING_WINDOW_SIZE=128` (default 64) — larger window
+  reduces overhead on long documents when RAM ≥ 24 GB.
+- `MINERU_FORMULA_ENABLE=true` / `MINERU_TABLE_ENABLE=true` (default
+  on) — keep on for math/lab PDFs, set `false` to shave time on
+  pure-prose corpora.
+
+Apply via env, e.g.:
+
+```bash
+MINERU_PDF_RENDER_THREADS=8 MINERU_PROCESSING_WINDOW_SIZE=128 \
+    python3 <skill_dir>/scripts/ensure_env.py extract_pdf_mineru.py ...
+```
 
 **Usage in scout:**
 
@@ -260,10 +281,19 @@ PDFs continue going through pymupdf4llm. The flag choice is recorded in
 python3 <skill_dir>/scripts/ensure_env.py extract_pdf_mineru.py \
     "<absolute input>" "<kb_dir>/docs/<id>-<slug>.md" \
     --doc-id <id> --source-rel "<rel/path.pdf>" \
-    [--backend auto|pipeline|vlm-auto-engine] \
+    [--backend hybrid-auto-engine|vlm-auto-engine|pipeline] \
     [--lang cyrillic|en|ch|...] \
     [--keep-raw]    # cache raw mineru output for postprocess_popo.py
 ```
+
+Backend trade-off:
+- `hybrid-auto-engine` (default, matches mineru's own CLI default) —
+  pipeline does layout, VLM (MLX on Mac) does content crops. Fastest
+  high-accuracy option for text-layer PDFs.
+- `vlm-auto-engine` — pure VLM end-to-end. Higher accuracy on heavily
+  scanned PDFs, but 2-3× slower than hybrid.
+- `pipeline` — CPU/GPU CV stack, no VLM, no model download. Fastest,
+  least accurate; falls back path when MLX isn't available.
 
 If the `mineru` CLI isn't on PATH the script exits 2 with the install
 hint above — the parent loop must treat that as "user action required",
