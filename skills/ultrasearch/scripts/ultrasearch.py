@@ -61,6 +61,7 @@ import translate as _translate
 
 PARSE_SCRIPT = Path(__file__).resolve().parent / "parse.py"
 PARSE_TIMEOUT_S = 180
+DEFAULT_PARSE_CONCURRENCY = 4
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -96,6 +97,10 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="pull latest Retraction Watch CSV before marking")
     p.add_argument("--no-docling", action="store_true",
                    help="disable docling fallback on math/table-heavy pages")
+    p.add_argument("--parse-concurrency", type=int, default=DEFAULT_PARSE_CONCURRENCY,
+                   help=f"parallel parse subprocesses (default: {DEFAULT_PARSE_CONCURRENCY}); "
+                        "1 = serial. Each subprocess loads pymupdf4llm (+docling if "
+                        "triggered), so memory grows ~linearly with this value.")
     p.add_argument("--sources", default=None,
                    help="comma-separated subset of "
                         "{openalex,s2,arxiv,crossref,europepmc,core,"
@@ -176,6 +181,15 @@ def _run_parse_subprocess(pdf_path: str, candidate_key: str) -> dict[str, Any]:
                 "candidate_key": candidate_key, "stdout": out[-1][:500]}
     result["candidate_key"] = candidate_key
     return result
+
+
+async def _run_parse_subprocess_async(pdf_path: str, candidate_key: str,
+                                      sem: asyncio.Semaphore) -> dict[str, Any]:
+    """Async wrapper bounded by `sem` — runs the blocking subprocess in a
+    worker thread so the pipeline can launch up to `sem._value` parses in
+    parallel."""
+    async with sem:
+        return await asyncio.to_thread(_run_parse_subprocess, pdf_path, candidate_key)
 
 
 async def _pipeline(args) -> dict[str, Any]:
@@ -276,26 +290,39 @@ async def _pipeline(args) -> dict[str, Any]:
             if f.get("ok") and f.get("pdf_path"):
                 fetched_paths[f["candidate_key"]] = f
 
-        # parse (subprocess per PDF; serial in Stage 1 — pymupdf4llm releases
-        # the GIL but the subprocess invocation is the safety net)
+        # parse (subprocess per PDF, parallelism bounded by
+        # --parse-concurrency; each subprocess is isolated so concurrent
+        # pymupdf4llm/docling invocations can't trample each other's state)
         t0 = time.monotonic()
-        n_parse_ok = 0
-        n_parse_fail = 0
+        parse_concurrency = max(1, int(args.parse_concurrency))
+        parse_jobs: list[tuple[str, str]] = []
         for c in candidates:
             key = _discover._candidate_key(c)
             f = fetched_paths.get(key)
             if not f:
                 continue
-            pr = _run_parse_subprocess(f["pdf_path"], key)
+            parse_jobs.append((key, f["pdf_path"]))
+        if parse_jobs:
+            sem = asyncio.Semaphore(parse_concurrency)
+            results = await asyncio.gather(*(
+                _run_parse_subprocess_async(pdf_path, key, sem)
+                for key, pdf_path in parse_jobs
+            ))
+        else:
+            results = []
+        n_parse_ok = 0
+        n_parse_fail = 0
+        for (key, _), pr in zip(parse_jobs, results):
             parsed[key] = pr
             if pr.get("ok"):
                 n_parse_ok += 1
             else:
                 n_parse_fail += 1
         stats["parse"] = {
-            "n_ok":      n_parse_ok,
-            "n_fail":    n_parse_fail,
-            "seconds":   round(time.monotonic() - t0, 2),
+            "n_ok":         n_parse_ok,
+            "n_fail":       n_parse_fail,
+            "concurrency":  parse_concurrency,
+            "seconds":      round(time.monotonic() - t0, 2),
         }
 
         # index — serial writes (sqlite single-writer)
