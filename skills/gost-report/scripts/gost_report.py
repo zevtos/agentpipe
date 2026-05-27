@@ -708,6 +708,122 @@ def _walk_with_nary(children, start: int, *, stop_at_terminator: bool):
     return result, j
 
 
+def _build_mtable(table_node, *, left_align: bool) -> OxmlElement:
+    """MathML <mtable> → OMML <m:m>. Если left_align=True, ставим левое
+    выравнивание колонок (нужно для cases, где обе ветви прижимаются влево)."""
+    m_el = _omml("m")
+    rows = [r for r in table_node if _ml_local(r.tag) == "mtr"]
+    col_count = 0
+    for row_node in rows:
+        cells = [c for c in row_node if _ml_local(c.tag) == "mtd"]
+        if len(cells) > col_count:
+            col_count = len(cells)
+    if left_align and col_count > 0:
+        mPr = _omml("mPr")
+        mcs = _omml("mcs")
+        mc = _omml("mc")
+        mcPr = _omml("mcPr")
+        cnt = _omml("count")
+        _set_mval(cnt, str(col_count))
+        mcPr.append(cnt)
+        jc = _omml("mcJc")
+        _set_mval(jc, "left")
+        mcPr.append(jc)
+        mc.append(mcPr)
+        mcs.append(mc)
+        mPr.append(mcs)
+        m_el.append(mPr)
+    for row_node in rows:
+        mr = _omml("mr")
+        for cell_node in row_node:
+            if _ml_local(cell_node.tag) != "mtd":
+                continue
+            cell_kids: List[OxmlElement] = []
+            for child in cell_node:
+                cell_kids.extend(_walk_mathml(child))
+            mr.append(_omml_wrap("e", cell_kids))
+        m_el.append(mr)
+    return m_el
+
+
+_OPEN_BRACKETS = {"(", "[", "{", "|", "‖", "⟨", "⌊", "⌈"}
+_CLOSE_BRACKETS = {")", "]", "}", "|", "‖", "⟩", "⌋", "⌉"}
+
+
+def _is_fence_mo(node, *, side: str) -> bool:
+    """Проверка, что mo-узел работает как скобка (stretchy fence или
+    обычный текстовый символ одной из открывающих/закрывающих скобок).
+    side: "open" или "close".
+    """
+    if _ml_local(node.tag) != "mo":
+        return False
+    if node.get("stretchy") == "true" and node.get("fence") == "true":
+        return True
+    text = (node.text or "").strip()
+    if side == "open":
+        return text in _OPEN_BRACKETS
+    return text in _CLOSE_BRACKETS
+
+
+def _try_fenced_mtable(children) -> Optional[List[OxmlElement]]:
+    """Распознать паттерн \\begin{cases}, \\begin{pmatrix} и аналоги (matrix,
+    обёрнутая скобками) в children MathML mrow и собрать OMML <m:d>+<m:m>
+    с правильно растягивающимися скобками.
+
+    latex2mathml сериализует:
+      * cases / \\left\\{ ... \\right. — <mo stretchy fence prefix>{</mo>
+        <mtable>...</mtable> [<mo stretchy fence postfix/>]
+      * pmatrix / bmatrix — <mo>(</mo><mtable>...</mtable><mo>)</mo>
+        (без stretchy/fence-атрибутов, простые символы скобок)
+
+    Голая <mtable> без скобок обрабатывается обычным mtable-handler'ом.
+    Возвращает список OMML-элементов либо None, если паттерн не совпал.
+    """
+    # Найти позицию первого open-fence + mtable подряд
+    open_idx = None
+    for i in range(len(children) - 1):
+        if (
+            _is_fence_mo(children[i], side="open")
+            and _ml_local(children[i + 1].tag) == "mtable"
+        ):
+            open_idx = i
+            break
+    if open_idx is None:
+        return None
+
+    open_char = (children[open_idx].text or "").strip() or "{"
+    table_node = children[open_idx + 1]
+    close_char = ""
+    consumed = open_idx + 2
+    if consumed < len(children) and _is_fence_mo(children[consumed], side="close"):
+        close_char = (children[consumed].text or "").strip()
+        consumed += 1
+
+    # Cases-стиль (без правой скобки или непарные скобки) выравниваем влево;
+    # обычные pmatrix/bmatrix оставляем с дефолтным центрированием.
+    is_cases_like = close_char == "" or (open_char == "{" and close_char != "}")
+    m_el = _build_mtable(table_node, left_align=is_cases_like)
+
+    d = _omml("d")
+    dPr = _omml("dPr")
+    beg = _omml("begChr")
+    _set_mval(beg, open_char)
+    dPr.append(beg)
+    end = _omml("endChr")
+    _set_mval(end, close_char)
+    dPr.append(end)
+    d.append(dPr)
+    d.append(_omml_wrap("e", [m_el]))
+
+    result: List[OxmlElement] = []
+    for k in range(open_idx):
+        result.extend(_walk_mathml(children[k]))
+    result.append(d)
+    for k in range(consumed, len(children)):
+        result.extend(_walk_mathml(children[k]))
+    return result
+
+
 def _walk_mathml(node) -> List[OxmlElement]:
     """Рекурсивный обход MathML-узла, возвращает список OMML-элементов.
 
@@ -720,6 +836,9 @@ def _walk_mathml(node) -> List[OxmlElement]:
     # Контейнеры — плющим в плоский список с lookahead для N-ary тел.
     if tag in ("math", "mstyle", "mrow", "semantics", "annotation"):
         children = [c for c in node if _ml_local(c.tag) != "annotation"]
+        cases = _try_fenced_mtable(children)
+        if cases is not None:
+            return cases
         result, _ = _walk_with_nary(children, 0, stop_at_terminator=False)
         return result
 
@@ -921,20 +1040,7 @@ def _walk_mathml(node) -> List[OxmlElement]:
         return [d]
 
     if tag == "mtable":
-        m_el = _omml("m")
-        for row_node in node:
-            if _ml_local(row_node.tag) != "mtr":
-                continue
-            mr = _omml("mr")
-            for cell_node in row_node:
-                if _ml_local(cell_node.tag) != "mtd":
-                    continue
-                cell_kids: List[OxmlElement] = []
-                for child in cell_node:
-                    cell_kids.extend(_walk_mathml(child))
-                mr.append(_omml_wrap("e", cell_kids))
-            m_el.append(mr)
-        return [m_el]
+        return [_build_mtable(node, left_align=False)]
 
     # Неизвестный тег — рекурсивно обрабатываем детей, не падаем
     result = []
