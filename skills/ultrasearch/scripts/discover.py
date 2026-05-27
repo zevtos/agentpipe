@@ -316,16 +316,20 @@ def _s2_to_candidate(p: dict[str, Any]) -> Candidate | None:
 
 async def _query_s2(client: httpx.AsyncClient, query: str, n: int,
                     api_key: str | None) -> list[Candidate]:
-    params = {
+    # /paper/search is closed to keyless clients (always 429 since ~2024). /paper/search/bulk
+    # still works without a key but only supports paperId/publicationDate/citationCount sorts —
+    # no relevance ranking. citationCount:desc is the best ranking proxy for lit review.
+    # No `limit` on bulk; it returns up to 1000 per call, we slice to n.
+    params: dict[str, Any] = {
         "query": query,
-        "limit": min(n, 100),
         "fields": "title,abstract,year,authors,venue,citationCount,externalIds,"
                   "openAccessPdf,paperId",
+        "sort": "citationCount:desc",
     }
     headers = {"User-Agent": USER_AGENT.format(email="anonymous")}
     if api_key:
         headers["x-api-key"] = api_key
-    r = await _retry_get(client, f"{S2_BASE}/paper/search", params=params,
+    r = await _retry_get(client, f"{S2_BASE}/paper/search/bulk", params=params,
                          headers=headers, source="s2")
     if r is None or r.status_code != 200:
         sc = "no_response" if r is None else r.status_code
