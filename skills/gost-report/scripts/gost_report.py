@@ -878,6 +878,260 @@ def _try_fenced_mtable(children) -> Optional[List[OxmlElement]]:
     return result
 
 
+def _handle_container(node) -> List[OxmlElement]:
+    """math/mstyle/mrow/semantics/annotation: плющим в плоский список
+    с lookahead для N-ary тел и попыткой распознать fenced mtable."""
+    children = [c for c in node if _ml_local(c.tag) != "annotation"]
+    cases = _try_fenced_mtable(children)
+    if cases is not None:
+        return cases
+    result, _ = _walk_with_nary(children, 0, stop_at_terminator=False)
+    return result
+
+
+def _handle_mi(node) -> List[OxmlElement]:
+    text = (node.text or "").strip()
+    if not text:
+        return []
+    # Многобуквенные идентификаторы (sin, log, lim, exp) — прямые;
+    # одиночные буквы (включая греческие) — курсив (дефолт OMML).
+    # mathvariant="normal" принудительно делает прямой шрифт.
+    plain = len(text) > 1 or node.get("mathvariant") == "normal"
+    return [_omml_run(text, plain=plain)]
+
+
+def _handle_simple_text(node) -> List[OxmlElement]:
+    """mn/mo/mtext: одинаковая логика, разные пустые-кейсы для mtext."""
+    tag = _ml_local(node.tag)
+    text = node.text or ""
+    if not text or not text.strip():
+        # Пустые mo (вокруг скобок и т.п.) — часто нерелевантны
+        if tag == "mtext":
+            return [_omml_run(text, plain=True)] if text else []
+        return []
+    return [_omml_run(text, plain=True)]
+
+
+def _handle_mspace(node) -> List[OxmlElement]:
+    return [_omml_run(" ", plain=True)]
+
+
+def _handle_mfrac(node) -> List[OxmlElement]:
+    kids = list(node)
+    if len(kids) < 2:
+        return []
+    f = _omml("f")
+    f.append(_omml_wrap("num", _walk_mathml(kids[0])))
+    f.append(_omml_wrap("den", _walk_mathml(kids[1])))
+    return [f]
+
+
+def _handle_msup(node) -> List[OxmlElement]:
+    kids = list(node)
+    if len(kids) < 2:
+        return []
+    # latex2mathml в inline-режиме оборачивает \sum^{n}, \int^{n} и т.п.
+    # в msup/msub/msubsup — детектируем N-ary базу до обычного sSup.
+    nary_chr = _is_nary_op(kids[0])
+    if nary_chr:
+        return [_build_nary(nary_chr, [], _walk_mathml(kids[1]),
+                            hide_sub=True)]
+    s = _omml("sSup")
+    s.append(_omml_wrap("e", _walk_mathml(kids[0])))
+    s.append(_omml_wrap("sup", _walk_mathml(kids[1])))
+    return [s]
+
+
+def _handle_msub(node) -> List[OxmlElement]:
+    kids = list(node)
+    if len(kids) < 2:
+        return []
+    nary_chr = _is_nary_op(kids[0])
+    if nary_chr:
+        return [_build_nary(nary_chr, _walk_mathml(kids[1]), [],
+                            hide_sup=True)]
+    s = _omml("sSub")
+    s.append(_omml_wrap("e", _walk_mathml(kids[0])))
+    s.append(_omml_wrap("sub", _walk_mathml(kids[1])))
+    return [s]
+
+
+def _handle_msubsup(node) -> List[OxmlElement]:
+    kids = list(node)
+    if len(kids) < 3:
+        return []
+    nary_chr = _is_nary_op(kids[0])
+    if nary_chr:
+        return [_build_nary(nary_chr,
+                            _walk_mathml(kids[1]),
+                            _walk_mathml(kids[2]))]
+    s = _omml("sSubSup")
+    s.append(_omml_wrap("e", _walk_mathml(kids[0])))
+    s.append(_omml_wrap("sub", _walk_mathml(kids[1])))
+    s.append(_omml_wrap("sup", _walk_mathml(kids[2])))
+    return [s]
+
+
+def _handle_msqrt(node) -> List[OxmlElement]:
+    rad = _omml("rad")
+    radPr = _omml("radPr")
+    degHide = _omml("degHide")
+    _set_mval(degHide, "1")
+    radPr.append(degHide)
+    rad.append(radPr)
+    rad.append(_omml("deg"))
+    e_kids: List[OxmlElement] = []
+    for child in node:
+        e_kids.extend(_walk_mathml(child))
+    rad.append(_omml_wrap("e", e_kids))
+    return [rad]
+
+
+def _handle_mroot(node) -> List[OxmlElement]:
+    kids = list(node)
+    if len(kids) < 2:
+        return []
+    rad = _omml("rad")
+    rad.append(_omml_wrap("deg", _walk_mathml(kids[1])))
+    rad.append(_omml_wrap("e", _walk_mathml(kids[0])))
+    return [rad]
+
+
+def _handle_mover(node) -> List[OxmlElement]:
+    # Семантика MathML: kids[0] = база, kids[1] = надстрочный (overscript).
+    # Это либо акцент (\bar, \hat, \vec) либо предел над оператором.
+    kids = list(node)
+    if len(kids) < 2:
+        return []
+    base, over = kids[0], kids[1]
+
+    # Акцент: либо явный accent="true", либо overscript это <mo> с
+    # одним маркером из _ACCENT_CHARS.
+    over_text = (over.text or "").strip() if _ml_local(over.tag) == "mo" else ""
+    is_accent = (
+        node.get("accent") == "true"
+        or (len(over_text) <= 2 and over_text in _ACCENT_CHARS)
+    )
+    if is_accent and over_text:
+        # Spacing-знак (¯ ^ ~ ¨ ´ ` ˘ ˙ ˇ →) перевести в combining-форму,
+        # иначе Word рисует его на baseline и накладывает поверх буквы.
+        accent_chr = _ACCENT_NORMALIZE.get(over_text, over_text)
+        acc = _omml("acc")
+        accPr = _omml("accPr")
+        chr_el = _omml("chr")
+        _set_mval(chr_el, accent_chr)
+        accPr.append(chr_el)
+        acc.append(accPr)
+        acc.append(_omml_wrap("e", _walk_mathml(base)))
+        return [acc]
+
+    # N-ary оператор с одним только верхним пределом (редко, но возможно).
+    nary_chr = _is_nary_op(base)
+    if nary_chr:
+        return [_build_nary(nary_chr, [], _walk_mathml(over),
+                            hide_sub=True)]
+
+    # Иначе: оператор с верхним пределом → m:limUpp.
+    lu = _omml("limUpp")
+    lu.append(_omml_wrap("e", _walk_mathml(base)))
+    lu.append(_omml_wrap("lim", _walk_mathml(over)))
+    return [lu]
+
+
+def _handle_munder(node) -> List[OxmlElement]:
+    # kids[0] = база, kids[1] = подстрочный (underscript).
+    kids = list(node)
+    if len(kids) < 2:
+        return []
+    base, under = kids[0], kids[1]
+
+    nary_chr = _is_nary_op(base)
+    if nary_chr:
+        return [_build_nary(nary_chr, _walk_mathml(under), [],
+                            hide_sup=True)]
+
+    ll = _omml("limLow")
+    ll.append(_omml_wrap("e", _walk_mathml(base)))
+    ll.append(_omml_wrap("lim", _walk_mathml(under)))
+    return [ll]
+
+
+def _handle_munderover(node) -> List[OxmlElement]:
+    # kids[0] = база, kids[1] = under, kids[2] = over.
+    kids = list(node)
+    if len(kids) < 3:
+        return []
+    base, under, over = kids[0], kids[1], kids[2]
+
+    nary_chr = _is_nary_op(base)
+    if nary_chr:
+        return [_build_nary(nary_chr,
+                            _walk_mathml(under),
+                            _walk_mathml(over))]
+
+    # Generic fallback: вложенные limUpp(limLow(...)).
+    ll = _omml("limLow")
+    ll.append(_omml_wrap("e", _walk_mathml(base)))
+    ll.append(_omml_wrap("lim", _walk_mathml(under)))
+    lu = _omml("limUpp")
+    lu.append(_omml_wrap("e", [ll]))
+    lu.append(_omml_wrap("lim", _walk_mathml(over)))
+    return [lu]
+
+
+def _handle_mfenced(node) -> List[OxmlElement]:
+    open_chr = node.get("open", "(")
+    close_chr = node.get("close", ")")
+    d = _omml("d")
+    dPr = _omml("dPr")
+    if open_chr != "(":
+        beg = _omml("begChr")
+        _set_mval(beg, open_chr)
+        dPr.append(beg)
+    if close_chr != ")":
+        end = _omml("endChr")
+        _set_mval(end, close_chr)
+        dPr.append(end)
+    if list(dPr):
+        d.append(dPr)
+    e_kids = []
+    for child in node:
+        e_kids.extend(_walk_mathml(child))
+    d.append(_omml_wrap("e", e_kids))
+    return [d]
+
+
+def _handle_mtable(node) -> List[OxmlElement]:
+    return [_build_mtable(node, left_align=False)]
+
+
+# Тег MathML → handler. Adding a new construct = one entry + one
+# top-level function (no surgery inside _walk_mathml).
+_MATHML_HANDLERS = {
+    "math": _handle_container,
+    "mstyle": _handle_container,
+    "mrow": _handle_container,
+    "semantics": _handle_container,
+    "annotation": _handle_container,
+    "mi": _handle_mi,
+    "mn": _handle_simple_text,
+    "mo": _handle_simple_text,
+    "mtext": _handle_simple_text,
+    "mspace": _handle_mspace,
+    "mfrac": _handle_mfrac,
+    "msup": _handle_msup,
+    "msub": _handle_msub,
+    "msubsup": _handle_msubsup,
+    "msqrt": _handle_msqrt,
+    "mroot": _handle_mroot,
+    "mover": _handle_mover,
+    "munder": _handle_munder,
+    "munderover": _handle_munderover,
+    "mfenced": _handle_mfenced,
+    "mtable": _handle_mtable,
+}
+
+
 def _walk_mathml(node) -> List[OxmlElement]:
     """Рекурсивный обход MathML-узла, возвращает список OMML-элементов.
 
@@ -885,219 +1139,11 @@ def _walk_mathml(node) -> List[OxmlElement]:
     плющатся в плоский список детей при подстановке в обёртки типа
     <m:e>, <m:num>, <m:sup>.
     """
-    tag = _ml_local(node.tag)
-
-    # Контейнеры — плющим в плоский список с lookahead для N-ary тел.
-    if tag in ("math", "mstyle", "mrow", "semantics", "annotation"):
-        children = [c for c in node if _ml_local(c.tag) != "annotation"]
-        cases = _try_fenced_mtable(children)
-        if cases is not None:
-            return cases
-        result, _ = _walk_with_nary(children, 0, stop_at_terminator=False)
-        return result
-
-    if tag == "mi":
-        text = (node.text or "").strip()
-        if not text:
-            return []
-        # Многобуквенные идентификаторы (sin, log, lim, exp) — прямые;
-        # одиночные буквы (включая греческие) — курсив (дефолт OMML).
-        # mathvariant="normal" принудительно делает прямой шрифт.
-        plain = len(text) > 1 or node.get("mathvariant") == "normal"
-        return [_omml_run(text, plain=plain)]
-
-    if tag in ("mn", "mo", "mtext"):
-        text = node.text or ""
-        if not text or not text.strip():
-            # Пустые mo (вокруг скобок и т.п.) — часто нерелевантны
-            if tag == "mtext":
-                return [_omml_run(text, plain=True)] if text else []
-            return []
-        return [_omml_run(text, plain=True)]
-
-    if tag == "mspace":
-        return [_omml_run(" ", plain=True)]
-
-    if tag == "mfrac":
-        kids = list(node)
-        if len(kids) < 2:
-            return []
-        f = _omml("f")
-        f.append(_omml_wrap("num", _walk_mathml(kids[0])))
-        f.append(_omml_wrap("den", _walk_mathml(kids[1])))
-        return [f]
-
-    if tag == "msup":
-        kids = list(node)
-        if len(kids) < 2:
-            return []
-        # latex2mathml в inline-режиме оборачивает \sum^{n}, \int^{n} и т.п.
-        # в msup/msub/msubsup — детектируем N-ary базу до обычного sSup.
-        nary_chr = _is_nary_op(kids[0])
-        if nary_chr:
-            return [_build_nary(nary_chr, [], _walk_mathml(kids[1]),
-                                hide_sub=True)]
-        s = _omml("sSup")
-        s.append(_omml_wrap("e", _walk_mathml(kids[0])))
-        s.append(_omml_wrap("sup", _walk_mathml(kids[1])))
-        return [s]
-
-    if tag == "msub":
-        kids = list(node)
-        if len(kids) < 2:
-            return []
-        nary_chr = _is_nary_op(kids[0])
-        if nary_chr:
-            return [_build_nary(nary_chr, _walk_mathml(kids[1]), [],
-                                hide_sup=True)]
-        s = _omml("sSub")
-        s.append(_omml_wrap("e", _walk_mathml(kids[0])))
-        s.append(_omml_wrap("sub", _walk_mathml(kids[1])))
-        return [s]
-
-    if tag == "msubsup":
-        kids = list(node)
-        if len(kids) < 3:
-            return []
-        nary_chr = _is_nary_op(kids[0])
-        if nary_chr:
-            return [_build_nary(nary_chr,
-                                _walk_mathml(kids[1]),
-                                _walk_mathml(kids[2]))]
-        s = _omml("sSubSup")
-        s.append(_omml_wrap("e", _walk_mathml(kids[0])))
-        s.append(_omml_wrap("sub", _walk_mathml(kids[1])))
-        s.append(_omml_wrap("sup", _walk_mathml(kids[2])))
-        return [s]
-
-    if tag == "msqrt":
-        rad = _omml("rad")
-        radPr = _omml("radPr")
-        degHide = _omml("degHide")
-        _set_mval(degHide, "1")
-        radPr.append(degHide)
-        rad.append(radPr)
-        rad.append(_omml("deg"))
-        e_kids: List[OxmlElement] = []
-        for child in node:
-            e_kids.extend(_walk_mathml(child))
-        rad.append(_omml_wrap("e", e_kids))
-        return [rad]
-
-    if tag == "mroot":
-        kids = list(node)
-        if len(kids) < 2:
-            return []
-        rad = _omml("rad")
-        rad.append(_omml_wrap("deg", _walk_mathml(kids[1])))
-        rad.append(_omml_wrap("e", _walk_mathml(kids[0])))
-        return [rad]
-
-    if tag == "mover":
-        # Семантика MathML: kids[0] = база, kids[1] = надстрочный (overscript).
-        # Это либо акцент (\bar, \hat, \vec) либо предел над оператором.
-        kids = list(node)
-        if len(kids) < 2:
-            return []
-        base, over = kids[0], kids[1]
-
-        # Акцент: либо явный accent="true", либо overscript это <mo> с
-        # одним маркером из _ACCENT_CHARS.
-        over_text = (over.text or "").strip() if _ml_local(over.tag) == "mo" else ""
-        is_accent = (
-            node.get("accent") == "true"
-            or (len(over_text) <= 2 and over_text in _ACCENT_CHARS)
-        )
-        if is_accent and over_text:
-            # Spacing-знак (¯ ^ ~ ¨ ´ ` ˘ ˙ ˇ →) перевести в combining-форму,
-            # иначе Word рисует его на baseline и накладывает поверх буквы.
-            accent_chr = _ACCENT_NORMALIZE.get(over_text, over_text)
-            acc = _omml("acc")
-            accPr = _omml("accPr")
-            chr_el = _omml("chr")
-            _set_mval(chr_el, accent_chr)
-            accPr.append(chr_el)
-            acc.append(accPr)
-            acc.append(_omml_wrap("e", _walk_mathml(base)))
-            return [acc]
-
-        # N-ary оператор с одним только верхним пределом (редко, но возможно).
-        nary_chr = _is_nary_op(base)
-        if nary_chr:
-            return [_build_nary(nary_chr, [], _walk_mathml(over),
-                                hide_sub=True)]
-
-        # Иначе: оператор с верхним пределом → m:limUpp.
-        lu = _omml("limUpp")
-        lu.append(_omml_wrap("e", _walk_mathml(base)))
-        lu.append(_omml_wrap("lim", _walk_mathml(over)))
-        return [lu]
-
-    if tag == "munder":
-        # kids[0] = база, kids[1] = подстрочный (underscript).
-        kids = list(node)
-        if len(kids) < 2:
-            return []
-        base, under = kids[0], kids[1]
-
-        nary_chr = _is_nary_op(base)
-        if nary_chr:
-            return [_build_nary(nary_chr, _walk_mathml(under), [],
-                                hide_sup=True)]
-
-        ll = _omml("limLow")
-        ll.append(_omml_wrap("e", _walk_mathml(base)))
-        ll.append(_omml_wrap("lim", _walk_mathml(under)))
-        return [ll]
-
-    if tag == "munderover":
-        # kids[0] = база, kids[1] = under, kids[2] = over.
-        kids = list(node)
-        if len(kids) < 3:
-            return []
-        base, under, over = kids[0], kids[1], kids[2]
-
-        nary_chr = _is_nary_op(base)
-        if nary_chr:
-            return [_build_nary(nary_chr,
-                                _walk_mathml(under),
-                                _walk_mathml(over))]
-
-        # Generic fallback: вложенные limUpp(limLow(...)).
-        ll = _omml("limLow")
-        ll.append(_omml_wrap("e", _walk_mathml(base)))
-        ll.append(_omml_wrap("lim", _walk_mathml(under)))
-        lu = _omml("limUpp")
-        lu.append(_omml_wrap("e", [ll]))
-        lu.append(_omml_wrap("lim", _walk_mathml(over)))
-        return [lu]
-
-    if tag == "mfenced":
-        open_chr = node.get("open", "(")
-        close_chr = node.get("close", ")")
-        d = _omml("d")
-        dPr = _omml("dPr")
-        if open_chr != "(":
-            beg = _omml("begChr")
-            _set_mval(beg, open_chr)
-            dPr.append(beg)
-        if close_chr != ")":
-            end = _omml("endChr")
-            _set_mval(end, close_chr)
-            dPr.append(end)
-        if list(dPr):
-            d.append(dPr)
-        e_kids = []
-        for child in node:
-            e_kids.extend(_walk_mathml(child))
-        d.append(_omml_wrap("e", e_kids))
-        return [d]
-
-    if tag == "mtable":
-        return [_build_mtable(node, left_align=False)]
-
-    # Неизвестный тег — рекурсивно обрабатываем детей, не падаем
-    result = []
+    handler = _MATHML_HANDLERS.get(_ml_local(node.tag))
+    if handler is not None:
+        return handler(node)
+    # Неизвестный тег — рекурсивно обрабатываем детей, не падаем.
+    result: List[OxmlElement] = []
     for child in node:
         result.extend(_walk_mathml(child))
     return result

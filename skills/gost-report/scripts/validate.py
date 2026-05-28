@@ -380,6 +380,19 @@ _ALL_CHECKS = [
 ]
 
 
+def _safe_run_check(check, doc) -> List[Violation]:
+    """Один правило-чек, обёрнутый в try/except. Ошибки внутри правила
+    становятся `rule-error` WARN'ом, чтобы не ронять остальные правила.
+    Единая точка реакции на внутренние сбои валидатора."""
+    try:
+        return list(check(doc))
+    except Exception as e:
+        return [Violation(
+            tier=TIER_WARN, code="rule-error",
+            message=f"внутренняя ошибка правила {check.__name__}: {e}",
+        )]
+
+
 def validate_docx(path: Path) -> List[Violation]:
     if not HAS_DOCX:
         return [Violation(
@@ -396,13 +409,7 @@ def validate_docx(path: Path) -> List[Violation]:
         )]
     violations: List[Violation] = []
     for check in _ALL_CHECKS:
-        try:
-            violations.extend(check(doc))
-        except Exception as e:
-            violations.append(Violation(
-                tier=TIER_WARN, code="rule-error",
-                message=f"внутренняя ошибка правила {check.__name__}: {e}",
-            ))
+        violations.extend(_safe_run_check(check, doc))
     return violations
 
 
@@ -501,15 +508,15 @@ def _check_main(path_str: str) -> int:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    raw_argv = list(sys.argv[1:]) if argv is None else list(argv)
-    _maybe_reexec_in_venv(raw_argv)
+    parsed_argv = list(sys.argv[1:]) if argv is None else list(argv)
+    _maybe_reexec_in_venv(parsed_argv)
 
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--hook", action="store_true",
                         help="Stop-hook: сканирует cwd, JSON decision-block")
     parser.add_argument("--check", metavar="PATH",
                         help="ручная проверка одного .docx")
-    args = parser.parse_args(argv)
+    args = parser.parse_args(parsed_argv)
 
     try:
         if args.hook:
