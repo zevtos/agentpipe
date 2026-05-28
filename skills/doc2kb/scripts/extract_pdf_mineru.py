@@ -602,6 +602,87 @@ def _cache_raw_mineru_output(
     return target
 
 
+def _prepare_input(input_pdf: Path, pages: list[int] | None, out_dir: Path,
+                   audit: dict) -> tuple[Path, dict | None]:
+    """When `pages` is supplied, slice the PDF down to that subset (inside
+    `out_dir` so it's cleaned up with the tempdir). Returns
+    (target_pdf, subset_to_original_or_None). Updates `audit` in place."""
+    if not pages:
+        return input_pdf, None
+    try:
+        target_pdf, subset_to_original = _slice_pdf(input_pdf, pages, out_dir)
+    except ValueError as e:
+        raise RuntimeError(f"--pages: {e}") from e
+    audit["page_subset_requested"] = list(pages)
+    audit["page_subset_size"] = len(pages)
+    return target_pdf, subset_to_original
+
+
+def _run_and_locate(binary: str, target_pdf: Path, out_dir: Path,
+                    backend: str, lang: str | None) -> dict:
+    """Invoke mineru subprocess and locate its produced files. Raises
+    RuntimeError on non-zero exit or missing markdown."""
+    rc, _stdout, stderr = _run_mineru(binary, target_pdf, out_dir, backend, lang)
+    if rc != 0:
+        tail = "\n".join((stderr or "").splitlines()[-12:])
+        raise RuntimeError(
+            f"mineru exited with code {rc}: {tail or 'no stderr captured'}"
+        )
+    stem = target_pdf.stem
+    located = _locate_outputs(out_dir, stem, backend)
+    if "markdown" not in located:
+        raise RuntimeError(
+            f"mineru produced no markdown for {stem}; output tree was "
+            f"{[p.name for p in out_dir.iterdir()] if out_dir.exists() else 'missing'}"
+        )
+    return located
+
+
+def _read_content_list(located: dict, warnings: list[str]) -> list:
+    """Parse content_list.json. Returns an empty list (with warning) on any
+    decode/IO failure — callers proceed without anchor remap."""
+    try:
+        content_list = json.loads(located["content_list"].read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        warnings.append(f"content_list.json unreadable: {e}")
+        return []
+    if not isinstance(content_list, list):
+        warnings.append("content_list.json was not a list — page anchors skipped")
+        return []
+    return content_list
+
+
+def _compute_page_count(content_list: list,
+                        subset_to_original: dict | None) -> int | None:
+    """With --pages, "pages" is the size of the patched subset; otherwise
+    fall back to the max page_idx+1 from content_list."""
+    if subset_to_original:
+        return len(subset_to_original)
+    max_page = 0
+    for entry in content_list:
+        if isinstance(entry, dict) and isinstance(entry.get("page_idx"), int):
+            max_page = max(max_page, entry["page_idx"] + 1)
+    return max_page or None
+
+
+def _maybe_cache_raw(keep_raw: bool, backend_dir: Path,
+                     mineru_cache_dir: Path | None, doc_id: str,
+                     audit: dict, warnings: list[str]) -> None:
+    """Optionally preserve mineru's raw per-document output so
+    postprocess_popo.py can revisit it later. No-op when keep_raw is off
+    or no cache dir was supplied."""
+    if not (keep_raw and mineru_cache_dir is not None):
+        return
+    cached = _cache_raw_mineru_output(backend_dir, mineru_cache_dir, doc_id)
+    if cached is not None:
+        audit["mineru_raw_cache"] = str(cached)
+    else:
+        warnings.append(
+            f"could not preserve raw mineru output for postprocess "
+            f"(--keep-raw requested but copy to {mineru_cache_dir} failed)"
+        )
+
+
 def extract(
     input_pdf: Path,
     output_md: Path,
@@ -637,60 +718,26 @@ def extract(
     with tempfile.TemporaryDirectory(prefix="mineru-") as tmp:
         out_dir = Path(tmp)
 
-        # When --pages is supplied, slice the PDF inside the same tempdir
-        # so the subset is cleaned up automatically and mineru sees a
-        # fresh input it has never cached.
-        if pages:
-            try:
-                target_pdf, subset_to_original = _slice_pdf(
-                    input_pdf, pages, out_dir,
-                )
-            except ValueError as e:
-                raise RuntimeError(f"--pages: {e}") from e
-            audit["page_subset_requested"] = list(pages)
-            audit["page_subset_size"] = len(pages)
-        else:
-            target_pdf = input_pdf
-            subset_to_original = None
+        target_pdf, subset_to_original = _prepare_input(
+            input_pdf, pages, out_dir, audit,
+        )
 
-        stem = target_pdf.stem
-
-        rc, _stdout, stderr = _run_mineru(binary, target_pdf, out_dir, backend, lang)
-        if rc != 0:
-            tail = "\n".join((stderr or "").splitlines()[-12:])
-            raise RuntimeError(
-                f"mineru exited with code {rc}: {tail or 'no stderr captured'}"
-            )
-
-        located = _locate_outputs(out_dir, stem, backend)
-        if "markdown" not in located:
-            raise RuntimeError(
-                f"mineru produced no markdown for {stem}; output tree was "
-                f"{[p.name for p in out_dir.iterdir()] if out_dir.exists() else 'missing'}"
-            )
-
+        located = _run_and_locate(binary, target_pdf, out_dir, backend, lang)
         backend_dir = located["resolved_backend"]
         audit["mineru_backend_resolved"] = backend_dir.name
+
         body = located["markdown"].read_text(encoding="utf-8")
-        try:
-            content_list = json.loads(located["content_list"].read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as e:
-            warnings.append(f"content_list.json unreadable: {e}")
-            content_list = []
-        if not isinstance(content_list, list):
-            warnings.append("content_list.json was not a list — page anchors skipped")
-            content_list = []
+        content_list = _read_content_list(located, warnings)
 
         body = _inject_page_anchors(body, content_list, subset_to_original)
 
-        images_src = located.get("images")
         body, asset_relpaths, image_warnings = _copy_images_and_rewrite(
             body=body,
-            images_src=images_src,
+            images_src=located.get("images"),
             doc_id=doc_id,
             assets_dir=assets_dir,
             assets_rel_prefix=assets_rel_prefix,
-            content_list=content_list if isinstance(content_list, list) else [],
+            content_list=content_list,
             subset_to_original=subset_to_original,
             asset_suffix=asset_suffix,
         )
@@ -698,32 +745,13 @@ def extract(
         if asset_relpaths:
             extras["assets"] = asset_relpaths
 
-        headings = _extract_headings_from_content_list(content_list)
-        extras["headings"] = headings
+        extras["headings"] = _extract_headings_from_content_list(content_list)
+        pages_count = _compute_page_count(content_list, subset_to_original)
+        if pages_count:
+            extras["pages"] = pages_count
 
-        # Page count: when called with --pages the "pages" field should
-        # reflect how many original pages the patch covers, not mineru's
-        # subset index. Without --pages, fall back to the max page_idx + 1
-        # from content_list (full document).
-        if subset_to_original:
-            extras["pages"] = len(subset_to_original)
-        else:
-            max_page = 0
-            for entry in content_list:
-                if isinstance(entry, dict) and isinstance(entry.get("page_idx"), int):
-                    max_page = max(max_page, entry["page_idx"] + 1)
-            if max_page:
-                extras["pages"] = max_page
-
-        if keep_raw and mineru_cache_dir is not None:
-            cached = _cache_raw_mineru_output(backend_dir, mineru_cache_dir, doc_id)
-            if cached is not None:
-                audit["mineru_raw_cache"] = str(cached)
-            else:
-                warnings.append(
-                    f"could not preserve raw mineru output for postprocess "
-                    f"(--keep-raw requested but copy to {mineru_cache_dir} failed)"
-                )
+        _maybe_cache_raw(keep_raw, backend_dir, mineru_cache_dir, doc_id,
+                         audit, warnings)
 
     return body, extras, warnings, audit
 
@@ -877,7 +905,7 @@ def _splice_into_target(
     return target_path, splice_warnings
 
 
-def main() -> int:
+def _build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description="Extract PDF → Markdown via the opt-in MinerU VLM backend.",
     )
@@ -964,38 +992,49 @@ def main() -> int:
              "directory and know there is no pymupdf4llm output to collide "
              "with. The default (suffix on) is safe in mixed extractions.",
     )
-    args = ap.parse_args()
+    return ap
 
+
+class _ArgsError(Exception):
+    """argparse-stage failure that should become emit_failure + exit code.
+    Carries (reason, exit_code) so the caller can re-emit without
+    duplicating each early-return branch."""
+    def __init__(self, reason: str, exit_code: int = 1):
+        super().__init__(reason)
+        self.reason = reason
+        self.exit_code = exit_code
+
+
+def _resolve_args(args) -> dict:
+    """Resolve CLI args to absolute paths + parsed --pages list. Raises
+    _ArgsError when the CLI is in a bad shape (returns (reason, code) for
+    main to surface)."""
     in_path = Path(args.input_pdf).expanduser().resolve()
     out_path = Path(args.output_md).expanduser().resolve()
     source_rel = args.source_rel or in_path.name
     try:
         source_rel = validate_source_rel(source_rel)
     except ValueError as e:
-        emit_failure(f"invalid --source-rel: {e}")
-        return 1
+        raise _ArgsError(f"invalid --source-rel: {e}") from e
 
     if not in_path.is_file():
-        emit_failure(f"input not found: {in_path}")
-        return 1
+        raise _ArgsError(f"input not found: {in_path}")
 
-    # CLI validation: --patch-into without --pages would replace whole
-    # documents in place, which loses the existing extraction's structure.
-    # Refuse rather than silently doing something destructive.
+    # --patch-into without --pages would replace whole documents in place,
+    # losing the existing extraction's structure. Refuse rather than
+    # silently doing something destructive.
     if args.patch_into and not args.pages:
-        emit_failure(
+        raise _ArgsError(
             "--patch-into requires --pages; refusing to splice an entire "
             "document over a target md"
         )
-        return 1
 
     pages: list[int] | None = None
     if args.pages:
         try:
             pages = parse_page_list(args.pages)
         except ValueError as e:
-            emit_failure(f"invalid --pages: {e}")
-            return 1
+            raise _ArgsError(f"invalid --pages: {e}") from e
 
     if args.assets_dir:
         assets_dir = Path(args.assets_dir).expanduser().resolve()
@@ -1009,20 +1048,37 @@ def main() -> int:
 
     asset_suffix = "" if (args.no_mineru_asset_suffix or not pages) else "-mineru"
 
+    return {
+        "in_path": in_path,
+        "out_path": out_path,
+        "source_rel": source_rel,
+        "pages": pages,
+        "assets_dir": assets_dir,
+        "cache_dir": cache_dir,
+        "asset_suffix": asset_suffix,
+    }
+
+
+def _call_extract(args, resolved: dict
+                  ) -> tuple[str, dict, list[str], dict] | int:
+    """Wrap extract() with the 3 exception handlers. Returns the extract
+    tuple on success or an int exit code on failure (after emitting
+    failure JSON)."""
+    in_path = resolved["in_path"]
     try:
-        body, extras, warnings, audit = extract(
+        return extract(
             input_pdf=in_path,
-            output_md=out_path,
+            output_md=resolved["out_path"],
             doc_id=args.doc_id,
             backend=args.backend,
             lang=args.lang,
-            assets_dir=assets_dir,
+            assets_dir=resolved["assets_dir"],
             assets_rel_prefix=args.assets_rel,
-            mineru_cache_dir=cache_dir,
+            mineru_cache_dir=resolved["cache_dir"],
             mineru_bin=args.mineru_bin,
             keep_raw=args.keep_raw,
-            pages=pages,
-            asset_suffix=asset_suffix,
+            pages=resolved["pages"],
+            asset_suffix=resolved["asset_suffix"],
         )
     except FileNotFoundError as e:
         # mineru binary missing — exit 2 so the parent loop can mark the
@@ -1040,48 +1096,53 @@ def main() -> int:
         )
         return 1
 
-    backend_tag = audit.get("mineru_backend_resolved") or args.backend
-    extraction_method = (
-        f"{EXTRACTOR_NAME}-{backend_tag}@{audit.get('mineru_version', 'unknown')}"
-    )
-    input_sha256 = sha256_of(in_path)
 
-    if args.patch_into:
-        target_path = Path(args.patch_into).expanduser().resolve()
-        try:
-            written_path, splice_warnings = _splice_into_target(
-                target_path=target_path,
-                new_body=body,
-                patched_pages=pages or [],
-                new_assets=extras.get("assets", []),
-                extraction_method_supplementary=extraction_method,
-                new_warnings=warnings,
-                source_sha256=input_sha256,
-                force=args.force_patch,
-            )
-        except RuntimeError as e:
-            emit_failure(f"--patch-into: {e}", extra={"input": str(in_path)})
-            return 1
+def _run_patch_mode(args, resolved: dict, body: str, extras: dict,
+                    warnings: list[str], audit: dict,
+                    extraction_method: str, input_sha256: str) -> int:
+    """--patch-into: splice extracted pages into an existing markdown."""
+    target_path = Path(args.patch_into).expanduser().resolve()
+    pages = resolved["pages"] or []
+    try:
+        written_path, splice_warnings = _splice_into_target(
+            target_path=target_path,
+            new_body=body,
+            patched_pages=pages,
+            new_assets=extras.get("assets", []),
+            extraction_method_supplementary=extraction_method,
+            new_warnings=warnings,
+            source_sha256=input_sha256,
+            force=args.force_patch,
+        )
+    except RuntimeError as e:
+        emit_failure(f"--patch-into: {e}",
+                     extra={"input": str(resolved["in_path"])})
+        return 1
 
-        success_extras: dict = {
-            "patched_pages": pages,
-            "patched_into": str(written_path),
-            "assets_extracted": len(extras.get("assets", [])),
-            "extraction_method_supplementary": extraction_method,
-        }
-        success_extras.update(audit)
-        # We pass the rebuilt target body for the token count so the JSON
-        # reflects the spliced-in size, not the patch alone. Recompute it
-        # from disk since splice_into_target already updated tokens_estimated
-        # in the YAML.
-        merged_body = read_body(written_path)
-        emit_success(written_path, merged_body, warnings + splice_warnings,
-                     extra=success_extras)
-        return 0
+    success_extras: dict = {
+        "patched_pages": pages,
+        "patched_into": str(written_path),
+        "assets_extracted": len(extras.get("assets", [])),
+        "extraction_method_supplementary": extraction_method,
+    }
+    success_extras.update(audit)
+    # Recompute body from disk so the token count reflects the spliced-in
+    # size, not the patch alone.
+    merged_body = read_body(written_path)
+    emit_success(written_path, merged_body, warnings + splice_warnings,
+                 extra=success_extras)
+    return 0
 
+
+def _run_standalone_mode(args, resolved: dict, body: str, extras: dict,
+                         warnings: list[str], audit: dict,
+                         extraction_method: str, input_sha256: str) -> int:
+    """No --patch-into: write a fresh extraction to out_path."""
+    out_path = resolved["out_path"]
+    pages = resolved["pages"]
     fm = {
         "id": args.doc_id,
-        "source": source_rel,
+        "source": resolved["source_rel"],
         "source_type": "pdf",
         "source_sha256": input_sha256,
         "extraction_method": extraction_method,
@@ -1106,6 +1167,32 @@ def main() -> int:
     success_extras.update(audit)
     emit_success(out_path, body, warnings, extra=success_extras)
     return 0
+
+
+def main() -> int:
+    args = _build_arg_parser().parse_args()
+    try:
+        resolved = _resolve_args(args)
+    except _ArgsError as e:
+        emit_failure(e.reason)
+        return e.exit_code
+
+    extract_result = _call_extract(args, resolved)
+    if isinstance(extract_result, int):
+        return extract_result
+    body, extras, warnings, audit = extract_result
+
+    backend_tag = audit.get("mineru_backend_resolved") or args.backend
+    extraction_method = (
+        f"{EXTRACTOR_NAME}-{backend_tag}@{audit.get('mineru_version', 'unknown')}"
+    )
+    input_sha256 = sha256_of(resolved["in_path"])
+
+    if args.patch_into:
+        return _run_patch_mode(args, resolved, body, extras, warnings, audit,
+                               extraction_method, input_sha256)
+    return _run_standalone_mode(args, resolved, body, extras, warnings, audit,
+                                extraction_method, input_sha256)
 
 
 if __name__ == "__main__":
