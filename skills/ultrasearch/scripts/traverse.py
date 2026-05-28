@@ -369,23 +369,13 @@ def _resolve_cited_paper_id(con: sqlite3.Connection, doi: str) -> str | None:
 
 # -------- main traversal --------
 
-async def traverse_citations(con: sqlite3.Connection,
-                             seeds: list[TraversalSeed], *,
-                             theta_score: float = THETA_SCORE,
-                             alpha: float = ALPHA,
-                             fut: bool = True,
-                             ell: int = ELL,
-                             specter_gate: float = SPECTER_GATE,
-                             max_hops: int = MAX_HOPS_DEFAULT,
-                             s2_api_key: str | None = None,
-                             crossref_email: str | None = None
-                             ) -> TraversalResult:
-    t0 = time.monotonic()
-    api_calls = {"s2_refs": 0, "s2_citers": 0, "crossref": 0}
-    warnings: list[str] = []
-
-    # Apply RCS threshold (PaperQA2 0-10 vs retrieve.Hit.score 0-1 scaled ×10)
+def _qualify_seeds(seeds: list[TraversalSeed], theta_score: float,
+                   con: sqlite3.Connection
+                   ) -> tuple[list[tuple[TraversalSeed, str]], list[str]]:
+    """Apply RCS threshold (PaperQA2 0-10 vs Hit.score 0-1 scaled ×10) and
+    require a resolvable DOI for each seed. Returns (qualified, warnings)."""
     qualified: list[tuple[TraversalSeed, str]] = []
+    warnings: list[str] = []
     for s in seeds:
         if (s.get("score", 0.0) * 10.0) < theta_score:
             continue
@@ -394,32 +384,28 @@ async def traverse_citations(con: sqlite3.Connection,
             warnings.append(f"seed has no DOI: {s.get('paper_id') or s.get('title')!r}")
             continue
         qualified.append((s, doi))
+    return qualified, warnings
 
-    if not qualified:
-        return {
-            "ok": True, "n_seeds": 0, "n_raw_candidates": 0,
-            "n_after_overlap": 0, "n_after_specter_gate": 0, "n_final": 0,
-            "candidates": [], "elapsed_s": round(time.monotonic() - t0, 3),
-            "api_calls": api_calls,
-            "warnings": warnings + ["no_seeds_above_threshold"],
-        }
 
-    if s2_api_key is None:
-        s2_api_key = get_env("S2_API_KEY")
-    if crossref_email is None:
-        crossref_email = get_env("OPENALEX_EMAIL")  # reuse polite-pool email
-
-    d_prev_keys: set[str] = {doi for _, doi in qualified}
-
-    # Fan out — three API families concurrently with per-domain budgets.
-    # Per-seed budget = 3 calls (1 s2_refs + 1 crossref + 1 s2_citers if fut)
+async def _fan_out_apis(qualified: list[tuple[TraversalSeed, str]], *,
+                        fut: bool,
+                        s2_api_key: str | None,
+                        crossref_email: str | None,
+                        con: sqlite3.Connection
+                        ) -> tuple[list[TraversalCandidate], list[tuple],
+                                   dict[str, int], list[str]]:
+    """Fire s2_refs + crossref + (optional s2_citers) per qualified seed
+    concurrently. Returns (raw_candidates, edges_to_persist, api_call_counts,
+    warnings). Internal _retry_get sleeps on 429 so we don't need an aiometer
+    layer."""
+    api_calls = {"s2_refs": 0, "s2_citers": 0, "crossref": 0}
+    warnings: list[str] = []
     headers = {"User-Agent": USER_AGENT.format(email=crossref_email or "anonymous")}
     raw: list[TraversalCandidate] = []
-    edges: list[tuple] = []  # for persist_citation_edges
+    edges: list[tuple] = []
 
     async with httpx.AsyncClient(headers=headers, http2=True,
                                  follow_redirects=True) as client:
-        # tasks: (seed, doi, kind, awaitable)
         kinds: list[tuple[TraversalSeed, str, str, asyncio.Future]] = []
         for s, doi in qualified:
             kinds.append((s, doi, "s2_refs",
@@ -432,9 +418,6 @@ async def traverse_citations(con: sqlite3.Connection,
                 kinds.append((s, doi, "s2_citers",
                               asyncio.create_task(
                                   _s2_get_paper_relations(client, doi, "citations", s2_api_key))))
-
-        # Wait for everything (no aiometer here — internal _retry_get sleeps
-        # on 429; we trade strict per-second pacing for simpler concurrency).
         results = await asyncio.gather(*(k[3] for k in kinds),
                                        return_exceptions=True)
 
@@ -457,34 +440,81 @@ async def traverse_citations(con: sqlite3.Connection,
                     c.get("direction", "backward"),
                     c.get("source_api", "s2"),
                 ))
+    return raw, edges, api_calls, warnings
+
+
+async def _specter_gate_stage(con: sqlite3.Connection,
+                              dedup_cands: list[TraversalCandidate],
+                              specter_gate: float
+                              ) -> tuple[list[TraversalCandidate], int, list[str]]:
+    """Apply the SPECTER cosine-similarity gate against the corpus centroid.
+    On empty corpus or embed/gate failure, returns the input unchanged
+    with a warning. Returns (gated, n_after_gate, warnings)."""
+    warnings: list[str] = []
+    centroid = compute_corpus_centroid(con)
+    if centroid is None:
+        warnings.append("empty_corpus_centroid_skipping_specter_gate")
+        return dedup_cands, len(dedup_cands), warnings
+    try:
+        embs = await _embed_candidates_for_gate(dedup_cands)
+        keep_mask = _cosine_gate(centroid, embs, specter_gate)
+        gated = [c for c, k in zip(dedup_cands, keep_mask) if k]
+        for c, e in zip(dedup_cands, embs):
+            c["cosine_to_centroid"] = float(np.dot(centroid, e))
+        return gated, len(gated), warnings
+    except Exception as e:
+        warnings.append(f"specter_gate_failed: {e}")
+        return dedup_cands, len(dedup_cands), warnings
+
+
+async def traverse_citations(con: sqlite3.Connection,
+                             seeds: list[TraversalSeed], *,
+                             theta_score: float = THETA_SCORE,
+                             alpha: float = ALPHA,
+                             fut: bool = True,
+                             ell: int = ELL,
+                             specter_gate: float = SPECTER_GATE,
+                             max_hops: int = MAX_HOPS_DEFAULT,
+                             s2_api_key: str | None = None,
+                             crossref_email: str | None = None
+                             ) -> TraversalResult:
+    t0 = time.monotonic()
+
+    qualified, warnings = _qualify_seeds(seeds, theta_score, con)
+    if not qualified:
+        return {
+            "ok": True, "n_seeds": 0, "n_raw_candidates": 0,
+            "n_after_overlap": 0, "n_after_specter_gate": 0, "n_final": 0,
+            "candidates": [], "elapsed_s": round(time.monotonic() - t0, 3),
+            "api_calls": {"s2_refs": 0, "s2_citers": 0, "crossref": 0},
+            "warnings": warnings + ["no_seeds_above_threshold"],
+        }
+
+    if s2_api_key is None:
+        s2_api_key = get_env("S2_API_KEY")
+    if crossref_email is None:
+        crossref_email = get_env("OPENALEX_EMAIL")  # reuse polite-pool email
+
+    d_prev_keys: set[str] = {doi for _, doi in qualified}
+
+    raw, edges, api_calls, fan_warnings = await _fan_out_apis(
+        qualified, fut=fut, s2_api_key=s2_api_key,
+        crossref_email=crossref_email, con=con,
+    )
+    warnings.extend(fan_warnings)
 
     # Persist citation edges (idempotent)
     n_edges = persist_citation_edges(con, edges)
     log(f"persisted {n_edges} new citation edges (of {len(edges)} attempted)",
         prefix="traverse")
 
-    # Dedup
     dedup_cands = _dedup_traversal(raw)
     n_raw = len(raw)
 
-    # SPECTER cosine gate
-    centroid = compute_corpus_centroid(con)
-    if centroid is None:
-        warnings.append("empty_corpus_centroid_skipping_specter_gate")
-        gated = dedup_cands
-        n_after_gate = len(gated)
-    else:
-        try:
-            embs = await _embed_candidates_for_gate(dedup_cands)
-            keep_mask = _cosine_gate(centroid, embs, specter_gate)
-            gated = [c for c, k in zip(dedup_cands, keep_mask) if k]
-            for c, e in zip(dedup_cands, embs):
-                c["cosine_to_centroid"] = float(np.dot(centroid, e))
-            n_after_gate = len(gated)
-        except Exception as e:
-            warnings.append(f"specter_gate_failed: {e}")
-            gated = dedup_cands
-            n_after_gate = len(gated)
+    gated, n_after_gate, gate_warnings = await _specter_gate_stage(
+        con, dedup_cands, specter_gate,
+    )
+    warnings.extend(gate_warnings)
 
     # FilterOverlap with theta_o (logged for transparency)
     theta_o = math.ceil(alpha * max(len(dedup_cands), 1))

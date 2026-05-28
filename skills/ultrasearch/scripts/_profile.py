@@ -151,6 +151,64 @@ def _validate_manual(data: dict, schema: dict) -> None:
         _validate_value(key, data[key], sub)
 
 
+def _validate_string(path: str, val: Any, sub: dict) -> None:
+    if "pattern" in sub and not re.match(sub["pattern"], val):
+        raise ConfigError(f"{path}: value {val!r} does not match pattern {sub['pattern']!r}")
+    if "minLength" in sub and len(val) < sub["minLength"]:
+        raise ConfigError(f"{path}: string shorter than minLength {sub['minLength']}")
+    if "maxLength" in sub and len(val) > sub["maxLength"]:
+        raise ConfigError(f"{path}: string longer than maxLength {sub['maxLength']}")
+
+
+def _validate_number(path: str, val: Any, sub: dict) -> None:
+    if "minimum" in sub and val < sub["minimum"]:
+        raise ConfigError(f"{path}: value {val} below minimum {sub['minimum']}")
+    if "maximum" in sub and val > sub["maximum"]:
+        raise ConfigError(f"{path}: value {val} above maximum {sub['maximum']}")
+
+
+def _validate_array(path: str, val: Any, sub: dict) -> None:
+    if "minItems" in sub and len(val) < sub["minItems"]:
+        raise ConfigError(f"{path}: array shorter than minItems {sub['minItems']}")
+    if "maxItems" in sub and len(val) > sub["maxItems"]:
+        raise ConfigError(f"{path}: array longer than maxItems {sub['maxItems']}")
+    if (sub.get("uniqueItems")
+            and all(isinstance(x, str) for x in val)
+            and len(val) != len(set(val))):
+        raise ConfigError(f"{path}: array items must be unique")
+    if "items" in sub:
+        for i, item in enumerate(val):
+            _validate_value(f"{path}[{i}]", item, sub["items"])
+
+
+def _validate_object(path: str, val: Any, sub: dict) -> None:
+    sub_required = sub.get("required", [])
+    sub_props = sub.get("properties", {})
+    missing = [k for k in sub_required if k not in val]
+    if missing:
+        raise ConfigError(f"{path}: missing required keys {missing}")
+    if sub.get("additionalProperties") is False:
+        allowed = set(sub_props.keys())
+        extra = [k for k in val.keys() if k not in allowed]
+        if extra:
+            raise ConfigError(f"{path}: unknown keys {extra}")
+    for k, v in val.items():
+        if k in sub_props:
+            _validate_value(f"{path}.{k}", v, sub_props[k])
+
+
+# JSON-schema "type" → per-type validator. Adding new constraints
+# (e.g. `format`) for an existing type stays inside its handler;
+# adding a new type = one dict entry + one function.
+_TYPE_VALIDATORS = {
+    "string":  _validate_string,
+    "number":  _validate_number,
+    "integer": _validate_number,
+    "array":   _validate_array,
+    "object":  _validate_object,
+}
+
+
 def _validate_value(path: str, val: Any, sub: dict) -> None:
     """Validate a single value against its sub-schema."""
     expected_type = sub.get("type")
@@ -159,45 +217,9 @@ def _validate_value(path: str, val: Any, sub: dict) -> None:
             raise ConfigError(
                 f"{path}: expected type {expected_type!r}, got {type(val).__name__}"
             )
-
-    if expected_type == "string":
-        if "pattern" in sub and not re.match(sub["pattern"], val):
-            raise ConfigError(f"{path}: value {val!r} does not match pattern {sub['pattern']!r}")
-        if "minLength" in sub and len(val) < sub["minLength"]:
-            raise ConfigError(f"{path}: string shorter than minLength {sub['minLength']}")
-        if "maxLength" in sub and len(val) > sub["maxLength"]:
-            raise ConfigError(f"{path}: string longer than maxLength {sub['maxLength']}")
-    elif expected_type == "number" or expected_type == "integer":
-        if "minimum" in sub and val < sub["minimum"]:
-            raise ConfigError(f"{path}: value {val} below minimum {sub['minimum']}")
-        if "maximum" in sub and val > sub["maximum"]:
-            raise ConfigError(f"{path}: value {val} above maximum {sub['maximum']}")
-    elif expected_type == "array":
-        if "minItems" in sub and len(val) < sub["minItems"]:
-            raise ConfigError(f"{path}: array shorter than minItems {sub['minItems']}")
-        if "maxItems" in sub and len(val) > sub["maxItems"]:
-            raise ConfigError(f"{path}: array longer than maxItems {sub['maxItems']}")
-        if (sub.get("uniqueItems")
-                and all(isinstance(x, str) for x in val)
-                and len(val) != len(set(val))):
-            raise ConfigError(f"{path}: array items must be unique")
-        if "items" in sub:
-            for i, item in enumerate(val):
-                _validate_value(f"{path}[{i}]", item, sub["items"])
-    elif expected_type == "object":
-        sub_required = sub.get("required", [])
-        sub_props = sub.get("properties", {})
-        missing = [k for k in sub_required if k not in val]
-        if missing:
-            raise ConfigError(f"{path}: missing required keys {missing}")
-        if sub.get("additionalProperties") is False:
-            allowed = set(sub_props.keys())
-            extra = [k for k in val.keys() if k not in allowed]
-            if extra:
-                raise ConfigError(f"{path}: unknown keys {extra}")
-        for k, v in val.items():
-            if k in sub_props:
-                _validate_value(f"{path}.{k}", v, sub_props[k])
+    handler = _TYPE_VALIDATORS.get(expected_type)
+    if handler is not None:
+        handler(path, val, sub)
 
 
 def _type_matches(val: Any, expected: str) -> bool:
