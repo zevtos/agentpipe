@@ -455,6 +455,133 @@ def write_md(out_path: Path, frontmatter: dict[str, Any], body: str) -> None:
     out_path.write_text(fm + body, encoding="utf-8")
 
 
+# ---------- page list / page-section helpers ----------
+
+# Shared by mineru's --pages flag and any future page-targeted extractor.
+# Keeping them in _common.py so the splice logic stays in one place even if
+# more callers grow it.
+
+PAGE_ANCHOR_RE = re.compile(r"^\[page (\d+)\]\s*$", re.MULTILINE)
+
+
+def parse_page_list(spec: str) -> list[int]:
+    """Parse a comma-separated page spec with optional `start-end` ranges
+    into a sorted, deduplicated list of 1-based page numbers.
+
+    Examples:
+        "2,18-19,35,221,243-244" → [2, 18, 19, 35, 221, 243, 244]
+        "10" → [10]
+        " 5 , 7-9 " → [5, 7, 8, 9]
+
+    Raises ValueError on malformed input (non-numeric tokens, descending
+    ranges, zero/negative pages) so the caller can surface the exact
+    problem to the user.
+    """
+    if not spec or not spec.strip():
+        raise ValueError("page list is empty")
+    pages: set[int] = set()
+    for raw in spec.split(","):
+        token = raw.strip()
+        if not token:
+            continue
+        if "-" in token:
+            lo_s, _, hi_s = token.partition("-")
+            try:
+                lo = int(lo_s.strip())
+                hi = int(hi_s.strip())
+            except ValueError as e:
+                raise ValueError(
+                    f"invalid range {token!r}: expected `int-int`"
+                ) from e
+            if lo < 1 or hi < 1:
+                raise ValueError(
+                    f"page numbers must be ≥ 1 (got {token!r})"
+                )
+            if hi < lo:
+                raise ValueError(
+                    f"range {token!r} is descending (got {lo}-{hi})"
+                )
+            pages.update(range(lo, hi + 1))
+        else:
+            try:
+                p = int(token)
+            except ValueError as e:
+                raise ValueError(
+                    f"invalid page {token!r}: expected integer or range"
+                ) from e
+            if p < 1:
+                raise ValueError(f"page numbers must be ≥ 1 (got {p})")
+            pages.add(p)
+    if not pages:
+        raise ValueError("page list contained no usable entries")
+    return sorted(pages)
+
+
+def format_page_list(pages: Iterable[int]) -> str:
+    """Render a list of page numbers as a compact, range-collapsed string.
+    Inverse of parse_page_list when feasible.
+
+    [2, 3, 4, 7, 10, 11] → "2-4, 7, 10-11"
+    """
+    sorted_pages = sorted(set(int(p) for p in pages))
+    if not sorted_pages:
+        return ""
+    out: list[str] = []
+    start = prev = sorted_pages[0]
+    for p in sorted_pages[1:]:
+        if p == prev + 1:
+            prev = p
+            continue
+        out.append(str(start) if start == prev else f"{start}-{prev}")
+        start = prev = p
+    out.append(str(start) if start == prev else f"{start}-{prev}")
+    return ", ".join(out)
+
+
+def split_body_by_page_anchors(body: str) -> tuple[str, dict[int, str]]:
+    """Split a `[page N]`-anchored markdown body into a preamble and a dict
+    of `{page_no: section}` entries. Each section starts at its `[page N]`
+    anchor line and ends just before the next anchor (or at end-of-body).
+
+    Used by mineru's `--patch-into` splice mode to replace specific page
+    sections in an existing target file. Order is preserved by sorted page
+    numbers when callers rebuild the body.
+
+    The preamble (anything before the first `[page N]`) is returned as the
+    first element so it round-trips intact — markdown rendered before the
+    first page anchor often contains the cover title, TOC, or YAML-style
+    front-page header.
+    """
+    matches = list(PAGE_ANCHOR_RE.finditer(body))
+    if not matches:
+        return body, {}
+    preamble = body[: matches[0].start()].rstrip("\n")
+    sections: dict[int, str] = {}
+    for i, m in enumerate(matches):
+        page_no = int(m.group(1))
+        section_start = m.start()
+        section_end = matches[i + 1].start() if i + 1 < len(matches) else len(body)
+        sections[page_no] = body[section_start:section_end].rstrip()
+    return preamble, sections
+
+
+def assemble_body_from_sections(
+    preamble: str,
+    sections: dict[int, str],
+) -> str:
+    """Inverse of split_body_by_page_anchors. Sections are emitted in
+    ascending page-number order with two blank lines between them. The
+    preamble (if non-empty) is prepended with two blank lines before the
+    first page section.
+    """
+    parts: list[str] = []
+    if preamble.strip():
+        parts.append(preamble.rstrip() + "\n")
+    for page_no in sorted(sections):
+        parts.append(sections[page_no].rstrip() + "\n")
+    return "\n".join(parts).rstrip() + "\n"
+
+
 # ---------- frontmatter reader ----------
 
 _FRONTMATTER_RE = re.compile(r"^---\r?\n(.*?)\r?\n---\r?\n", re.DOTALL)

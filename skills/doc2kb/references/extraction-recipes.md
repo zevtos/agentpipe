@@ -72,6 +72,50 @@ PDFs surface as the `scanned_pdf` user-decision group and default to
 `skip`. The flag is also recorded in `_scout.flags.enable_mineru` so
 follow-up tools see the choice.
 
+## Page-targeted patching with mineru
+
+When a `pymupdf4llm` extraction emits a `dropped_pictures` /
+`mangled_visual_layout` warning that names a handful of specific pages
+(usually formulas, schemas, or text-as-vector diagrams the text-layer
+extractor could not recover), use `extract_pdf_mineru.py` in page-patch
+mode instead of re-extracting the whole PDF. mineru's VLM run on a
+50-page book is hours; running it on the 8 broken pages takes a
+minute.
+
+```bash
+python3 "$SKILL/scripts/ensure_env.py" extract_pdf_mineru.py \
+    "$INPUT" /unused/output/path.md \
+    --doc-id "$DOCID" --source-rel "$SREL" \
+    --pages "2,18-19,35,221,243-244,588" \
+    --patch-into "$KB/docs/$DOCID-<slug>.md" \
+    --lang cyrillic
+```
+
+What the script does:
+
+1. Slices the original PDF down to just the requested pages via pymupdf
+   in a tempdir — mineru sees a tiny subset PDF and processes only that.
+2. Remaps every `[page N]` anchor and every asset filename it emits
+   from mineru's subset indices back to the original PDF page numbers.
+   Asset names get an extra `-mineru-` infix
+   (`<doc_id>-page<orig:03d>-mineru-imgN.<ext>`) so they never collide
+   with pymupdf4llm's existing `<doc_id>-page<NN>-imgN` files.
+3. Splices the new page sections into the existing target md, replacing
+   only the `[page N]` blocks listed in `--pages`. Everything else
+   (preamble, other pages, frontmatter primary fields) is untouched.
+4. Updates the target's frontmatter with `mineru_patched_pages: [...]`
+   (sorted union across runs) and `extraction_method_supplementary:
+   mineru-<backend>@<version>`. Appends a single-line splice-summary
+   warning, accumulates the mineru-side warnings under
+   `mineru_patch[…]:` prefixes.
+5. Safety: refuses to splice if the target's `source_sha256` ≠ the
+   input PDF's sha256 (use `--force-patch` to override, only for known
+   re-exports). Refuses if `--patch-into` is set but `--pages` is not.
+
+Without `--patch-into`, the same `--pages` invocation writes a
+standalone patches md (still with original page numbers, no subset
+indices anywhere) so you can review before splicing.
+
 ## Stage 2 (optional): MinerU-Popo post-processing
 
 If long-document hierarchy / cross-page table merging still looks wrong

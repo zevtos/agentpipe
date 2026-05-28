@@ -15,6 +15,12 @@ When to use:
     LaTeX and renders complex layouts more faithfully than text-layer
     extraction can.
 
+    For documents where most pages came out clean from pymupdf4llm but a
+    handful of pages dropped vector math/diagrams, use `--pages 2,18-19,35`
+    to run mineru only on those pages — orders of magnitude cheaper than
+    re-extracting the whole book. Combine with `--patch-into <target.md>`
+    to splice the new sections directly into the existing extraction.
+
 When NOT to use:
     Routine text-layer PDFs. pymupdf4llm is faster, runs without ML weights,
     and produces equivalent output for ~80 % of corpora. The strategy
@@ -32,6 +38,9 @@ CLI:
                           [--mineru-cache-dir <abs_path>]
                           [--mineru-bin <path>]
                           [--keep-raw]
+                          [--pages 2,18-19,35]
+                          [--patch-into TARGET_MD] [--force-patch]
+                          [--no-mineru-asset-suffix]
 
 Prerequisites:
     The `mineru` CLI must be installed in the same venv as this script.
@@ -42,15 +51,32 @@ Prerequisites:
     rather than crashing the corpus extraction.
 
 Effect:
-    1. Runs `mineru -p <input> -o <tmpdir> -b <backend> -l <lang>`.
-    2. Locates `<tmpdir>/<stem>/<backend>/<stem>.md` and
+    1. (Optional, when --pages is set) Slices the input PDF down to the
+       requested pages via pymupdf and feeds the subset to mineru. Page
+       anchors and asset filenames are remapped back to the original
+       page numbers automatically, so the caller never sees subset
+       indices.
+    2. Runs `mineru -p <input> -o <tmpdir> -b <backend> -l <lang>`.
+    3. Locates `<tmpdir>/<stem>/<backend>/<stem>.md` and
        `_content_list.json` (MinerU's stable structured artefact).
-    3. Splits the markdown by page_idx → injects `[page N]` anchors.
-    4. Copies images from `<tmpdir>/<stem>/<backend>/images/` into
+    4. Splits the markdown by page_idx → injects `[page N]` anchors
+       (remapped to original page numbers when --pages was used).
+    5. Copies images from `<tmpdir>/<stem>/<backend>/images/` into
        `<kb_dir>/assets/<doc_id>-pageNN-img<n>.<ext>` via save_image_safe
        and rewrites every Markdown image link in the body to point at
-       the renamed asset.
-    5. Optionally preserves the raw mineru output under
+       the renamed asset. When called via --pages, the filenames carry
+       an extra `-mineru-` infix
+       (`<doc_id>-page<orig:03d>-mineru-img<n>.<ext>`) so the mineru
+       assets never collide with pymupdf4llm's existing `<doc_id>-page<NN>-img<n>`
+       output for the same original document.
+    6. With `--patch-into <target.md>`, splices the extracted page
+       sections into the target md in place: each `[page N]` block in
+       the target is replaced with the new one, the frontmatter records
+       `mineru_patched_pages` and `extraction_method_supplementary`,
+       and no extra file is created. Without `--patch-into`, behaves
+       like the rest of the extractors and writes a standalone
+       `<output_md>` (still page-targeted when `--pages` is set).
+    7. Optionally preserves the raw mineru output under
        `<kb_dir>/_mineru/<doc_id>/` so a follow-up `postprocess_popo.py`
        run can consume it (Popo's `post-process/mineru/<run>/` input
        format expects exactly what MinerU emitted, so we avoid having to
@@ -59,10 +85,14 @@ Effect:
 Frontmatter contract:
     Same shape as extract_pdf_pymupdf4llm.py — only `extraction_method`
     distinguishes the backend (`mineru-<backend>@<mineru_version>`).
+    Patch mode additionally writes:
+      - `mineru_patched_pages: [N, …]` — sorted list of patched pages
+      - `extraction_method_supplementary: mineru-<backend>@<version>`
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -73,13 +103,19 @@ import tempfile
 from pathlib import Path
 
 from _common import (  # noqa: E402
+    assemble_body_from_sections,
     count_tokens,
     emit_failure,
     emit_success,
+    format_page_list,
     log,
+    parse_page_list,
+    read_body,
+    read_frontmatter,
     sanitize_heading,
     save_image_safe,
     sha256_of,
+    split_body_by_page_anchors,
     today_iso,
     validate_source_rel,
     write_md,
@@ -128,6 +164,52 @@ INSTALL_HINT = (
     "    uv pip install -U 'mineru[all]'\n"
     "    # macOS Apple Silicon: also `uv pip install -U mlx mlx-lm`"
 )
+
+
+def _slice_pdf(
+    src: Path,
+    pages: list[int],
+    tmp_dir: Path,
+) -> tuple[Path, dict[int, int]]:
+    """Carve `pages` (1-indexed, original PDF) into a new tiny PDF inside
+    `tmp_dir`. Returns (subset_path, subset_to_original) where
+    `subset_to_original[k]` (k 1-indexed in the subset) gives the original
+    page number.
+
+    Page numbers above the document's page count or below 1 raise
+    ValueError so the caller can surface a clear error to the user.
+    """
+    import pymupdf  # type: ignore — provided by the lightweight tier
+
+    src_doc = pymupdf.open(str(src))
+    try:
+        page_count = src_doc.page_count
+        invalid = [p for p in pages if p < 1 or p > page_count]
+        if invalid:
+            raise ValueError(
+                f"requested pages out of range for {src.name} "
+                f"(1..{page_count}): {invalid}"
+            )
+        # Stable name keyed on the original stem + selected pages so the
+        # `mineru` output filenames stay identifiable in logs.
+        digest = hashlib.sha1(
+            (src.stem + "|" + ",".join(str(p) for p in pages)).encode()
+        ).hexdigest()[:8]
+        subset_path = tmp_dir / f"{src.stem}-pages-{digest}.pdf"
+        subset_doc = pymupdf.open()
+        subset_to_original: dict[int, int] = {}
+        for new_index, original_page in enumerate(pages, start=1):
+            subset_doc.insert_pdf(
+                src_doc,
+                from_page=original_page - 1,
+                to_page=original_page - 1,
+            )
+            subset_to_original[new_index] = original_page
+        subset_doc.save(str(subset_path))
+        subset_doc.close()
+    finally:
+        src_doc.close()
+    return subset_path, subset_to_original
 
 
 def _mineru_executable(override: str | None = None) -> str | None:
@@ -240,6 +322,8 @@ def _copy_images_and_rewrite(
     assets_dir: Path,
     assets_rel_prefix: str,
     content_list: list[dict],
+    subset_to_original: dict[int, int] | None = None,
+    asset_suffix: str = "",
 ) -> tuple[str, list[str], list[str]]:
     """Copy every image MinerU referenced into the kb assets dir and
     rewrite the body so links point at the new filenames.
@@ -248,6 +332,18 @@ def _copy_images_and_rewrite(
     asset names sort alongside the page anchors and match the scheme used
     by extract_pdf_pymupdf4llm.py — second-session agents see one
     consistent naming convention regardless of which backend ran.
+
+    When `subset_to_original` is provided, MinerU's per-subset page indices
+    (1..K) are remapped to the original PDF page numbers so callers using
+    `--pages 2,34,221` get filenames keyed on the real page (`page002`,
+    `page034`, `page221`) rather than the subset index. Pages padded to
+    three digits in that mode to leave room for thousand-page books and
+    to visually distinguish from pymupdf4llm's two-digit padding.
+
+    `asset_suffix` (e.g. `"-mineru"`) is inserted between the page token
+    and `-img<n>` so mineru assets never overwrite an existing pymupdf4llm
+    asset with the same (doc_id, page, ordinal) tuple. Default empty
+    preserves backward-compatible naming.
 
     Returns (rewritten_body, asset_relpaths, warnings).
     """
@@ -271,6 +367,8 @@ def _copy_images_and_rewrite(
             continue
         page_idx_raw = entry.get("page_idx")
         page_no = int(page_idx_raw) + 1 if isinstance(page_idx_raw, int) else 0
+        if subset_to_original and page_no in subset_to_original:
+            page_no = subset_to_original[page_no]
         ordinal = per_page_counter.get(page_no, 0) + 1
         per_page_counter[page_no] = ordinal
         page_seq[basename] = (page_no, ordinal)
@@ -285,6 +383,20 @@ def _copy_images_and_rewrite(
     saved_relpaths: list[str] = []
     seen_relpaths: set[str] = set()
     dedup_cache: dict[str, Path] = {}
+
+    # Padding width for page numbers in asset filenames.
+    #
+    # In page-patch mode (subset_to_original is set) we always pad to 3
+    # digits so successive runs against the same document produce
+    # consistent filenames regardless of the subset size — patching pages
+    # [28] today and pages [28, 142] tomorrow both write
+    # `doc-017-page028-mineru-imgM.ext`. Without this rule the same image
+    # would land under `page28` one day and `page028` the next, leaving
+    # broken references in the target md.
+    #
+    # In full-document mode (no subset) we keep the legacy 2-digit
+    # behaviour so existing kbs don't see their asset filenames change.
+    page_pad = 3 if subset_to_original else 2
 
     # Copy only images referenced by content_list — MinerU's images/ dir
     # also contains crops used internally by the VLM (formula glyphs,
@@ -308,7 +420,7 @@ def _copy_images_and_rewrite(
         page_no, ordinal = page_seq[basename]
         ext = src.suffix.lower().lstrip(".") or "jpg"
         target_name = (
-            f"{doc_id}-page{page_no:02d}-img{ordinal}.{ext}"
+            f"{doc_id}-page{page_no:0{page_pad}d}{asset_suffix}-img{ordinal}.{ext}"
         )
         target = assets_dir / target_name
         result = save_image_safe(
@@ -355,7 +467,11 @@ def _copy_images_and_rewrite(
     return new_body, saved_relpaths, warnings
 
 
-def _inject_page_anchors(body: str, content_list: list[dict]) -> str:
+def _inject_page_anchors(
+    body: str,
+    content_list: list[dict],
+    subset_to_original: dict[int, int] | None = None,
+) -> str:
     """Insert `[page N]` markers into the body using the content_list as
     the authoritative page ordering. MinerU's markdown is already laid out
     in reading order but lacks per-page separators; we splice them in by
@@ -366,9 +482,19 @@ def _inject_page_anchors(body: str, content_list: list[dict]) -> str:
     body unchanged rather than fabricating page boundaries — losing the
     anchors is preferable to mis-locating them, since second-session
     agents cite page numbers from these markers.
+
+    When `subset_to_original` is provided, the inserted `[page N]`
+    markers use the original PDF page number rather than mineru's
+    subset index, so the body reads as if it had been extracted from
+    the full document.
     """
     if not content_list:
         return body
+
+    def _orig_page(subset_page: int) -> int:
+        if subset_to_original and subset_page in subset_to_original:
+            return subset_to_original[subset_page]
+        return subset_page
 
     # Group entries by page in document order.
     transitions: list[int] = []  # 1-based page numbers in encounter order
@@ -419,7 +545,7 @@ def _inject_page_anchors(body: str, content_list: list[dict]) -> str:
         if idx < 0:
             continue
         pieces.append(body[cursor:idx])
-        pieces.append(f"\n\n[page {page_no}]\n\n")
+        pieces.append(f"\n\n[page {_orig_page(page_no)}]\n\n")
         cursor = idx
         rendered_pages.add(page_no)
     pieces.append(body[cursor:])
@@ -487,8 +613,16 @@ def extract(
     mineru_cache_dir: Path | None,
     mineru_bin: str | None,
     keep_raw: bool,
+    pages: list[int] | None = None,
+    asset_suffix: str = "",
 ) -> tuple[str, dict, list[str], dict]:
-    """Returns (body, frontmatter_extras, warnings, audit_extras)."""
+    """Returns (body, frontmatter_extras, warnings, audit_extras).
+
+    When `pages` is non-empty, the input PDF is sliced down to those
+    page numbers before mineru sees it. Page anchors and asset filenames
+    in the returned body are remapped back to the original numbering so
+    callers and downstream agents never observe subset indices.
+    """
     warnings: list[str] = []
     extras: dict = {}
     audit: dict = {}
@@ -500,10 +634,28 @@ def extract(
     audit["mineru_version"] = _mineru_version(binary)
     audit["mineru_backend_requested"] = backend
 
-    stem = input_pdf.stem
     with tempfile.TemporaryDirectory(prefix="mineru-") as tmp:
         out_dir = Path(tmp)
-        rc, _stdout, stderr = _run_mineru(binary, input_pdf, out_dir, backend, lang)
+
+        # When --pages is supplied, slice the PDF inside the same tempdir
+        # so the subset is cleaned up automatically and mineru sees a
+        # fresh input it has never cached.
+        if pages:
+            try:
+                target_pdf, subset_to_original = _slice_pdf(
+                    input_pdf, pages, out_dir,
+                )
+            except ValueError as e:
+                raise RuntimeError(f"--pages: {e}") from e
+            audit["page_subset_requested"] = list(pages)
+            audit["page_subset_size"] = len(pages)
+        else:
+            target_pdf = input_pdf
+            subset_to_original = None
+
+        stem = target_pdf.stem
+
+        rc, _stdout, stderr = _run_mineru(binary, target_pdf, out_dir, backend, lang)
         if rc != 0:
             tail = "\n".join((stderr or "").splitlines()[-12:])
             raise RuntimeError(
@@ -529,7 +681,7 @@ def extract(
             warnings.append("content_list.json was not a list — page anchors skipped")
             content_list = []
 
-        body = _inject_page_anchors(body, content_list)
+        body = _inject_page_anchors(body, content_list, subset_to_original)
 
         images_src = located.get("images")
         body, asset_relpaths, image_warnings = _copy_images_and_rewrite(
@@ -539,6 +691,8 @@ def extract(
             assets_dir=assets_dir,
             assets_rel_prefix=assets_rel_prefix,
             content_list=content_list if isinstance(content_list, list) else [],
+            subset_to_original=subset_to_original,
+            asset_suffix=asset_suffix,
         )
         warnings.extend(image_warnings)
         if asset_relpaths:
@@ -547,13 +701,19 @@ def extract(
         headings = _extract_headings_from_content_list(content_list)
         extras["headings"] = headings
 
-        # Page count from content_list (max page_idx + 1) or fall back to 0.
-        max_page = 0
-        for entry in content_list:
-            if isinstance(entry, dict) and isinstance(entry.get("page_idx"), int):
-                max_page = max(max_page, entry["page_idx"] + 1)
-        if max_page:
-            extras["pages"] = max_page
+        # Page count: when called with --pages the "pages" field should
+        # reflect how many original pages the patch covers, not mineru's
+        # subset index. Without --pages, fall back to the max page_idx + 1
+        # from content_list (full document).
+        if subset_to_original:
+            extras["pages"] = len(subset_to_original)
+        else:
+            max_page = 0
+            for entry in content_list:
+                if isinstance(entry, dict) and isinstance(entry.get("page_idx"), int):
+                    max_page = max(max_page, entry["page_idx"] + 1)
+            if max_page:
+                extras["pages"] = max_page
 
         if keep_raw and mineru_cache_dir is not None:
             cached = _cache_raw_mineru_output(backend_dir, mineru_cache_dir, doc_id)
@@ -566,6 +726,155 @@ def extract(
                 )
 
     return body, extras, warnings, audit
+
+
+def _splice_into_target(
+    target_path: Path,
+    new_body: str,
+    patched_pages: list[int],
+    new_assets: list[str],
+    extraction_method_supplementary: str,
+    new_warnings: list[str],
+    *,
+    source_sha256: str,
+    force: bool,
+) -> tuple[Path, list[str]]:
+    """Replace `[page N]` sections in the target md with the new ones for
+    each page in `patched_pages`. Returns (target_path, merged_warnings).
+
+    Safety:
+      - Refuses to splice if the target frontmatter's `source_sha256` does
+        not match the input PDF's sha256 (unless `force=True`). This is
+        the only check that catches "user pointed --patch-into at the
+        wrong document".
+      - Refuses if the target body has no `[page N]` anchors at all — we
+        can't splice into a page-anchorless body without guessing where
+        sections belong.
+      - Pages requested but not present in the target are reported as
+        warnings; their content from the patch is appended at the end
+        of the body in numeric order so the agent can still find them.
+
+    Frontmatter merge:
+      - `mineru_patched_pages` becomes the union of the existing list
+        (if any) and `patched_pages`.
+      - `extraction_method_supplementary` is set to the new mineru tag.
+      - `tokens_estimated` is recomputed from the merged body.
+      - `assets` is the union of the existing list (if any) and the new
+        patches; dedup preserves first-seen order.
+      - `warnings` accumulates a single line noting the splice plus any
+        warnings the patch run produced.
+    """
+    if not target_path.is_file():
+        raise RuntimeError(f"--patch-into target not found: {target_path}")
+
+    target_fm = read_frontmatter(target_path)
+    target_body = read_body(target_path)
+    if not target_fm:
+        raise RuntimeError(
+            f"--patch-into target {target_path.name} has no readable YAML "
+            "frontmatter"
+        )
+
+    target_sha = (target_fm.get("source_sha256") or "").strip().lower()
+    if target_sha and target_sha != source_sha256.lower() and not force:
+        raise RuntimeError(
+            f"--patch-into target source_sha256 {target_sha!r} does not "
+            f"match input PDF sha256 {source_sha256!r}. Pass --force-patch "
+            "to override (intended only when the input PDF is a known-good "
+            "re-export of the same document)."
+        )
+
+    preamble, target_sections = split_body_by_page_anchors(target_body)
+    if not target_sections:
+        raise RuntimeError(
+            f"--patch-into target {target_path.name} has no '[page N]' "
+            "anchors; cannot splice. Re-extract the source PDF first via "
+            "extract_pdf_pymupdf4llm.py to lay down the anchors."
+        )
+
+    _new_preamble, new_sections = split_body_by_page_anchors(new_body)
+    # When the patch run produced no anchors at all (unlikely but
+    # possible on a single-page subset where mineru couldn't align),
+    # treat the entire new body as a single section keyed on the only
+    # patched page.
+    if not new_sections and len(patched_pages) == 1:
+        only = patched_pages[0]
+        new_sections = {only: f"[page {only}]\n\n{new_body.strip()}"}
+
+    missing_in_patch: list[int] = []
+    missing_in_target: list[int] = []
+    splice_warnings: list[str] = []
+
+    for page in sorted(set(patched_pages)):
+        if page not in new_sections:
+            missing_in_patch.append(page)
+            continue
+        if page not in target_sections:
+            missing_in_target.append(page)
+        target_sections[page] = new_sections[page]
+
+    if missing_in_patch:
+        splice_warnings.append(
+            "mineru_patch: requested pages "
+            f"[{format_page_list(missing_in_patch)}] were not present in the "
+            "mineru output — splice skipped for those pages"
+        )
+    if missing_in_target:
+        splice_warnings.append(
+            "mineru_patch: pages "
+            f"[{format_page_list(missing_in_target)}] were not present in "
+            "the target md; new sections were appended in numeric order"
+        )
+
+    rebuilt = assemble_body_from_sections(preamble, target_sections)
+
+    # Frontmatter merge.
+    existing_patched = target_fm.get("mineru_patched_pages") or []
+    merged_pages_set: set[int] = set()
+    for entry in list(existing_patched) + list(patched_pages):
+        try:
+            merged_pages_set.add(int(entry))
+        except (TypeError, ValueError):
+            continue
+    merged_patched_pages = sorted(merged_pages_set)
+
+    existing_assets = target_fm.get("assets") or []
+    if not isinstance(existing_assets, list):
+        existing_assets = [str(existing_assets)]
+    merged_assets: list[str] = []
+    seen_assets: set[str] = set()
+    for a in list(existing_assets) + list(new_assets):
+        a_str = str(a)
+        if a_str and a_str not in seen_assets:
+            seen_assets.add(a_str)
+            merged_assets.append(a_str)
+
+    existing_warnings = target_fm.get("warnings") or []
+    if not isinstance(existing_warnings, list):
+        existing_warnings = [str(existing_warnings)]
+    merged_warnings = list(existing_warnings)
+    splice_note = (
+        f"mineru_patch: replaced {len(patched_pages)} page section(s) "
+        f"[{format_page_list(patched_pages)}] via "
+        f"{extraction_method_supplementary}"
+    )
+    merged_warnings.append(splice_note)
+    merged_warnings.extend(splice_warnings)
+    merged_warnings.extend(
+        f"mineru_patch[{format_page_list(patched_pages)}]: {w}"
+        for w in new_warnings
+    )
+
+    target_fm["mineru_patched_pages"] = merged_patched_pages
+    target_fm["extraction_method_supplementary"] = extraction_method_supplementary
+    target_fm["extraction_date"] = today_iso()
+    if merged_assets:
+        target_fm["assets"] = merged_assets
+    target_fm["warnings"] = merged_warnings
+    target_fm["tokens_estimated"] = count_tokens(rebuilt)
+
+    write_md(target_path, target_fm, rebuilt)
+    return target_path, splice_warnings
 
 
 def main() -> int:
@@ -618,6 +927,43 @@ def main() -> int:
         help="Preserve MinerU's raw per-document output under the cache "
              "dir for follow-up postprocess_popo.py runs.",
     )
+    ap.add_argument(
+        "--pages",
+        default=None,
+        help="Page-range patching: comma-separated list of 1-based page "
+             "numbers with optional ranges, e.g. '2,18-19,35,221'. Only "
+             "those pages are sent to mineru (via an internal subset PDF) "
+             "and the returned `[page N]` anchors and asset filenames are "
+             "remapped to the original page numbers. Use this to recover "
+             "vector math/diagrams that pymupdf4llm dropped on specific "
+             "pages without re-extracting the whole document.",
+    )
+    ap.add_argument(
+        "--patch-into",
+        default=None,
+        help="Target markdown file to splice the extracted page sections "
+             "into. Requires --pages. Each requested page's section in the "
+             "target is replaced by the mineru-extracted one; the target's "
+             "frontmatter is updated (mineru_patched_pages, "
+             "extraction_method_supplementary). No standalone output file "
+             "is written. The target's source_sha256 must match the input "
+             "PDF unless --force-patch is set.",
+    )
+    ap.add_argument(
+        "--force-patch",
+        action="store_true",
+        help="Bypass the source_sha256 match check when --patch-into "
+             "targets a markdown produced from a different but "
+             "content-equivalent PDF re-export.",
+    )
+    ap.add_argument(
+        "--no-mineru-asset-suffix",
+        action="store_true",
+        help="Disable the `-mineru` infix in asset filenames produced by "
+             "page-patching mode. Use only when you control the assets "
+             "directory and know there is no pymupdf4llm output to collide "
+             "with. The default (suffix on) is safe in mixed extractions.",
+    )
     args = ap.parse_args()
 
     in_path = Path(args.input_pdf).expanduser().resolve()
@@ -633,6 +979,24 @@ def main() -> int:
         emit_failure(f"input not found: {in_path}")
         return 1
 
+    # CLI validation: --patch-into without --pages would replace whole
+    # documents in place, which loses the existing extraction's structure.
+    # Refuse rather than silently doing something destructive.
+    if args.patch_into and not args.pages:
+        emit_failure(
+            "--patch-into requires --pages; refusing to splice an entire "
+            "document over a target md"
+        )
+        return 1
+
+    pages: list[int] | None = None
+    if args.pages:
+        try:
+            pages = parse_page_list(args.pages)
+        except ValueError as e:
+            emit_failure(f"invalid --pages: {e}")
+            return 1
+
     if args.assets_dir:
         assets_dir = Path(args.assets_dir).expanduser().resolve()
     else:
@@ -642,6 +1006,8 @@ def main() -> int:
         cache_dir = Path(args.mineru_cache_dir).expanduser().resolve()
     else:
         cache_dir = out_path.parent.parent / "_mineru"
+
+    asset_suffix = "" if (args.no_mineru_asset_suffix or not pages) else "-mineru"
 
     try:
         body, extras, warnings, audit = extract(
@@ -655,6 +1021,8 @@ def main() -> int:
             mineru_cache_dir=cache_dir,
             mineru_bin=args.mineru_bin,
             keep_raw=args.keep_raw,
+            pages=pages,
+            asset_suffix=asset_suffix,
         )
     except FileNotFoundError as e:
         # mineru binary missing — exit 2 so the parent loop can mark the
@@ -673,20 +1041,58 @@ def main() -> int:
         return 1
 
     backend_tag = audit.get("mineru_backend_resolved") or args.backend
+    extraction_method = (
+        f"{EXTRACTOR_NAME}-{backend_tag}@{audit.get('mineru_version', 'unknown')}"
+    )
+    input_sha256 = sha256_of(in_path)
+
+    if args.patch_into:
+        target_path = Path(args.patch_into).expanduser().resolve()
+        try:
+            written_path, splice_warnings = _splice_into_target(
+                target_path=target_path,
+                new_body=body,
+                patched_pages=pages or [],
+                new_assets=extras.get("assets", []),
+                extraction_method_supplementary=extraction_method,
+                new_warnings=warnings,
+                source_sha256=input_sha256,
+                force=args.force_patch,
+            )
+        except RuntimeError as e:
+            emit_failure(f"--patch-into: {e}", extra={"input": str(in_path)})
+            return 1
+
+        success_extras: dict = {
+            "patched_pages": pages,
+            "patched_into": str(written_path),
+            "assets_extracted": len(extras.get("assets", [])),
+            "extraction_method_supplementary": extraction_method,
+        }
+        success_extras.update(audit)
+        # We pass the rebuilt target body for the token count so the JSON
+        # reflects the spliced-in size, not the patch alone. Recompute it
+        # from disk since splice_into_target already updated tokens_estimated
+        # in the YAML.
+        merged_body = read_body(written_path)
+        emit_success(written_path, merged_body, warnings + splice_warnings,
+                     extra=success_extras)
+        return 0
+
     fm = {
         "id": args.doc_id,
         "source": source_rel,
         "source_type": "pdf",
-        "source_sha256": sha256_of(in_path),
-        "extraction_method": (
-            f"{EXTRACTOR_NAME}-{backend_tag}@{audit.get('mineru_version', 'unknown')}"
-        ),
+        "source_sha256": input_sha256,
+        "extraction_method": extraction_method,
         "extraction_date": today_iso(),
         "pages": extras.get("pages"),
         "headings": extras.get("headings", []),
         "tokens_estimated": count_tokens(body),
         "warnings": warnings,
     }
+    if pages:
+        fm["mineru_subset_pages"] = pages
     if extras.get("assets"):
         fm["assets"] = extras["assets"]
     write_md(out_path, fm, body)
@@ -695,6 +1101,8 @@ def main() -> int:
         "pages": extras.get("pages"),
         "assets_extracted": len(extras.get("assets", [])),
     }
+    if pages:
+        success_extras["mineru_subset_pages"] = pages
     success_extras.update(audit)
     emit_success(out_path, body, warnings, extra=success_extras)
     return 0

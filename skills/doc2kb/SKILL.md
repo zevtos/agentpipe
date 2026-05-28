@@ -117,13 +117,46 @@ python3 <skill_dir>/scripts/ensure_env.py extract_pdf_pymupdf4llm.py \
 Авто-восстановление для `dropped_pictures` (default): extract-скрипт сначала пытается извлечь встроенные изображения через pymupdf и заменить плейсхолдеры на ссылки в `assets/`. Warning остаётся только для тех плейсхолдеров, которые не удалось заменить (картинка отсутствует в PDF stream — что редко). Для `mangled_visual_layout` авто-восстановления нет — формулы там вообще нет ни как текста, ни как picture-объекта.
 
 Что делать, если warning всё-таки появился:
-1. Прочитайте исходный PDF напрямую через инструмент `Read` (Claude умеет читать PDF — рендерит страницы и видит математику визуально). Для уже извлечённых картинок в `assets/` Read тоже работает.
-2. Перепишите body соответствующего `<kb_dir>/docs/<id>-*.md` вручную (или добавьте транскрипцию таблиц/формул из картинок рядом со ссылками), сохранив YAML frontmatter, но обновив:
-   - `extraction_method: claude-pagewise-manual@1`
-   - заменив warning на пояснение, что транскрипция ручная.
-3. После этого перезапустите `build_manifest.py`, чтобы обновить manifest/INDEX.
 
-Не пытайтесь "почистить" garbled output regex'ами или галлюцинировать содержимое картинок из соседних абзацев — это путь к потере данных. Только переэкстракция через визуальное чтение даёт корректный результат.
+1. **Mineru page-patch (предпочтительно, если установлен mineru tier).**
+   Прогнать только проблемные страницы через mineru VLM и сразу вшить
+   их в существующий md — никаких temp файлов и manual flow. Пример
+   для warning "26 placeholder(s) remain over 455 page(s), pages
+   2, 18-19, 35, 221, 243-244, 588":
+
+   ```bash
+   python3 <skill_dir>/scripts/ensure_env.py extract_pdf_mineru.py \
+       "<input.pdf>" "<unused output path>" \
+       --doc-id <id> --source-rel "<rel>" \
+       --pages "2,18-19,35,221,243-244,588" \
+       --patch-into "<kb_dir>/docs/<existing>.md" \
+       --lang cyrillic
+   ```
+
+   Расценки на M-серии: ≈10 c/страница на vlm-mlx, то есть 9 страниц ≈
+   полторы минуты. Frontmatter автоматически обновляется
+   (`mineru_patched_pages: [...]`, `extraction_method_supplementary:
+   mineru-vlm@x.y.z`), и ассеты для патчей сохраняются под именем
+   `<doc_id>-page<orig:03d>-mineru-imgN.<ext>` — pymupdf4llm-вые имена
+   не затрагиваются. См. секцию "Optional MinerU VLM backend (opt-in)"
+   ниже про установку tier и подробности page-patching.
+
+2. **Ручная транскрипция через Read tool (fallback).** Если mineru
+   tier не установлен или его VLM не справляется (специфичные
+   нотации, рукописные диаграммы):
+   - Прочитайте исходный PDF напрямую через инструмент `Read` (Claude
+     умеет читать PDF — рендерит страницы и видит математику
+     визуально). Для уже извлечённых картинок в `assets/` Read тоже
+     работает.
+   - Перепишите body соответствующего `<kb_dir>/docs/<id>-*.md`
+     вручную (или добавьте транскрипцию таблиц/формул из картинок
+     рядом со ссылками), сохранив YAML frontmatter, но обновив:
+     - `extraction_method: claude-pagewise-manual@1`
+     - заменив warning на пояснение, что транскрипция ручная.
+   - После этого перезапустите `build_manifest.py`, чтобы обновить
+     manifest/INDEX.
+
+Не пытайтесь "почистить" garbled output regex'ами или галлюцинировать содержимое картинок из соседних абзацев — это путь к потере данных. Только переэкстракция через визуальное чтение (Read tool или mineru VLM) даёт корректный результат.
 
 При желании сразу прогоните `normalize_md.py --write` на каждом извлечённом файле — он уберёт повторяющиеся headers/footers и стандартный boilerplate. Безопасно: idempotent, никогда не суммаризирует.
 
@@ -174,7 +207,7 @@ python3 <skill_dir>/scripts/ensure_env.py build_manifest.py <kb_dir>
 | `ensure_env.py`              | idempotent venv bootstrap (run once or on requirements change). Accepts `--tier mineru` for the opt-in heavy install. |
 | `scout_corpus.py`            | Phase 2 — classify corpus, emit `_scout.json`. `--enable-mineru` opt-in routes `image_only` PDFs through the mineru extractor. |
 | `extract_pdf_pymupdf4llm.py` | text-layer PDF → Markdown; auto-extracts embedded images to `<kb_dir>/assets/` and rewires `picture intentionally omitted` placeholders to those files |
-| `extract_pdf_mineru.py`      | **opt-in** VLM-grade PDF → Markdown via the opendatalab/MinerU CLI; mirrors the other extractors' single-file contract, copies images to `<kb_dir>/assets/` via `save_image_safe`, optionally caches raw mineru output under `<kb_dir>/_mineru/<doc_id>/` for follow-up Popo runs. Requires `ensure_env.py --tier mineru`. |
+| `extract_pdf_mineru.py`      | **opt-in** VLM-grade PDF → Markdown via the opendatalab/MinerU CLI; mirrors the other extractors' single-file contract, copies images to `<kb_dir>/assets/` via `save_image_safe`, optionally caches raw mineru output under `<kb_dir>/_mineru/<doc_id>/` for follow-up Popo runs. Supports `--pages 2,18-19,35` for page-targeted patching and `--patch-into <target.md>` to splice the result directly into an existing extraction (no temp files, frontmatter records `mineru_patched_pages` + `extraction_method_supplementary`). Requires `ensure_env.py --tier mineru`. |
 | `extract_docx.py`            | DOCX → Markdown via mammoth + markdownify; switches to pandoc when source contains OOXML math so formulas survive as LaTeX |
 | `extract_pptx.py`            | PPTX → Markdown, preserves speaker notes |
 | `extract_ipynb.py`           | Jupyter notebook (.ipynb) → Markdown; per-cell anchors, text outputs preserved, base64 images dropped |
@@ -288,6 +321,49 @@ python3 <skill_dir>/scripts/ensure_env.py extract_pdf_mineru.py \
     [--keep-raw]    # cache raw mineru output for postprocess_popo.py
 ```
 
+**Page-targeted patching (recommended for `dropped_pictures` follow-ups).**
+When pymupdf4llm's `dropped_pictures` warning calls out a handful of
+pages whose vector math/diagrams didn't survive, don't re-extract the
+whole book — feed only those pages to mineru via `--pages` and let it
+splice them directly into the existing markdown via `--patch-into`:
+
+```bash
+python3 <skill_dir>/scripts/ensure_env.py extract_pdf_mineru.py \
+    "<absolute input.pdf>" "<unused output path>" \
+    --doc-id <id> --source-rel "<rel/path.pdf>" \
+    --pages "2,18-19,35,221,243-244,588" \
+    --patch-into "<kb_dir>/docs/<existing-extraction>.md" \
+    [--lang cyrillic|en|ch|...] \
+    [--backend vlm-auto-engine|hybrid-auto-engine|pipeline] \
+    [--force-patch]    # only when target sha256 ≠ input sha256
+```
+
+What happens:
+- The script slices the input PDF down to just the listed pages with
+  pymupdf in a tempdir.
+- mineru runs only on the subset (≈10 s/page on Apple-Silicon vlm-mlx,
+  vs. ≈2 hours for a 600-page book).
+- Page anchors and asset filenames are remapped to the original page
+  numbers — the splice writes `[page 243]` and
+  `<kb_dir>/assets/<doc_id>-page243-mineru-imgM.<ext>`, never the
+  internal subset indices.
+- The target's `[page N]` sections for the listed pages are replaced
+  in place; everything else is untouched.
+- The target's frontmatter records `mineru_patched_pages: [...]` and
+  `extraction_method_supplementary: mineru-<backend>@<version>` so
+  the audit trail shows both extractors.
+- mineru's assets carry an extra `-mineru-` infix
+  (`<doc_id>-page<orig:03d>-mineru-imgN.ext`) so they never collide
+  with pymupdf4llm's existing `<doc_id>-page<N>-imgN` filenames.
+
+You can also run `--pages` *without* `--patch-into` to write a
+standalone patch md (useful for review before splicing). The
+`--patch-into` step then becomes a separate, idempotent invocation.
+
+Refuse to splice if the target's `source_sha256` ≠ the input PDF's
+sha256 (exit 1). Pass `--force-patch` to override — only do this when
+the input PDF is a known re-export of the same document.
+
 Backend trade-off (measured back-to-back on M5 Pro / 24 GB,
 lab2_advanced.pdf 10 p, math-heavy):
 - `vlm-auto-engine` (default) — pure VLM end-to-end via MLX. **206 s**
@@ -320,7 +396,9 @@ corpora.
 
 Only run mineru when pymupdf4llm warns about `dropped_pictures` or
 `mangled_visual_layout` — for clean text-layer PDFs it isn't worth the
-minutes-per-document cost.
+minutes-per-document cost. For a `dropped_pictures` warning that names
+a few specific pages, prefer the `--pages … --patch-into …` workflow
+above over re-extracting the whole document.
 
 If the `mineru` CLI isn't on PATH the script exits 2 with the install
 hint above — the parent loop must treat that as "user action required",
