@@ -20,11 +20,11 @@ import httpx
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
 
-from _common import get_env, log
+from _common import default_http_timeout, get_env, log
 from ._base import Candidate
 
 _BASE = "https://api.stackexchange.com/2.3"
-_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
+_TIMEOUT = default_http_timeout(read=30.0)
 _DEFAULT_SITES: tuple[str, ...] = ("stackoverflow",)
 
 

@@ -43,6 +43,16 @@ def load_scorer(ref: str) -> Callable[[dict], float]:
     return fn
 
 
+def safe_int(v: Any) -> int:
+    """Coerce ``v`` to a non-negative int; return 0 for None, non-numeric,
+    or negative values. Shared by per-profile scorers (dev/docs) so they
+    can read sloppy GitHub/HN/PyPI int fields without retrying try/except."""
+    try:
+        return max(0, int(v))
+    except (TypeError, ValueError):
+        return 0
+
+
 def safe_score(scorer: Callable[[dict], float], candidate: dict) -> float:
     """Invoke a scorer, clamp to [0, 1], swallow exceptions."""
     try:
@@ -55,4 +65,4 @@ def safe_score(scorer: Callable[[dict], float], candidate: dict) -> float:
     return max(0.0, min(1.0, v))
 
 
-__all__ = ["ScoringError", "load_scorer", "safe_score"]
+__all__ = ["ScoringError", "load_scorer", "safe_int", "safe_score"]

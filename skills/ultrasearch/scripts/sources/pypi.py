@@ -11,34 +11,16 @@ names from the query and probe each in parallel.
 from __future__ import annotations
 
 import asyncio
-import re
 from typing import Any
 
 import httpx
 
-from _common import log
-from ._base import Candidate
+from _common import default_http_timeout, log
+from ._base import Candidate, tokenize_package_names as _tokenize
 
 _PYPI = "https://pypi.org/pypi"
 _PYPISTATS = "https://pypistats.org/api/packages"
-_TIMEOUT = httpx.Timeout(connect=10.0, read=20.0, write=10.0, pool=10.0)
-
-
-def _tokenize(query: str) -> list[str]:
-    stopwords = {
-        "the", "a", "an", "and", "or", "of", "for", "to", "in", "on",
-        "is", "are", "vs", "best", "library", "framework", "package",
-        "alternatives", "comparison", "python", "with", "using", "review",
-    }
-    tokens = re.findall(r"[A-Za-z][A-Za-z0-9_\-]{2,}", query.lower())
-    out: list[str] = []
-    seen: set[str] = set()
-    for t in tokens:
-        if t in stopwords or t in seen:
-            continue
-        seen.add(t)
-        out.append(t)
-    return out[:8]
+_TIMEOUT = default_http_timeout(read=20.0)
 
 
 async def _probe(client: httpx.AsyncClient, name: str) -> Candidate | None:

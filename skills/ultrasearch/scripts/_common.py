@@ -280,3 +280,24 @@ RATE_BUDGET: dict[str, float] = {
 # Baseline year used by recency-aware scorers (quality.recency_score and
 # scoring/academic.py). Single source — update when "now" drifts past it.
 RECENT_YEAR_BASELINE = 2026
+
+
+def default_user_agent(email: str | None = None) -> str:
+    """Single source for the User-Agent header. Some endpoints (Crossref
+    polite pool, OpenAlex) require an email; ``mailto:`` is appended only
+    when an email is supplied. Version is read from VERSION via
+    ``tool_version_string()`` so a release bump propagates automatically."""
+    ver = tool_version_string()
+    base = f"ultrasearch/{ver} (+https://github.com/zevtos/agentpipe)"
+    if email:
+        # Strip the closing paren so we can append the mailto inside.
+        return base[:-1] + f"; mailto:{email})"
+    return base
+
+
+def default_http_timeout(read: float = 30.0) -> "Any":
+    """Single source for httpx.Timeout(...). Most sources fit the default
+    (connect=10, read=30, write=10, pool=10); fetch.py overrides read=60
+    for PDF downloads, package-registry sources pass read=20."""
+    import httpx
+    return httpx.Timeout(connect=10.0, read=read, write=10.0, pool=10.0)

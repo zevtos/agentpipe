@@ -12,11 +12,11 @@ from typing import Any
 
 import httpx
 
-from _common import log
+from _common import default_http_timeout, log
 from ._base import Candidate
 
 _BASE = "https://hn.algolia.com/api/v1"
-_TIMEOUT = httpx.Timeout(connect=10.0, read=20.0, write=10.0, pool=10.0)
+_TIMEOUT = default_http_timeout(read=20.0)
 
 
 async def fetch(

@@ -7,8 +7,31 @@ the minimum that orchestrate.py needs for dedup, scoring, and indexing.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, asdict
 from typing import Any
+
+
+_TOKEN_STOPWORDS = frozenset({
+    "the", "a", "an", "and", "or", "of", "for", "to", "in", "on",
+    "is", "are", "vs", "best", "library", "framework", "package",
+    "alternatives", "comparison", "python", "with", "using", "review",
+})
+
+
+def tokenize_package_names(query: str, *, max_tokens: int = 8) -> list[str]:
+    """Extract plausible package-name candidates from a free-text query.
+    Drops stopwords and de-duplicates. Used by both pypi.py and deps_dev.py
+    to seed their package lookups."""
+    tokens = re.findall(r"[A-Za-z][A-Za-z0-9_\-]{2,}", query.lower())
+    out: list[str] = []
+    seen: set[str] = set()
+    for t in tokens:
+        if t in _TOKEN_STOPWORDS or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+    return out[:max_tokens]
 
 
 class SourceError(Exception):
@@ -59,4 +82,4 @@ class Candidate:
         return asdict(self)
 
 
-__all__ = ["Candidate", "SourceError"]
+__all__ = ["Candidate", "SourceError", "tokenize_package_names"]

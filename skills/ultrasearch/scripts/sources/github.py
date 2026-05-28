@@ -20,11 +20,11 @@ from typing import Any
 
 import httpx
 
-from _common import get_env, log
+from _common import default_http_timeout, get_env, log
 from ._base import Candidate, SourceError
 
 _BASE = "https://api.github.com"
-_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
+_TIMEOUT = default_http_timeout(read=30.0)
 _USER_AGENT = "ultrasearch/0.15 (+https://github.com/zevtos/agentpipe)"
 
 

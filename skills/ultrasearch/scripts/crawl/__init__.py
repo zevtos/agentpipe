@@ -23,10 +23,10 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
-from _common import log
+from _common import default_http_timeout, log
 
 
-_TIMEOUT = httpx.Timeout(connect=10.0, read=20.0, write=10.0, pool=10.0)
+_TIMEOUT = default_http_timeout(read=20.0)
 _USER_AGENT = "ultrasearch/0.15"
 
 _TITLE_RE = re.compile(r"<title[^>]*>([^<]+)</title>", re.I)

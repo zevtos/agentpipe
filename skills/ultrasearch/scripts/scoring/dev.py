@@ -17,12 +17,7 @@ import math
 from datetime import datetime, timezone
 from typing import Any
 
-
-def _safe_int(v: Any) -> int:
-    try:
-        return max(0, int(v))
-    except (TypeError, ValueError):
-        return 0
+from scoring import safe_int as _safe_int
 
 
 def _log_norm(value: int, ceiling_log: float = 11.5) -> float:

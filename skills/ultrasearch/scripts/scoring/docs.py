@@ -12,12 +12,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
-
-def _safe_int(v: Any) -> int:
-    try:
-        return max(0, int(v))
-    except (TypeError, ValueError):
-        return 0
+from scoring import safe_int as _safe_int
 
 
 def _source_prior(src: str) -> float:
