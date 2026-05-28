@@ -592,7 +592,6 @@ def assemble_body_from_sections(
 # ---------- frontmatter reader ----------
 
 FRONTMATTER_RE = re.compile(r"^---\r?\n(.*?)\r?\n---\r?\n", re.DOTALL)
-_FRONTMATTER_RE = FRONTMATTER_RE  # internal alias preserved for old callers
 
 # Keys whose values should never be coerced from string → int/float, even if
 # they look numeric. Protects sha256 hashes (all-digit edge case),
@@ -654,7 +653,7 @@ def parse_frontmatter_text(text: str) -> dict[str, Any]:
     # Normalize CRLF so the anchored regex matches Windows-authored sources too.
     if "\r\n" in text[:200]:
         text = text.replace("\r\n", "\n")
-    m = _FRONTMATTER_RE.match(text)
+    m = FRONTMATTER_RE.match(text)
     if not m:
         return {}
     block = m.group(1)
@@ -721,7 +720,7 @@ def read_body(path: Path) -> str:
         text = path.read_text(encoding="utf-8")
     except Exception:
         return ""
-    m = _FRONTMATTER_RE.match(text)
+    m = FRONTMATTER_RE.match(text)
     if not m:
         return text
     return text[m.end():]
