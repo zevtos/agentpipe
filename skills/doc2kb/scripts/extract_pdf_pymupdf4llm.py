@@ -46,12 +46,14 @@ from pathlib import Path
 # doc2kb.pth that ensure_env.py wrote).
 from _common import (  # noqa: E402
     _RESIDUAL_LIGATURE_RE,
+    add_assets_args,
     clean_whitespace,
     count_tokens,
     emit_failure,
     emit_success,
     log,
     recover_ligatures,
+    resolve_assets_dir,
     sanitize_heading,
     save_image_safe,
     sha256_of,
@@ -531,26 +533,7 @@ def main() -> int:
     ap.add_argument("output_md")
     ap.add_argument("--doc-id", default="doc-000")
     ap.add_argument("--source-rel", default=None)
-    ap.add_argument(
-        "--assets-dir",
-        default=None,
-        help="Absolute directory to write extracted images into. Defaults "
-             "to <output_md>.parent.parent/assets (= <kb_dir>/assets).",
-    )
-    ap.add_argument(
-        "--assets-rel",
-        default="../assets",
-        help="Relative prefix used inside the Markdown body to link the "
-             "saved images (default: '../assets', matching the standard "
-             "kb_dir/docs/*.md → kb_dir/assets/ layout).",
-    )
-    ap.add_argument(
-        "--no-extract-images",
-        action="store_true",
-        help="Disable embedded image extraction; keep pymupdf4llm's "
-             "intentionally-omitted placeholders verbatim and re-enable "
-             "the original dropped_pictures warning.",
-    )
+    add_assets_args(ap)
     args = ap.parse_args()
 
     in_path = Path(args.input_pdf).expanduser().resolve()
@@ -566,14 +549,9 @@ def main() -> int:
         emit_failure(f"input not found: {in_path}")
         return 1
 
-    if args.no_extract_images:
-        assets_dir: Path | None = None
-    elif args.assets_dir:
-        assets_dir = Path(args.assets_dir).expanduser().resolve()
-    else:
-        # Default: <output_md>.parent.parent / "assets". Standard layout is
-        # <kb_dir>/docs/<file>.md so two ascents land on <kb_dir>.
-        assets_dir = out_path.parent.parent / "assets"
+    # Default <out_path>.parent.parent/assets follows the standard
+    # <kb_dir>/docs/<file>.md → <kb_dir>/assets/ layout.
+    assets_dir: Path | None = resolve_assets_dir(args, out_path)
 
     try:
         body, extras, warnings = extract(

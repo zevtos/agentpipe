@@ -26,6 +26,7 @@ from _common import (  # noqa: E402
     FRONTMATTER_RE as _FRONTMATTER_RE,
     clean_whitespace,
     count_tokens,
+    detect_text_encoding,
     emit_failure,
     emit_success,
     parse_frontmatter_text,
@@ -65,44 +66,18 @@ def _looks_like_real_text(s: str, min_ratio: float = 0.75) -> bool:
 
 
 def _detect_encoding(path: Path) -> str:
-    """Detection order: BOM → UTF-8 → cp1251/cp1252 heuristic → charset-normalizer.
+    """BOM → UTF-8 → cp1251/cp1252 (validated) → charset-normalizer.
 
-    Direct UTF-8 attempt comes first because charset-normalizer often
-    misidentifies short cyrillic samples as exotic codecs (big5, gb18030)
-    while the same bytes decode cleanly as UTF-8. CP1251 is tried explicitly
-    next — for Russian corpora it's the most common non-UTF-8 codec, and
-    charset-normalizer struggles on short cp1251 samples."""
-    try:
-        with path.open("rb") as fh:
-            data = fh.read(131072)
-    except Exception:
-        return "utf-8"
-    if data.startswith(b"\xef\xbb\xbf"):
-        return "utf-8"
-    if data.startswith(b"\xff\xfe") or data.startswith(b"\xfe\xff"):
-        return "utf-16"
-    try:
-        data.decode("utf-8")
-        return "utf-8"
-    except UnicodeDecodeError:
-        pass
-    # Heuristic: try cp1251 and cp1252 — both decode any byte sequence, but
-    # only one will produce sensible text.
-    for cand in ("cp1251", "cp1252", "koi8-r", "iso-8859-1"):
-        try:
-            decoded = data.decode(cand)
-            if _looks_like_real_text(decoded):
-                return cand
-        except Exception:
-            continue
-    try:
-        from charset_normalizer import from_bytes  # type: ignore
-        r = from_bytes(data).best()
-        if r and r.encoding:
-            return r.encoding.replace("_", "-").lower()
-    except Exception:
-        pass
-    return "utf-8"
+    UTF-8 is tried first because charset-normalizer often misidentifies
+    short cyrillic samples as exotic codecs (big5, gb18030) while the same
+    bytes decode cleanly as UTF-8. CP1251 explicitly next — for Russian
+    corpora it's the most common non-UTF-8 codec, and charset-normalizer
+    struggles on short cp1251 samples."""
+    return detect_text_encoding(
+        path,
+        candidates=("cp1251", "cp1252", "koi8-r", "iso-8859-1"),
+        validator=_looks_like_real_text,
+    )
 
 
 def _strip_source_frontmatter(text: str) -> tuple[str, dict]:

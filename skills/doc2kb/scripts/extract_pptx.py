@@ -55,10 +55,12 @@ import sys
 from pathlib import Path
 
 from _common import (  # noqa: E402
+    add_assets_args,
     clean_whitespace,
     count_tokens,
     emit_failure,
     emit_success,
+    resolve_assets_dir,
     sanitize_heading,
     save_image_safe,
     sha256_of,
@@ -474,25 +476,7 @@ def main() -> int:
     ap.add_argument("output_md")
     ap.add_argument("--doc-id", default="doc-000")
     ap.add_argument("--source-rel", default=None)
-    ap.add_argument(
-        "--assets-dir",
-        default=None,
-        help="Absolute directory to write extracted slide images into. "
-             "Defaults to <output_md>.parent.parent/assets (= <kb_dir>/assets).",
-    )
-    ap.add_argument(
-        "--assets-rel",
-        default="../assets",
-        help="Relative prefix used inside the Markdown body to link the "
-             "saved images (default: '../assets', matching the standard "
-             "kb_dir/docs/*.md → kb_dir/assets/ layout).",
-    )
-    ap.add_argument(
-        "--no-extract-images",
-        action="store_true",
-        help="Disable picture extraction; embedded images are counted but "
-             "not saved to disk and not referenced from the markdown body.",
-    )
+    add_assets_args(ap)
     args = ap.parse_args()
 
     in_path = Path(args.input_pptx).expanduser().resolve()
@@ -508,14 +492,8 @@ def main() -> int:
         emit_failure(f"input not found: {in_path}")
         return 1
 
-    if args.no_extract_images:
-        assets_dir: Path | None = None
-    elif args.assets_dir:
-        assets_dir = Path(args.assets_dir).expanduser().resolve()
-    else:
-        # Default layout: <kb_dir>/docs/*.md + <kb_dir>/assets/. Two
-        # parent-ascents from the output file land on <kb_dir>.
-        assets_dir = out_path.parent.parent / "assets"
+    # Default layout: <kb_dir>/docs/*.md + <kb_dir>/assets/.
+    assets_dir: Path | None = resolve_assets_dir(args, out_path)
 
     try:
         body, extras, warnings = extract(

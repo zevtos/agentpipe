@@ -729,6 +729,93 @@ def read_body(path: Path) -> str:
 
 # ---------- versioning ----------
 
+DEFAULT_ASSETS_REL = "../assets"
+
+
+def add_assets_args(parser) -> None:
+    """Add the standard `--assets-dir / --assets-rel / --no-extract-images`
+    trio that every extract_*.py shares. Image-aware extractors call this
+    inside their argparse setup so the flag surface stays consistent."""
+    parser.add_argument(
+        "--assets-dir",
+        default=None,
+        help="Absolute directory to write extracted images into. Defaults "
+             "to <output_md>.parent.parent/assets (= <kb_dir>/assets).",
+    )
+    parser.add_argument(
+        "--assets-rel",
+        default=DEFAULT_ASSETS_REL,
+        help=f"Relative prefix used inside the Markdown body to link the "
+             f"saved images (default: {DEFAULT_ASSETS_REL!r}).",
+    )
+    parser.add_argument(
+        "--no-extract-images",
+        action="store_true",
+        help="Disable image extraction; emit `![image N]()` placeholders "
+             "with empty src (legacy behaviour).",
+    )
+
+
+def resolve_assets_dir(args, out_path: Path) -> Path | None:
+    """Map argparse flags to the final assets directory. None means
+    image extraction is disabled (`--no-extract-images`); otherwise the
+    explicit `--assets-dir` wins, falling back to <out_path>.parent.parent
+    / assets (= <kb_dir>/assets)."""
+    if args.no_extract_images:
+        return None
+    if args.assets_dir:
+        return Path(args.assets_dir).expanduser().resolve()
+    return out_path.parent.parent / "assets"
+
+
+def detect_text_encoding(
+    path: Path,
+    *,
+    sample_bytes: int = 131072,
+    candidates: tuple[str, ...] = (),
+    validator=None,
+) -> str:
+    """Best-effort text-encoding detection for raw `.md`/`.txt`/`.html`.
+
+    Order: BOM → UTF-8 → caller-supplied candidates (with optional
+    `validator(decoded_str) -> bool`) → charset-normalizer → "utf-8" fallback.
+
+    HTML callers usually pass `candidates=()`; pages mostly declare their
+    encoding or are UTF-8. Plain-text callers pass legacy codecs like
+    `("cp1251", "cp1252", "koi8-r", "iso-8859-1")` with a validator that
+    rejects garbage decodings (cp1251/cp1252 happily decode any byte).
+    """
+    try:
+        with path.open("rb") as fh:
+            data = fh.read(sample_bytes)
+    except Exception:
+        return "utf-8"
+    if data.startswith(b"\xef\xbb\xbf"):
+        return "utf-8"
+    if data.startswith(b"\xff\xfe") or data.startswith(b"\xfe\xff"):
+        return "utf-16"
+    try:
+        data.decode("utf-8")
+        return "utf-8"
+    except UnicodeDecodeError:
+        pass
+    for cand in candidates:
+        try:
+            decoded = data.decode(cand)
+        except Exception:
+            continue
+        if validator is None or validator(decoded):
+            return cand
+    try:
+        from charset_normalizer import from_bytes  # type: ignore
+        r = from_bytes(data).best()
+        if r and r.encoding:
+            return r.encoding.replace("_", "-").lower()
+    except Exception:
+        pass
+    return "utf-8"
+
+
 def tool_version_string() -> str:
     """Best-effort version string. Reads VERSION at repo root if available,
     else returns 'unknown'."""

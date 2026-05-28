@@ -22,6 +22,7 @@ from pathlib import Path
 from _common import (  # noqa: E402
     clean_whitespace,
     count_tokens,
+    detect_text_encoding,
     emit_failure,
     emit_success,
     sanitize_heading,
@@ -37,26 +38,9 @@ MIN_BODY_CHARS = 50
 
 
 def _detect_encoding(path: Path) -> str:
-    try:
-        with path.open("rb") as fh:
-            data = fh.read(131072)
-    except Exception:
-        return "utf-8"
-    if data.startswith(b"\xef\xbb\xbf"):
-        return "utf-8"
-    try:
-        data.decode("utf-8")
-        return "utf-8"
-    except UnicodeDecodeError:
-        pass
-    try:
-        from charset_normalizer import from_bytes  # type: ignore
-        r = from_bytes(data).best()
-        if r and r.encoding:
-            return r.encoding.replace("_", "-").lower()
-    except Exception:
-        pass
-    return "utf-8"
+    """BOM → UTF-8 → charset-normalizer. HTML pages mostly declare their
+    encoding or are UTF-8, so we don't try legacy codec candidates."""
+    return detect_text_encoding(path)
 
 
 def _try_trafilatura(html_text: str) -> str | None:
