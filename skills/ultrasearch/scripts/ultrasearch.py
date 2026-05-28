@@ -192,40 +192,36 @@ async def _run_parse_subprocess_async(pdf_path: str, candidate_key: str,
         return await asyncio.to_thread(_run_parse_subprocess, pdf_path, candidate_key)
 
 
-async def _pipeline(args) -> dict[str, Any]:
-    """Run the full Stage 1 pipeline. Returns a stats dict."""
-    t_start = time.monotonic()
-    stats: dict[str, Any] = {
-        "query": args.query,
-        "started_at": iso_now(),
-        "stage": 1,
-        "ok": True,
-        "warnings": [],
-    }
-
-    # Stage 3: detect query language; if non-English, generate EN parallel
+def _stage_detect_language(args, stats: dict[str, Any]) -> str:
+    """If args.lang ∈ {auto, ru}, detect query language and expand to EN
+    for English-only sources. Returns the query string to use downstream
+    (original if EN; expanded EN if detected non-EN)."""
     query_used = args.query
-    query_lang = "en"
-    if args.lang in ("auto", "ru"):
-        det = _translate.detect_lang(args.query)
-        query_lang = det.get("lang", "en") if args.lang == "auto" else args.lang
-        stats["language"] = {"detected": query_lang,
-                             "confidence": det.get("confidence", 0.0)}
-        if query_lang != "en":
-            exp = _translate.expand_query(args.query, target_lang="en")
-            en_query = exp.get("en")
-            if en_query and en_query != args.query:
-                # Use the EN query for English-only sources; keep the original
-                # for synthesis output language consistency
-                query_used = en_query
-                stats["language"]["en_query"] = en_query
+    if args.lang not in ("auto", "ru"):
+        return query_used
+    det = _translate.detect_lang(args.query)
+    query_lang = det.get("lang", "en") if args.lang == "auto" else args.lang
+    stats["language"] = {"detected": query_lang,
+                         "confidence": det.get("confidence", 0.0)}
+    if query_lang != "en":
+        exp = _translate.expand_query(args.query, target_lang="en")
+        en_query = exp.get("en")
+        if en_query and en_query != args.query:
+            # Use EN for English-only sources; keep original for synthesis
+            # output language consistency.
+            query_used = en_query
+            stats["language"]["en_query"] = en_query
+    return query_used
 
-    # 1. discover
+
+async def _stage_discover(args, query_used: str,
+                          stats: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """Run discover. Returns the candidate list, or None when discover
+    came back empty (and writes error fields into stats)."""
     t0 = time.monotonic()
     if args.sources:
         sources = tuple(s.strip() for s in args.sources.split(",") if s.strip())
     else:
-        # Stage 3 default: include all stable sources; RU sources via --sources
         sources = _discover.DEFAULT_SOURCES
     disc = await _discover.discover(
         query_used,
@@ -244,110 +240,105 @@ async def _pipeline(args) -> dict[str, Any]:
         stats["ok"] = False
         stats["error"] = "discover_empty"
         stats["exit_code"] = 3
-        return stats
-
-    # 2. truncate
+        return None
     if args.max_papers and len(candidates) > args.max_papers:
         candidates = candidates[: args.max_papers]
     stats["n_papers_after_truncate"] = len(candidates)
+    return candidates
 
-    # 3. open corpus
-    try:
-        con = _index.open_corpus(args.db)
-    except RuntimeError as e:
-        stats["ok"] = False
-        stats["error"] = f"corpus_open: {e}"
-        stats["exit_code"] = 2
-        return stats
 
-    # 4. fetch + parse + index, OR abstracts-only
+def _stage_index_abstracts_only(con, candidates: list[dict[str, Any]],
+                                stats: dict[str, Any]) -> None:
+    """--no-fetch path: index just the abstract for each candidate."""
+    log("--no-fetch: indexing abstracts only", prefix="ultrasearch")
+    for c in candidates:
+        full_text = (c.get("abstract") or "").strip()
+        _index.index_paper(con, c, full_text)
+    stats["fetch"] = {"skipped": True}
+    stats["parse"] = {"skipped": True}
+
+
+async def _stage_fetch_parse_index(args, con,
+                                   candidates: list[dict[str, Any]],
+                                   stats: dict[str, Any]) -> None:
+    """Standard path: fetch PDFs → parse them (subprocesses, parallel) →
+    serial-index everything. Stats populated under fetch/parse/index."""
+    if args.grey:
+        log(_fetch.GREY_DISCLAIMER, prefix="ultrasearch")
+
+    t0 = time.monotonic()
+    fetches = await _fetch.fetch_many(candidates, concurrency=4, grey=args.grey)
+    stats["fetch"] = {
+        "n_attempted": len(candidates),
+        "n_ok":        sum(1 for f in fetches if f.get("ok")),
+        "n_no_oa":     sum(1 for f in fetches if not f.get("ok")),
+        "seconds":     round(time.monotonic() - t0, 2),
+    }
     fetched_paths: dict[str, dict[str, Any]] = {}
-    parsed: dict[str, dict[str, Any]] = {}
-    indexed_results: list[dict[str, Any]] = []
+    for f in fetches:
+        if f.get("ok") and f.get("pdf_path"):
+            fetched_paths[f["candidate_key"]] = f
 
-    if args.no_fetch:
-        log("--no-fetch: indexing abstracts only", prefix="ultrasearch")
-        for c in candidates:
-            abs_ = (c.get("abstract") or "").strip()
-            full_text = abs_ if abs_ else ""
-            ir = _index.index_paper(con, c, full_text)
-            indexed_results.append(ir)
-        stats["fetch"] = {"skipped": True}
-        stats["parse"] = {"skipped": True}
-    else:
-        # fetch (Stage 3: --grey opt-in passes through to sci-hub tier)
-        if args.grey:
-            log(_fetch.GREY_DISCLAIMER, prefix="ultrasearch")
-        t0 = time.monotonic()
-        fetches = await _fetch.fetch_many(candidates, concurrency=4, grey=args.grey)
-        stats["fetch"] = {
-            "n_attempted": len(candidates),
-            "n_ok":        sum(1 for f in fetches if f.get("ok")),
-            "n_no_oa":     sum(1 for f in fetches if not f.get("ok")),
-            "seconds":     round(time.monotonic() - t0, 2),
-        }
-        for f in fetches:
-            if f.get("ok") and f.get("pdf_path"):
-                fetched_paths[f["candidate_key"]] = f
-
-        # parse (subprocess per PDF, parallelism bounded by
-        # --parse-concurrency; each subprocess is isolated so concurrent
-        # pymupdf4llm/docling invocations can't trample each other's state)
-        t0 = time.monotonic()
-        parse_concurrency = max(1, int(args.parse_concurrency))
-        parse_jobs: list[tuple[str, str]] = []
-        for c in candidates:
-            key = _discover._candidate_key(c)
-            f = fetched_paths.get(key)
-            if not f:
-                continue
+    # parse — subprocess per PDF, parallelism bounded by --parse-concurrency
+    t0 = time.monotonic()
+    parse_concurrency = max(1, int(args.parse_concurrency))
+    parse_jobs: list[tuple[str, str]] = []
+    for c in candidates:
+        key = _discover._candidate_key(c)
+        f = fetched_paths.get(key)
+        if f:
             parse_jobs.append((key, f["pdf_path"]))
-        if parse_jobs:
-            sem = asyncio.Semaphore(parse_concurrency)
-            results = await asyncio.gather(*(
-                _run_parse_subprocess_async(pdf_path, key, sem)
-                for key, pdf_path in parse_jobs
-            ))
+    parsed: dict[str, dict[str, Any]] = {}
+    if parse_jobs:
+        sem = asyncio.Semaphore(parse_concurrency)
+        results = await asyncio.gather(*(
+            _run_parse_subprocess_async(pdf_path, key, sem)
+            for key, pdf_path in parse_jobs
+        ))
+    else:
+        results = []
+    n_parse_ok = 0
+    n_parse_fail = 0
+    for (key, _), pr in zip(parse_jobs, results):
+        parsed[key] = pr
+        if pr.get("ok"):
+            n_parse_ok += 1
         else:
-            results = []
-        n_parse_ok = 0
-        n_parse_fail = 0
-        for (key, _), pr in zip(parse_jobs, results):
-            parsed[key] = pr
-            if pr.get("ok"):
-                n_parse_ok += 1
-            else:
-                n_parse_fail += 1
-        stats["parse"] = {
-            "n_ok":         n_parse_ok,
-            "n_fail":       n_parse_fail,
-            "concurrency":  parse_concurrency,
-            "seconds":      round(time.monotonic() - t0, 2),
-        }
+            n_parse_fail += 1
+    stats["parse"] = {
+        "n_ok":         n_parse_ok,
+        "n_fail":       n_parse_fail,
+        "concurrency":  parse_concurrency,
+        "seconds":      round(time.monotonic() - t0, 2),
+    }
 
-        # index — serial writes (sqlite single-writer)
-        t0 = time.monotonic()
-        for c in candidates:
-            key = _discover._candidate_key(c)
-            f = fetched_paths.get(key)
-            pr = parsed.get(key)
-            full_text = (pr or {}).get("text") or ""
-            if not full_text and (c.get("abstract") or "").strip():
-                full_text = c["abstract"]
-            ir = _index.index_paper(
-                con, c, full_text,
-                pdf_path=(f or {}).get("pdf_path"),
-                pdf_sha256=(f or {}).get("sha256"),
-            )
-            indexed_results.append(ir)
-        stats["index"] = {
-            "n_papers": len(indexed_results),
-            "n_chunks_total": sum(int(r.get("n_chunks") or 0) for r in indexed_results),
-            "n_failed":       sum(1 for r in indexed_results if not r.get("ok")),
-            "seconds":        round(time.monotonic() - t0, 2),
-        }
+    # index — serial writes (sqlite single-writer)
+    t0 = time.monotonic()
+    indexed_results: list[dict[str, Any]] = []
+    for c in candidates:
+        key = _discover._candidate_key(c)
+        f = fetched_paths.get(key)
+        pr = parsed.get(key)
+        full_text = (pr or {}).get("text") or ""
+        if not full_text and (c.get("abstract") or "").strip():
+            full_text = c["abstract"]
+        ir = _index.index_paper(
+            con, c, full_text,
+            pdf_path=(f or {}).get("pdf_path"),
+            pdf_sha256=(f or {}).get("sha256"),
+        )
+        indexed_results.append(ir)
+    stats["index"] = {
+        "n_papers": len(indexed_results),
+        "n_chunks_total": sum(int(r.get("n_chunks") or 0) for r in indexed_results),
+        "n_failed":       sum(1 for r in indexed_results if not r.get("ok")),
+        "seconds":        round(time.monotonic() - t0, 2),
+    }
 
-    # 5. retrieve (--retrieval-profile full triggers cross-encoder + RCS-cache)
+
+def _stage_retrieve(args, con, stats: dict[str, Any]) -> list[dict[str, Any]]:
+    """BM25 + vector retrieval; --retrieval-profile full layers on the
+    cross-encoder + RCS-cache 3-stage variant."""
     t0 = time.monotonic()
     if args.retrieval_profile == "full":
         hits = _retrieve.retrieve_3stage(con, args.query, final_k=args.top_k)
@@ -358,41 +349,50 @@ async def _pipeline(args) -> dict[str, Any]:
         "n_hits": len(hits),
         "seconds": round(time.monotonic() - t0, 2),
     }
+    return hits
 
-    # 5a. (Stage 2) citation traversal
-    traversal_candidates: list[dict[str, Any]] = []
-    if args.depth in ("default", "deep") and hits:
-        t0 = time.monotonic()
-        seeds: list[_traverse.TraversalSeed] = []
-        for h in hits[:10]:
-            seeds.append({
-                "paper_id": h["paper_id"],
-                "doi": h.get("doi"),
-                "title": h.get("title", ""),
-                "score": float(h.get("score") or 0.0),
-            })
-        max_hops = 1 if args.depth == "default" else 2
-        try:
-            trv = await _traverse.traverse_citations(
-                con, seeds, max_hops=max_hops,
-            )
-            stats["traverse"] = {
-                "n_seeds": trv.get("n_seeds", 0),
-                "n_raw_candidates": trv.get("n_raw_candidates", 0),
-                "n_after_specter_gate": trv.get("n_after_specter_gate", 0),
-                "n_final": trv.get("n_final", 0),
-                "api_calls": trv.get("api_calls", {}),
-                "warnings": trv.get("warnings", []),
-                "seconds": round(time.monotonic() - t0, 2),
-            }
-            traversal_candidates = trv.get("candidates") or []
-        except Exception as e:
-            log(f"traverse failed: {type(e).__name__}: {e}", prefix="ultrasearch")
-            stats["traverse"] = {"error": f"{type(e).__name__}: {e}",
-                                 "seconds": round(time.monotonic() - t0, 2)}
 
-    # 5b. (Stage 2) Retraction Watch
-    retraction_lookup: dict[str, dict[str, Any]] = {}
+async def _stage_traverse(args, con,
+                          hits: list[dict[str, Any]],
+                          stats: dict[str, Any]) -> list[dict[str, Any]]:
+    """1-hop (default) or 2-hop (deep) citation expansion on the top hits.
+    Returns the new candidates added by traversal."""
+    if args.depth not in ("default", "deep") or not hits:
+        return []
+    t0 = time.monotonic()
+    seeds: list[_traverse.TraversalSeed] = []
+    for h in hits[:10]:
+        seeds.append({
+            "paper_id": h["paper_id"],
+            "doi": h.get("doi"),
+            "title": h.get("title", ""),
+            "score": float(h.get("score") or 0.0),
+        })
+    max_hops = 1 if args.depth == "default" else 2
+    try:
+        trv = await _traverse.traverse_citations(con, seeds, max_hops=max_hops)
+        stats["traverse"] = {
+            "n_seeds": trv.get("n_seeds", 0),
+            "n_raw_candidates": trv.get("n_raw_candidates", 0),
+            "n_after_specter_gate": trv.get("n_after_specter_gate", 0),
+            "n_final": trv.get("n_final", 0),
+            "api_calls": trv.get("api_calls", {}),
+            "warnings": trv.get("warnings", []),
+            "seconds": round(time.monotonic() - t0, 2),
+        }
+        return trv.get("candidates") or []
+    except Exception as e:
+        log(f"traverse failed: {type(e).__name__}: {e}", prefix="ultrasearch")
+        stats["traverse"] = {"error": f"{type(e).__name__}: {e}",
+                             "seconds": round(time.monotonic() - t0, 2)}
+        return []
+
+
+def _stage_retractions(args, con,
+                       stats: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Optionally refresh the retraction watch repo; always mark retractions
+    in the current corpus. Returns a doi → {retraction_date, reason} lookup
+    for synthesize to footnote."""
     if args.refresh_retractions:
         t0 = time.monotonic()
         try:
@@ -407,11 +407,10 @@ async def _pipeline(args) -> dict[str, Any]:
         except Exception as e:
             log(f"refresh_retractions failed: {e}", prefix="ultrasearch")
             stats["quality_refresh"] = {"error": str(e)}
-    # Mark retractions for current corpus regardless
+    retraction_lookup: dict[str, dict[str, Any]] = {}
     try:
         mark = _quality.mark_retractions(con)
         stats["quality_mark"] = {"n_marked": mark.get("n_marked", 0)}
-        # Build lookup so synthesize can footnote
         cur = con.execute(
             "SELECT r.doi, r.retraction_date, r.reason "
             "FROM retractions r JOIN papers p ON LOWER(p.doi) = LOWER(r.doi)"
@@ -423,78 +422,134 @@ async def _pipeline(args) -> dict[str, Any]:
             }
     except Exception as e:
         log(f"mark_retractions failed: {e}", prefix="ultrasearch")
+    return retraction_lookup
 
-    con.close()
 
-    # 6. synthesize
+def _maybe_append_citation_graph(args, hits: list[dict[str, Any]],
+                                 report: str, stats: dict[str, Any]) -> str:
+    """Append a Mermaid citation-graph block to the report when
+    --render-graph is set and at least one hit exists."""
+    if not (args.render_graph and hits):
+        return report
+    try:
+        con3 = _index.open_corpus(args.db)
+        try:
+            paper_ids = [h["paper_id"] for h in hits]
+            graph = _render_graph.render(con3, paper_ids)
+        finally:
+            con3.close()
+        if graph:
+            stats["citation_graph"] = {"nodes": len(paper_ids), "rendered": True}
+            return (report.rstrip() + "\n\n## Citation graph\n\n"
+                    "```mermaid\n" + graph + "\n```\n")
+    except Exception as e:
+        log(f"render_graph failed: {e}", prefix="ultrasearch")
+        stats["citation_graph"] = {"error": str(e)}
+    return report
+
+
+def _stage_synthesize(args, hits: list[dict[str, Any]],
+                      retraction_lookup: dict[str, dict[str, Any]],
+                      traversal_candidates: list[dict[str, Any]],
+                      stats: dict[str, Any]) -> None:
+    """Build the markdown report (or JSON preview under --no-synthesize)
+    and write it to args.out / stdout. Optionally appends a Mermaid graph."""
     if args.no_synthesize:
         out_payload = {**stats, "hits_preview": [
             {"paper_id": h["paper_id"], "title": h["title"], "score": h["score"]}
             for h in hits[:5]
         ]}
         json_stdout(out_payload)
+        return
+    report = _synthesize.synthesize(
+        args.query, hits,
+        retraction_lookup=retraction_lookup or None,
+        traversal_candidates=traversal_candidates or None,
+    )
+    report = _maybe_append_citation_graph(args, hits, report, stats)
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(report, encoding="utf-8")
+        log(f"report written to {args.out}", prefix="ultrasearch")
     else:
-        report = _synthesize.synthesize(
-            args.query, hits,
-            retraction_lookup=retraction_lookup or None,
-            traversal_candidates=traversal_candidates or None,
-        )
-        # Stage 3: append Mermaid citation graph if requested
-        if args.render_graph and hits:
-            try:
-                con3 = _index.open_corpus(args.db)
-                try:
-                    paper_ids = [h["paper_id"] for h in hits]
-                    graph = _render_graph.render(con3, paper_ids)
-                finally:
-                    con3.close()
-                if graph:
-                    report = (report.rstrip() + "\n\n## Citation graph\n\n"
-                              "```mermaid\n" + graph + "\n```\n")
-                    stats["citation_graph"] = {"nodes": len(paper_ids),
-                                               "rendered": True}
-            except Exception as e:
-                log(f"render_graph failed: {e}", prefix="ultrasearch")
-                stats["citation_graph"] = {"error": str(e)}
-        if args.out:
-            args.out.parent.mkdir(parents=True, exist_ok=True)
-            args.out.write_text(report, encoding="utf-8")
-            log(f"report written to {args.out}", prefix="ultrasearch")
-        else:
-            sys.stdout.write(report)
-        v = _synthesize.validate_report(report)
-        stats["report"] = v
+        sys.stdout.write(report)
+    stats["report"] = _synthesize.validate_report(report)
 
-    # 7. (Stage 2) export bib / Zotero
-    if args.export_zotero and hits:
-        t0 = time.monotonic()
-        if args.bib_out:
-            bib_path = args.bib_out
-        elif args.out:
-            bib_path = args.out.with_suffix(".bib")
-        else:
-            bib_path = Path(os.getcwd()) / "ultrasearch-refs.bib"
+
+def _stage_export(args, hits: list[dict[str, Any]],
+                  stats: dict[str, Any]) -> None:
+    """--export-zotero: write a .bib file and optionally push to Zotero
+    when ZOTERO_API_KEY is set."""
+    if not (args.export_zotero and hits):
+        return
+    t0 = time.monotonic()
+    if args.bib_out:
+        bib_path = args.bib_out
+    elif args.out:
+        bib_path = args.out.with_suffix(".bib")
+    else:
+        bib_path = Path(os.getcwd()) / "ultrasearch-refs.bib"
+    try:
+        con2 = _index.open_corpus(args.db)
         try:
-            con2 = _index.open_corpus(args.db)
-            try:
-                paper_ids = [h["paper_id"] for h in hits]
-                push = get_env("ZOTERO_API_KEY") is not None
-                ex = _zotero.export(con2, paper_ids,
-                                    bib_path=bib_path,
-                                    push_zotero=push)
-            finally:
-                con2.close()
-            stats["export"] = {
-                "ok": ex.get("ok"),
-                "bib_path": ex.get("bib_path"),
-                "n_entries": ex.get("n_entries"),
-                "n_pushed_to_zotero": ex.get("n_pushed_to_zotero", 0),
-                "warnings": ex.get("warnings", []),
-                "seconds": round(time.monotonic() - t0, 2),
-            }
-        except Exception as e:
-            log(f"export failed: {e}", prefix="ultrasearch")
-            stats["export"] = {"error": str(e)}
+            paper_ids = [h["paper_id"] for h in hits]
+            push = get_env("ZOTERO_API_KEY") is not None
+            ex = _zotero.export(con2, paper_ids,
+                                bib_path=bib_path,
+                                push_zotero=push)
+        finally:
+            con2.close()
+        stats["export"] = {
+            "ok": ex.get("ok"),
+            "bib_path": ex.get("bib_path"),
+            "n_entries": ex.get("n_entries"),
+            "n_pushed_to_zotero": ex.get("n_pushed_to_zotero", 0),
+            "warnings": ex.get("warnings", []),
+            "seconds": round(time.monotonic() - t0, 2),
+        }
+    except Exception as e:
+        log(f"export failed: {e}", prefix="ultrasearch")
+        stats["export"] = {"error": str(e)}
+
+
+async def _pipeline(args) -> dict[str, Any]:
+    """Run the full Stage 1 pipeline. Returns a stats dict."""
+    t_start = time.monotonic()
+    stats: dict[str, Any] = {
+        "query": args.query,
+        "started_at": iso_now(),
+        "stage": 1,
+        "ok": True,
+        "warnings": [],
+    }
+
+    query_used = _stage_detect_language(args, stats)
+
+    candidates = await _stage_discover(args, query_used, stats)
+    if candidates is None:
+        return stats
+
+    try:
+        con = _index.open_corpus(args.db)
+    except RuntimeError as e:
+        stats["ok"] = False
+        stats["error"] = f"corpus_open: {e}"
+        stats["exit_code"] = 2
+        return stats
+
+    if args.no_fetch:
+        _stage_index_abstracts_only(con, candidates, stats)
+    else:
+        await _stage_fetch_parse_index(args, con, candidates, stats)
+
+    hits = _stage_retrieve(args, con, stats)
+    traversal_candidates = await _stage_traverse(args, con, hits, stats)
+    retraction_lookup = _stage_retractions(args, con, stats)
+
+    con.close()
+
+    _stage_synthesize(args, hits, retraction_lookup, traversal_candidates, stats)
+    _stage_export(args, hits, stats)
 
     stats["total_seconds"] = round(time.monotonic() - t_start, 2)
     stats["finished_at"] = iso_now()
