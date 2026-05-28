@@ -52,7 +52,7 @@ from docx.enum.section import WD_SECTION
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 
-from _paths import ProjectPaths, paths
+from _paths import paths, _caller_file, _find_root
 
 
 # ============================================================
@@ -65,8 +65,17 @@ FONT_SIZE_PAGE_NUMBER = Pt(11)  # номер страницы
 FONT_SIZE_TITLE_LARGE = Pt(18)  # вид работы и тема на титульнике
 LINE_SPACING_BODY = 1.5
 FIRST_LINE_INDENT = Cm(1.25)    # абзацный отступ
-PAGE_WIDTH = Mm(210)
-PAGE_HEIGHT = Mm(297)
+PAGE_WIDTH_MM = 210
+PAGE_HEIGHT_MM = 297
+PAGE_WIDTH = Mm(PAGE_WIDTH_MM)
+PAGE_HEIGHT = Mm(PAGE_HEIGHT_MM)
+
+# Line-spacing presets для тел разных типов абзацев.
+LINE_SPACING_CODE = 1.0
+LINE_SPACING_TABLE = 1.15
+
+# Вертикальный отступ между блоками (figure caption, formula, list).
+SPACE_BLOCK = Pt(6)
 
 
 # ============================================================
@@ -274,10 +283,6 @@ def _find_subject_config() -> Optional[Path]:
     ищем `.gost-report.env`. Возвращает ближайший. Покрывает и
     отдельные репы по предмету, и монорепо с несколькими предметами:
     конфиг в папке `физика/` побеждает конфиг в корне монорепо."""
-    try:
-        from _paths import _caller_file, _find_root  # type: ignore
-    except ImportError:
-        return None
     start = _caller_file() or Path.cwd()
     if start.is_file():
         start = start.parent
@@ -343,6 +348,22 @@ def _resolve_student_label(cfg: TitleConfig) -> str:
 # Низкоуровневые помощники работы с XML python-docx
 # ============================================================
 
+_RFONTS_ATTRS = ("w:ascii", "w:hAnsi", "w:cs", "w:eastAsia")
+
+
+def _force_run_fonts(rpr, font_name: str) -> None:
+    """Принудительно ставит ``font_name`` во все <w:rFonts> слоты (ascii,
+    hAnsi, cs, eastAsia). Используется в стилях и run-level форматировании
+    чтобы Word гарантированно отрисовал нужный шрифт для всех кодовых
+    диапазонов (латиница, кириллица, восточно-азиатские, complex)."""
+    rfonts = rpr.find(qn("w:rFonts"))
+    if rfonts is None:
+        rfonts = OxmlElement("w:rFonts")
+        rpr.append(rfonts)
+    for attr in _RFONTS_ATTRS:
+        rfonts.set(qn(attr), font_name)
+
+
 def _set_run_font(run, *, size=FONT_SIZE_BODY, bold=False, italic=False,
                   underline=False):
     run.font.name = FONT_NAME
@@ -350,30 +371,55 @@ def _set_run_font(run, *, size=FONT_SIZE_BODY, bold=False, italic=False,
     run.bold = bold
     run.italic = italic
     run.underline = underline
-    rpr = run._element.get_or_add_rPr()
-    rfonts = rpr.find(qn("w:rFonts"))
-    if rfonts is None:
-        rfonts = OxmlElement("w:rFonts")
-        rpr.append(rfonts)
-    for attr in ("w:ascii", "w:hAnsi", "w:cs", "w:eastAsia"):
-        rfonts.set(qn(attr), FONT_NAME)
+    _force_run_fonts(run._element.get_or_add_rPr(), FONT_NAME)
 
 
 def _ensure_normal_style(doc: _Document):
     normal = doc.styles["Normal"]
     normal.font.name = FONT_NAME
     normal.font.size = FONT_SIZE_BODY
-    rpr = normal.element.get_or_add_rPr()
-    rfonts = rpr.find(qn("w:rFonts"))
-    if rfonts is None:
-        rfonts = OxmlElement("w:rFonts")
-        rpr.append(rfonts)
-    for attr in ("w:ascii", "w:hAnsi", "w:cs", "w:eastAsia"):
-        rfonts.set(qn(attr), FONT_NAME)
+    _force_run_fonts(normal.element.get_or_add_rPr(), FONT_NAME)
     pf = normal.paragraph_format
     pf.line_spacing = LINE_SPACING_BODY
     pf.space_after = Pt(0)
     pf.space_before = Pt(0)
+
+
+def _append_word_field(run, instr_text: str, *,
+                       placeholder: Optional[str] = None,
+                       preserve_space: bool = False) -> None:
+    """Вставляет Word-поле в ``run``: ``<w:fldChar begin>`` + ``<w:instrText>``
+    + (опционально) ``<w:fldChar separate>`` + placeholder-run + ``<w:fldChar end>``.
+
+    Используется для PAGE (footer) и TOC (заголовок оглавления). Если задан
+    ``placeholder`` — добавляется separate-маркер и placeholder-run
+    с текстом, который Word/Pages/LibreOffice заменят при обновлении полей.
+    ``preserve_space=True`` ставит ``xml:space="preserve"`` на ``instrText``
+    (нужно для TOC, где переключатели разделены пробелами).
+    """
+    fld_begin = OxmlElement("w:fldChar")
+    fld_begin.set(qn("w:fldCharType"), "begin")
+    instr = OxmlElement("w:instrText")
+    if preserve_space:
+        instr.set(qn("xml:space"), "preserve")
+    instr.text = instr_text
+
+    run._element.append(fld_begin)
+    run._element.append(instr)
+
+    if placeholder is not None:
+        fld_separate = OxmlElement("w:fldChar")
+        fld_separate.set(qn("w:fldCharType"), "separate")
+        placeholder_run = OxmlElement("w:r")
+        placeholder_text = OxmlElement("w:t")
+        placeholder_text.text = placeholder
+        placeholder_run.append(placeholder_text)
+        run._element.append(fld_separate)
+        run._element.append(placeholder_run)
+
+    fld_end = OxmlElement("w:fldChar")
+    fld_end.set(qn("w:fldCharType"), "end")
+    run._element.append(fld_end)
 
 
 def _add_page_number_to_footer(section, *, hide_on_first=True):
@@ -387,20 +433,11 @@ def _add_page_number_to_footer(section, *, hide_on_first=True):
         p.clear()
     p = footer.paragraphs[0]
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p.paragraph_format.line_spacing = 1.0
+    p.paragraph_format.line_spacing = LINE_SPACING_CODE
 
     run = p.add_run()
     _set_run_font(run, size=FONT_SIZE_PAGE_NUMBER)
-
-    fld_begin = OxmlElement("w:fldChar")
-    fld_begin.set(qn("w:fldCharType"), "begin")
-    instr = OxmlElement("w:instrText")
-    instr.text = "PAGE"
-    fld_end = OxmlElement("w:fldChar")
-    fld_end.set(qn("w:fldCharType"), "end")
-    run._element.append(fld_begin)
-    run._element.append(instr)
-    run._element.append(fld_end)
+    _append_word_field(run, "PAGE")
 
     if hide_on_first:
         first_footer = section.first_page_footer
@@ -432,13 +469,7 @@ def _configure_heading_style(doc: _Document, level: int, size_pt: int,
     style.font.size = Pt(size_pt)
     style.font.bold = True
     style.font.color.rgb = RGBColor(0, 0, 0)
-    rpr = style.element.get_or_add_rPr()
-    rfonts = rpr.find(qn("w:rFonts"))
-    if rfonts is None:
-        rfonts = OxmlElement("w:rFonts")
-        rpr.append(rfonts)
-    for attr in ("w:ascii", "w:hAnsi", "w:cs", "w:eastAsia"):
-        rfonts.set(qn(attr), FONT_NAME)
+    _force_run_fonts(style.element.get_or_add_rPr(), FONT_NAME)
 
     pf = style.paragraph_format
     pf.alignment = _align_const(align)
@@ -1180,6 +1211,14 @@ class Report:
             return value
         return getattr(self._profile, attr, "") or ""
 
+    def _printable_cm(self) -> float:
+        """Печатная ширина A4 минус поля активного профиля, в см.
+        Используется figure() для clamp ширины картинки и formula() для
+        размещения номера формулы на правом крае."""
+        return (PAGE_WIDTH_MM
+                - self._profile.body_margin_left
+                - self._profile.body_margin_right) / 10.0
+
     def _add_paragraph(self, text="", *, align=WD_ALIGN_PARAGRAPH.CENTER,
                        size=FONT_SIZE_BODY, bold=False, italic=False,
                        underline=False, left_indent=None,
@@ -1417,27 +1456,13 @@ class Report:
         p = self._doc.add_paragraph()
         run = p.add_run()
         _set_run_font(run)
-
-        fld_begin = OxmlElement("w:fldChar")
-        fld_begin.set(qn("w:fldCharType"), "begin")
-        instr = OxmlElement("w:instrText")
-        instr.set(qn("xml:space"), "preserve")
-        instr.text = ' TOC \\o "1-3" \\h \\z \\u '
-        fld_separate = OxmlElement("w:fldChar")
-        fld_separate.set(qn("w:fldCharType"), "separate")
-        placeholder_run = OxmlElement("w:r")
-        placeholder_text = OxmlElement("w:t")
-        placeholder_text.text = ("Оглавление будет сформировано автоматически "
-                                 "при обновлении поля (ПКМ → «Обновить поле»)")
-        placeholder_run.append(placeholder_text)
-        fld_end = OxmlElement("w:fldChar")
-        fld_end.set(qn("w:fldCharType"), "end")
-
-        run._element.append(fld_begin)
-        run._element.append(instr)
-        run._element.append(fld_separate)
-        run._element.append(placeholder_run)
-        run._element.append(fld_end)
+        _append_word_field(
+            run,
+            ' TOC \\o "1-3" \\h \\z \\u ',
+            placeholder=("Оглавление будет сформировано автоматически "
+                         "при обновлении поля (ПКМ → «Обновить поле»)"),
+            preserve_space=True,
+        )
 
         self.page_break()
 
@@ -1491,7 +1516,7 @@ class Report:
             p = self._doc.add_paragraph()
             p.alignment = WD_ALIGN_PARAGRAPH.LEFT
             pf = p.paragraph_format
-            pf.line_spacing = 1.0
+            pf.line_spacing = LINE_SPACING_CODE
             pf.first_line_indent = Pt(0)
             pf.left_indent = Cm(0.5)
             pf.space_before = Pt(0)
@@ -1499,13 +1524,7 @@ class Report:
             run = p.add_run(line if line else " ")
             run.font.name = "Courier New"
             run.font.size = Pt(11)
-            rpr = run._element.get_or_add_rPr()
-            rfonts = rpr.find(qn("w:rFonts"))
-            if rfonts is None:
-                rfonts = OxmlElement("w:rFonts")
-                rpr.append(rfonts)
-            for attr in ("w:ascii", "w:hAnsi", "w:cs", "w:eastAsia"):
-                rfonts.set(qn(attr), "Courier New")
+            _force_run_fonts(run._element.get_or_add_rPr(), "Courier New")
 
     def _resolve_figure_path(self, image_path: Union[str, Path]) -> Path:
         """Абсолютный путь — без изменений; относительный — от
@@ -1549,10 +1568,7 @@ class Report:
         image_path = self._resolve_figure_path(image_path)
         self._figure_counter += 1
 
-        # Печатная область: 210 мм (A4) − левое поле − правое поле, в см
-        max_width_cm = (210
-                        - self._profile.body_margin_left
-                        - self._profile.body_margin_right) / 10.0
+        max_width_cm = self._printable_cm()
 
         image_path_str = str(image_path)
         if width_cm is None:
@@ -1617,11 +1633,7 @@ class Report:
 
         omath = _latex_to_omath(latex)
 
-        # Печатная ширина (A4 минус поля активного профиля), та же формула,
-        # что в figure() — даём числу прижаться к правому краю.
-        printable_cm = (210
-                        - self._profile.body_margin_left
-                        - self._profile.body_margin_right) / 10.0
+        printable_cm = self._printable_cm()
 
         p = self._doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.LEFT
@@ -1762,20 +1774,27 @@ class Report:
         run = p.add_run(_sanitize_prose(text))
         _set_run_font(run)
 
-    def numbered(self, items):
+    def _ensure_numbering_part(self, style_name: str) -> None:
+        """Триггерит создание numbering.xml части документа, если её ещё нет.
+        python-docx создаёт numbering_part лениво, при первом использовании
+        стиля списка. Бросаем туда-сюда пустой параграф со стилем чтобы
+        гарантировать наличие numbering_part до _find_abstract_num_for_style."""
+        try:
+            _ = self._doc.part.numbering_part
+        except (AttributeError, KeyError):
+            tmp = self._doc.add_paragraph(style=style_name)
+            tmp._element.getparent().remove(tmp._element)
+
+    def _list(self, items, *, style_name: str) -> None:
         if isinstance(items, str):
             items = [items]
         if not items:
             return
-        try:
-            _ = self._doc.part.numbering_part
-        except (AttributeError, KeyError):
-            tmp = self._doc.add_paragraph(style="List Number")
-            tmp._element.getparent().remove(tmp._element)
-        abstract_id = self._find_abstract_num_for_style("List Number")
+        self._ensure_numbering_part(style_name)
+        abstract_id = self._find_abstract_num_for_style(style_name)
         if abstract_id is None:
             for item in items:
-                p = self._doc.add_paragraph(style="List Number")
+                p = self._doc.add_paragraph(style=style_name)
                 pf = p.paragraph_format
                 pf.line_spacing = LINE_SPACING_BODY
                 pf.space_after = Pt(0)
@@ -1786,29 +1805,11 @@ class Report:
         for item in items:
             self._add_list_paragraph(item, num_id)
 
+    def numbered(self, items):
+        self._list(items, style_name="List Number")
+
     def bullet(self, items):
-        if isinstance(items, str):
-            items = [items]
-        if not items:
-            return
-        try:
-            _ = self._doc.part.numbering_part
-        except (AttributeError, KeyError):
-            tmp = self._doc.add_paragraph(style="List Bullet")
-            tmp._element.getparent().remove(tmp._element)
-        abstract_id = self._find_abstract_num_for_style("List Bullet")
-        if abstract_id is None:
-            for item in items:
-                p = self._doc.add_paragraph(style="List Bullet")
-                pf = p.paragraph_format
-                pf.line_spacing = LINE_SPACING_BODY
-                pf.space_after = Pt(0)
-                run = p.add_run(_sanitize_prose(item))
-                _set_run_font(run)
-            return
-        num_id = self._create_independent_num(abstract_id)
-        for item in items:
-            self._add_list_paragraph(item, num_id)
+        self._list(items, style_name="List Bullet")
 
     def page_break(self):
         p = self._doc.add_paragraph()
