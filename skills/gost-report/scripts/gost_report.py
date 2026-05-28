@@ -77,6 +77,12 @@ LINE_SPACING_TABLE = 1.15
 # Вертикальный отступ между блоками (figure caption, formula, list).
 SPACE_BLOCK = Pt(6)
 
+# Титульник: пустые абзацы-разделители и сдвиг правого блока.
+_TITLE_TOP_GAP = 6                    # пустых абзацев от шапки до вида работы
+_TITLE_MID_GAP = 4                    # пустых абзацев перед блоком студент/преподаватель
+_RIGHT_BLOCK_INDENT = Cm(9)           # сдвиг правого блока от левого края
+_RIGHT_BLOCK_REST_INDENT = Cm(2.2)    # доп. сдвиг continuation-имён (≈ ширина "Выполнили: ")
+
 
 # ============================================================
 # Профиль университета — всё, что варьируется между вузами
@@ -1317,9 +1323,20 @@ class Report:
         return table
 
     def _build_title_page(self):
-        cfg = self._title
+        self._title_header()
+        self._add_blank_paragraphs(_TITLE_TOP_GAP)
+        self._title_work_block()
+        self._add_blank_paragraphs(_TITLE_MID_GAP)
+        self._title_student_block()
+        self._title_teacher_block()
+        self._title_footer()
 
-        # Шапка: министерство → университет → факультет
+    def _add_blank_paragraphs(self, count: int) -> None:
+        for _ in range(count):
+            self._add_paragraph()
+
+    def _title_header(self) -> None:
+        """Министерство → университет → факультет."""
         ministry = self._resolve("ministry")
         if ministry:
             self._add_paragraph(ministry)
@@ -1334,37 +1351,28 @@ class Report:
             self._add_paragraph()
             self._add_paragraph(faculty, italic=True)
 
-        # Отступ к центру листа
-        for _ in range(6):
-            self._add_paragraph()
-
-        # Вид работы (крупно, полужирно)
+    def _title_work_block(self) -> None:
+        """Вид работы (+ номер) → тема → вариант."""
+        cfg = self._title
         work_type_text = cfg.work_type
         if cfg.work_number:
             work_type_text = f"{work_type_text} {cfg.work_number}".strip()
         self._add_paragraph(work_type_text, size=FONT_SIZE_TITLE_LARGE,
                             bold=True)
-
-        # Тема (крупно, без кавычек)
         if cfg.topic:
             self._add_paragraph(cfg.topic, size=FONT_SIZE_TITLE_LARGE)
-
-        # Вариант
         if cfg.variant:
             self._add_paragraph()
             self._add_paragraph(f"Вариант №{cfg.variant}",
                                 size=FONT_SIZE_TITLE_LARGE)
 
-        # Отступ к блоку студент/преподаватель
-        for _ in range(4):
-            self._add_paragraph()
-
-        right_block_indent = Cm(9)
-
+    def _title_student_block(self) -> None:
+        """Группа → "Выполнил(и): ФИО" с правым сдвигом."""
+        cfg = self._title
         self._add_runs_paragraph(
             [{"text": f"Группа: {cfg.student_group}", "underline": True}],
             align=WD_ALIGN_PARAGRAPH.LEFT,
-            left_indent=right_block_indent,
+            left_indent=_RIGHT_BLOCK_INDENT,
         )
         student_label = _resolve_student_label(cfg)
         names = cfg.student_names or ([cfg.student_name] if cfg.student_name else [])
@@ -1375,11 +1383,11 @@ class Report:
                 {"text": f": {first}"},
             ],
             align=WD_ALIGN_PARAGRAPH.LEFT,
-            left_indent=right_block_indent,
+            left_indent=_RIGHT_BLOCK_INDENT,
         )
         # Дополнительные участники: визуально выравниваются под первое имя
         # через немного больший left_indent (≈ ширина "Выполнили: " в TNR 14pt).
-        rest_indent = right_block_indent + Cm(2.2)
+        rest_indent = _RIGHT_BLOCK_INDENT + _RIGHT_BLOCK_REST_INDENT
         for extra_name in rest:
             self._add_runs_paragraph(
                 [{"text": extra_name}],
@@ -1387,31 +1395,37 @@ class Report:
                 left_indent=rest_indent,
             )
 
-        if cfg.teacher_name:
-            self._add_paragraph(left_indent=right_block_indent,
-                                align=WD_ALIGN_PARAGRAPH.LEFT)
-            self._add_runs_paragraph(
-                [
-                    {"text": cfg.teacher_label, "underline": True},
-                    {"text": ":"},
-                ],
-                align=WD_ALIGN_PARAGRAPH.LEFT,
-                left_indent=right_block_indent,
-            )
-            parts = []
-            if cfg.teacher_degree:
-                parts.append(cfg.teacher_degree)
-            if cfg.teacher_position:
-                parts.append(cfg.teacher_position)
-            parts.append(cfg.teacher_name)
-            self._add_paragraph(
-                " ".join(parts),
-                align=WD_ALIGN_PARAGRAPH.LEFT,
-                left_indent=right_block_indent,
-            )
+    def _title_teacher_block(self) -> None:
+        """Преподаватель: метка → "<степень> <должность> ФИО"."""
+        cfg = self._title
+        if not cfg.teacher_name:
+            return
+        self._add_paragraph(left_indent=_RIGHT_BLOCK_INDENT,
+                            align=WD_ALIGN_PARAGRAPH.LEFT)
+        self._add_runs_paragraph(
+            [
+                {"text": cfg.teacher_label, "underline": True},
+                {"text": ":"},
+            ],
+            align=WD_ALIGN_PARAGRAPH.LEFT,
+            left_indent=_RIGHT_BLOCK_INDENT,
+        )
+        parts = []
+        if cfg.teacher_degree:
+            parts.append(cfg.teacher_degree)
+        if cfg.teacher_position:
+            parts.append(cfg.teacher_position)
+        parts.append(cfg.teacher_name)
+        self._add_paragraph(
+            " ".join(parts),
+            align=WD_ALIGN_PARAGRAPH.LEFT,
+            left_indent=_RIGHT_BLOCK_INDENT,
+        )
 
-        # Город и год — прижаты к нижнему полю плавающей borderless-таблицей,
-        # чтобы не уезжать на page 2 при длинной шапке/теме/ФИО.
+    def _title_footer(self) -> None:
+        """Город и год — плавающая borderless-таблица, прижатая к нижнему
+        полю чтобы не уезжать на page 2 при длинной шапке/теме/ФИО."""
+        cfg = self._title
         city = self._resolve("city")
         footer_lines = []
         if city:
