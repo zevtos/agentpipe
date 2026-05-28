@@ -33,7 +33,6 @@ from _common import (  # noqa: E402
 )
 
 
-EXTRACTOR_NAME = "trafilatura"
 MIN_BODY_CHARS = 50
 
 

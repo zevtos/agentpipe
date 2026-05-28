@@ -19,13 +19,13 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from _common import (  # noqa: E402
     SCHEMA_VERSION_DOC,
+    nfc_optional as _nfc,
     read_frontmatter,
     tool_version_string,
     utc_now_iso,
@@ -34,17 +34,6 @@ from _common import (  # noqa: E402
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 TEMPLATE_AGENTS = SKILL_DIR / "assets" / "agents_template.md"
-
-
-def _nfc(s: str | None) -> str | None:
-    """NFC-normalize a path string for cross-source matching. Returns None
-    unchanged. macOS HFS+/APFS exposes filenames as NFD while YAML
-    frontmatter writers store them as NFC — without this normalization the
-    same filename appears identical but compares unequal, producing
-    spurious 'extraction missing' entries."""
-    if s is None:
-        return None
-    return unicodedata.normalize("NFC", s)
 
 
 def collect_docs(kb_dir: Path) -> list[dict[str, Any]]:

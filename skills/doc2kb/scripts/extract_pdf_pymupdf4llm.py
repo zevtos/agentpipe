@@ -469,9 +469,14 @@ def extract(
                 extras["assets"] = asset_relpaths
         except RuntimeError as e:
             warnings.append(f"image extraction failed: {e}")
-            replaced, total_drops = 0, len(PICTURE_PLACEHOLDER_RE.findall(body))
+            replaced = 0
+            total_drops = len(PICTURE_PLACEHOLDER_RE.findall(body))
     else:
-        replaced, total_drops = 0, len(PICTURE_PLACEHOLDER_RE.findall(body))
+        # extract_images=False: nothing was replaced, no auto-recovery
+        # message will fire (`if replaced > 0:` below stays False), so
+        # total_drops is never read in this branch — keep at 0.
+        replaced = 0
+        total_drops = 0
 
     # Re-run the heuristic on the (possibly substituted) body. If any
     # placeholders remain above the threshold, emit the same loud warning

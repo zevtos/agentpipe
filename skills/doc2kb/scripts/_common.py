@@ -109,6 +109,13 @@ def nfc(s: str) -> str:
     return unicodedata.normalize("NFC", s)
 
 
+def nfc_optional(s: str | None) -> str | None:
+    """`nfc()` extended to tolerate None. Used by build_manifest when joining
+    documents to scout entries by `source_path`, where the field is optional
+    in the manifest schema. Returns None unchanged."""
+    return nfc(s) if s is not None else None
+
+
 def validate_source_rel(s: str) -> str:
     """Reject `--source-rel` arguments that try to escape the corpus root.
     Returns the cleaned, NFC-normalized string or raises ValueError.
@@ -584,7 +591,8 @@ def assemble_body_from_sections(
 
 # ---------- frontmatter reader ----------
 
-_FRONTMATTER_RE = re.compile(r"^---\r?\n(.*?)\r?\n---\r?\n", re.DOTALL)
+FRONTMATTER_RE = re.compile(r"^---\r?\n(.*?)\r?\n---\r?\n", re.DOTALL)
+_FRONTMATTER_RE = FRONTMATTER_RE  # internal alias preserved for old callers
 
 # Keys whose values should never be coerced from string → int/float, even if
 # they look numeric. Protects sha256 hashes (all-digit edge case),

@@ -35,6 +35,7 @@ import sys
 from pathlib import Path
 
 from _common import (  # noqa: E402
+    PAGE_ANCHOR_RE as _PAGE_ANCHOR_RE,
     clean_whitespace,
     count_tokens,
     json_stdout,
@@ -45,9 +46,6 @@ from _common import (  # noqa: E402
     render_frontmatter,
     strip_page_footer_numbers,
 )
-
-
-_PAGE_ANCHOR_RE = re.compile(r"^\[page (\d+)\]\s*$", re.MULTILINE)
 _BOILERPLATE_PATTERNS = [
     re.compile(r"^\s*Page\s+\d+(\s+of\s+\d+)?\s*$", re.IGNORECASE),
     re.compile(r"^\s*Стр\.?\s+\d+(\s+из\s+\d+)?\s*$", re.IGNORECASE),

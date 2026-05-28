@@ -23,6 +23,7 @@ import sys
 from pathlib import Path
 
 from _common import (  # noqa: E402
+    FRONTMATTER_RE as _FRONTMATTER_RE,
     clean_whitespace,
     count_tokens,
     emit_failure,
@@ -40,7 +41,6 @@ from _common import (  # noqa: E402
 EXTRACTOR_NAME_MD = "passthrough-md"
 EXTRACTOR_NAME_TXT = "passthrough-txt"
 _BOM = "﻿"
-_FRONTMATTER_RE = re.compile(r"^---\r?\n(.*?)\r?\n---\r?\n", re.DOTALL)
 
 
 def _looks_like_real_text(s: str, min_ratio: float = 0.75) -> bool:
@@ -193,9 +193,6 @@ def main() -> int:
         mode = "md" if suf in (".md", ".markdown") else "txt"
 
     enc = _detect_encoding(in_path)
-    if enc.lower() not in ("utf-8", "ascii"):
-        # We'll keep the body in utf-8 after reading.
-        pass
 
     try:
         if mode == "md":

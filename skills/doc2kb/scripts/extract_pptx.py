@@ -76,7 +76,6 @@ def _try_import():
     try:
         from pptx import Presentation  # type: ignore
         from pptx.enum.shapes import MSO_SHAPE_TYPE  # type: ignore
-        from pptx.enum.text import PP_ALIGN  # noqa: F401
         return Presentation, MSO_SHAPE_TYPE
     except Exception as e:
         emit_failure(f"python-pptx unavailable: {e}")
@@ -165,7 +164,7 @@ def _table_md(shape) -> str:
     return "\n".join(lines)
 
 
-def _best_title(slide, MSO_SHAPE_TYPE) -> str | None:
+def _best_title(slide) -> str | None:
     # 1) explicit title placeholder
     for shape in slide.shapes:
         try:
@@ -303,7 +302,7 @@ def extract(
             do_extract = False
 
     for idx, slide in enumerate(prs.slides, start=1):
-        title = _best_title(slide, MSO_SHAPE_TYPE)
+        title = _best_title(slide)
         if title:
             title = sanitize_heading(title)
         header = f"## Slide {idx}"

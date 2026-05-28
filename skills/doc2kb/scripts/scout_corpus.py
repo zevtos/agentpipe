@@ -29,15 +29,21 @@ CLI:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import re
 import sys
 import time
-import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from _common import (  # type: ignore
+    log as _common_log,
+    nfc,
+    sha256_of,
+    slugify,
+    tool_version_string,
+)
 
 # Top-N cells to scan inside very large notebooks during scout. Full scan
 # of a 5k-cell notebook is too slow for the scout phase; the count is
@@ -49,14 +55,6 @@ IPYNB_SCOUT_MAX_CELLS = 4000
 SCHEMA_VERSION = "1.0"
 
 
-def _scout_tool_id() -> str:
-    """Lazy because tool_version_string walks parents — keep import-time cheap."""
-    try:
-        # _common is alongside this script.
-        from _common import tool_version_string  # type: ignore
-        return f"doc2kb@{tool_version_string()}"
-    except Exception:
-        return "doc2kb@unknown"
 # Minimum text length per page to treat a PDF page as having an embedded text layer.
 PDF_TEXT_CHAR_THRESHOLD = 100
 # Tunables for "huge file" warnings.
@@ -97,37 +95,10 @@ EXT_TO_TYPE = {
     ".webp": "image",
 }
 
-# Source-types supported by MVP (have a dedicated extract_*.py).
-MVP_SUPPORTED = {"pdf", "docx", "pptx", "md", "txt", "html", "ipynb"}
-
-
 # ---------- low-level helpers ----------
 
 def log(msg: str) -> None:
-    print(f"[doc2kb scout] {msg}", file=sys.stderr, flush=True)
-
-
-def sha256_of(path: Path, chunk: int = 1 << 20) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as fh:
-        while True:
-            buf = fh.read(chunk)
-            if not buf:
-                break
-            h.update(buf)
-    return h.hexdigest()
-
-
-def slugify(text: str, maxlen: int = 48) -> str:
-    """ASCII-friendly slug. Preserves Cyrillic transliteration roughly through
-    NFKD when possible; otherwise drops non-ASCII. Result lowercased,
-    non-alnum→'-', deduplicated, trimmed."""
-    s = unicodedata.normalize("NFKD", text)
-    s = s.encode("ascii", "ignore").decode("ascii")
-    s = re.sub(r"[^A-Za-z0-9]+", "-", s).strip("-").lower()
-    if not s:
-        s = "doc"
-    return s[:maxlen].rstrip("-") or "doc"
+    _common_log(msg, prefix="doc2kb scout")
 
 
 def sniff_mime(path: Path) -> str | None:
@@ -586,7 +557,7 @@ def walk_corpus(root: Path) -> tuple[list[Path], list[dict]]:
                     except ValueError:
                         rel = path
                     escapes.append({
-                        "source_path": unicodedata.normalize("NFC", str(rel)),
+                        "source_path": nfc(str(rel)),
                         "reason": "symlink escapes corpus root — refused (security)",
                     })
                     continue
@@ -607,7 +578,7 @@ def scan_file(idx: int, path: Path, input_root: Path,
     # spurious "extraction missing" entry.
     info: dict[str, Any] = {
         "id": f"doc-{idx:03d}",
-        "source_path": unicodedata.normalize("NFC", str(rel)),
+        "source_path": nfc(str(rel)),
         "size_bytes": path.stat().st_size,
         "sha256": sha256_of(path),
         "mime": None,
@@ -744,7 +715,7 @@ def main() -> int:
             files.append(info)
         except Exception as e:
             skipped.append({
-                "source_path": unicodedata.normalize("NFC", str(p.relative_to(input_root))),
+                "source_path": nfc(str(p.relative_to(input_root))),
                 "reason": f"scout failed: {str(e)[:200]}",
             })
 
@@ -769,7 +740,7 @@ def main() -> int:
 
     scout: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
-        "scout_tool": _scout_tool_id(),
+        "scout_tool": f"doc2kb@{tool_version_string()}",
         "scanned_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "input_root": str(input_root),
         "kb_root": str(kb_root),
