@@ -754,57 +754,30 @@ async def discover(query: str, *,
 
     headers = {"User-Agent": USER_AGENT.format(email=openalex_email or "anonymous")}
     async with httpx.AsyncClient(headers=headers, http2=True) as client:
+        # Source → coroutine factory. Closures capture per-call config (api
+        # keys, email). Adding a new source = one entry here + the _query_X
+        # function below.
+        dispatch: dict[str, Any] = {
+            "openalex":  lambda: _query_openalex(client, query, max_per_source,
+                                                 openalex_api_key, openalex_email),
+            "s2":        lambda: _query_s2(client, query, max_per_source, s2_api_key),
+            "arxiv":     lambda: _query_arxiv(query, max_per_source),
+            "crossref":  lambda: _query_crossref(client, query, max_per_source,
+                                                 openalex_email),
+            "europepmc": lambda: _query_europepmc(client, query, max_per_source),
+            "core":      lambda: _query_core(client, query, max_per_source,
+                                             core_api_key),
+            "datacite":  lambda: _query_datacite(client, query, max_per_source),
+            "hf":        lambda: _query_hf(client, query, max_per_source),
+        }
         tasks = []
-        names = []
-        if "openalex" in sources:
-            tasks.append(asyncio.wait_for(
-                _query_openalex(client, query, max_per_source,
-                                openalex_api_key, openalex_email),
-                timeout=PER_SOURCE_TIMEOUT_S,
-            ))
-            names.append("openalex")
-        if "s2" in sources:
-            tasks.append(asyncio.wait_for(
-                _query_s2(client, query, max_per_source, s2_api_key),
-                timeout=PER_SOURCE_TIMEOUT_S,
-            ))
-            names.append("s2")
-        if "arxiv" in sources:
-            tasks.append(asyncio.wait_for(
-                _query_arxiv(query, max_per_source),
-                timeout=PER_SOURCE_TIMEOUT_S,
-            ))
-            names.append("arxiv")
-        if "crossref" in sources:
-            tasks.append(asyncio.wait_for(
-                _query_crossref(client, query, max_per_source, openalex_email),
-                timeout=PER_SOURCE_TIMEOUT_S,
-            ))
-            names.append("crossref")
-        if "europepmc" in sources:
-            tasks.append(asyncio.wait_for(
-                _query_europepmc(client, query, max_per_source),
-                timeout=PER_SOURCE_TIMEOUT_S,
-            ))
-            names.append("europepmc")
-        if "core" in sources:
-            tasks.append(asyncio.wait_for(
-                _query_core(client, query, max_per_source, core_api_key),
-                timeout=PER_SOURCE_TIMEOUT_S,
-            ))
-            names.append("core")
-        if "datacite" in sources:
-            tasks.append(asyncio.wait_for(
-                _query_datacite(client, query, max_per_source),
-                timeout=PER_SOURCE_TIMEOUT_S,
-            ))
-            names.append("datacite")
-        if "hf" in sources:
-            tasks.append(asyncio.wait_for(
-                _query_hf(client, query, max_per_source),
-                timeout=PER_SOURCE_TIMEOUT_S,
-            ))
-            names.append("hf")
+        names: list[str] = []
+        for name in sources:
+            factory = dispatch.get(name)
+            if factory is None:
+                continue
+            tasks.append(asyncio.wait_for(factory(), timeout=PER_SOURCE_TIMEOUT_S))
+            names.append(name)
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for name, res in zip(names, results):
             if isinstance(res, BaseException):
