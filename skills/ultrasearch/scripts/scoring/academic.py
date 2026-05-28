@@ -14,6 +14,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from _common import RECENT_YEAR_BASELINE
+
 
 def score_academic(candidate: dict[str, Any]) -> float:
     """Return a [0, 1] quality score for an academic candidate.
@@ -44,7 +46,7 @@ def score_academic(candidate: dict[str, Any]) -> float:
         try:
             y = int(year)
             # 5-year half-life
-            age = max(0, 2026 - y)
+            age = max(0, RECENT_YEAR_BASELINE - y)
             recency = math.exp(-age / 5.0)
         except (TypeError, ValueError):
             pass

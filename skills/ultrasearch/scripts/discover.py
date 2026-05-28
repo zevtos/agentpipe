@@ -33,6 +33,9 @@ from typing import Any, Iterable, Literal, TypedDict
 import httpx
 
 from _common import (
+    CROSSREF_BASE,
+    RATE_BUDGET,
+    S2_BASE,
     casefold_title,
     emit_failure,
     get_env,
@@ -48,16 +51,7 @@ from _common import (
 
 # -------- constants --------
 
-# Per-domain rate budgets — research §2 table, ADR-005.
-RATE_BUDGET: dict[str, float] = {
-    "openalex":  10.0,   # research §2 line 26: 100 RPS hard; we stay polite
-    "s2":         1.0,   # research §2 line 27: dedicated key = 1 RPS
-    "arxiv":      0.33,  # research §2 line 28: 3s between requests
-    "crossref":   5.0,   # research §2 line 29: polite ≤50 RPS, stay polite
-    "europepmc":  5.0,   # research §2 line 30: conservative
-    "core":       0.17,  # research §2 line 32: ~10 req/min free tier
-    "unpaywall":  5.0,   # research §2 line 31: soft 100k/day cap
-}
+# RATE_BUDGET, S2_BASE, CROSSREF_BASE imported from _common (single source).
 
 USER_AGENT = "ultrasearch/0.1 (https://github.com/zevtos/agentpipe; mailto:{email})"
 HTTP_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
@@ -66,9 +60,7 @@ DEFAULT_MAX_PER_SOURCE = 50
 MAX_RETRIES = 5
 
 OPENALEX_BASE = "https://api.openalex.org"
-S2_BASE = "https://api.semanticscholar.org/graph/v1"
 ARXIV_BASE = "http://export.arxiv.org/api/query"
-CROSSREF_BASE = "https://api.crossref.org/works"
 EUROPEPMC_BASE = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 CORE_BASE = "https://api.core.ac.uk/v3/search/works"
 # Stage 3 sources

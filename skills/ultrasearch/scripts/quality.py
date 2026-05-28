@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, Sequence, TypedDict
 
 from _common import (
+    RECENT_YEAR_BASELINE,
     cache_dir,
     cosine,
     emit_failure,
@@ -248,7 +249,7 @@ def mark_retractions(con, *, paper_ids: list[str] | None = None) -> MarkResult:
 # Composite quality weights (research §6 line 98):
 #   Q = 0.3·log(cit+1) + 0.2·journal_impact + 0.2·h_index_norm + 0.3·recency
 Q_WEIGHTS = {"citations": 0.3, "venue": 0.2, "h_index": 0.2, "recency": 0.3}
-RECENT_YEAR_BASELINE = 2026   # update if your "now" drifts
+# RECENT_YEAR_BASELINE imported from _common (single source).
 
 
 def _recency_decay(year: int | None) -> float:

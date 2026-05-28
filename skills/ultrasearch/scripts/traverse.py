@@ -35,6 +35,8 @@ import httpx
 import numpy as np
 
 from _common import (
+    CROSSREF_BASE,
+    S2_BASE,
     casefold_title,
     cosine,
     emit_failure,
@@ -69,15 +71,9 @@ ELL = 12                    # hard cap on new candidates per call (research §3 
 SPECTER_GATE = 0.55         # SciNCL nearest-neighbour threshold (research §3 line 71)
 MAX_HOPS_DEFAULT = 1
 
-# Per-domain rate budgets (additive to discover.RATE_BUDGET)
-TRAVERSE_RATE_BUDGET: dict[str, float] = {
-    "s2_refs":   1.0,    # research §2 line 27 — dedicated key = 1 RPS
-    "s2_citers": 1.0,    # same pool
-    "crossref":  5.0,    # research §2 line 29 — polite pool 50 RPS, stay polite
-}
-
-S2_BASE = "https://api.semanticscholar.org/graph/v1"
-CROSSREF_BASE = "https://api.crossref.org/works"
+# S2_BASE / CROSSREF_BASE imported from _common (single source).
+# Rate budgets (s2_refs, s2_citers, crossref) live in _common.RATE_BUDGET
+# so discover.py and traverse.py share one bucket per endpoint family.
 PER_SOURCE_TIMEOUT_S = 60.0
 
 

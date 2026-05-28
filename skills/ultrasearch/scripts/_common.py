@@ -250,3 +250,33 @@ def get_env(name: str, default: str | None = None) -> str | None:
     import os
     val = os.environ.get(name)
     return val if val else default
+
+
+# ---------- shared endpoints + tunables ----------
+
+# API base URLs reused across discover + traverse (lookups + relations).
+S2_BASE = "https://api.semanticscholar.org/graph/v1"
+CROSSREF_BASE = "https://api.crossref.org/works"
+
+# Polite-pool rate budgets (requests-per-second targets) keyed by endpoint
+# family — research §2 table, ADR-005. Discover and traverse share the same
+# throttle bucket per source (the rate limiter sums concurrent in-flight
+# requests across the codebase).
+RATE_BUDGET: dict[str, float] = {
+    "openalex":  10.0,   # research §2 line 26: 100 RPS hard; we stay polite
+    "s2":         1.0,   # research §2 line 27: dedicated key = 1 RPS
+    "arxiv":      0.33,  # research §2 line 28: 3s between requests
+    "crossref":   5.0,   # research §2 line 29: polite ≤50 RPS, stay polite
+    "europepmc":  5.0,   # research §2 line 30: conservative
+    "core":       0.17,  # research §2 line 32: ~10 req/min free tier
+    "unpaywall":  5.0,   # research §2 line 31: soft 100k/day cap
+    "datacite":   5.0,
+    # Traverse stage subkeys — added so traverse can reach them via the same
+    # dict (avoids a separate TRAVERSE_RATE_BUDGET dict that drifted before).
+    "s2_refs":    1.0,
+    "s2_citers":  1.0,
+}
+
+# Baseline year used by recency-aware scorers (quality.recency_score and
+# scoring/academic.py). Single source — update when "now" drifts past it.
+RECENT_YEAR_BASELINE = 2026
