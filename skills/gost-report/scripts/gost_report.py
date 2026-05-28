@@ -46,7 +46,7 @@ from typing import Dict, List, Optional, Sequence, Union
 
 from docx import Document
 from docx.document import Document as _Document
-from docx.shared import Pt, Mm, Cm, RGBColor
+from docx.shared import Pt, Mm, Cm, Length, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK, WD_TAB_ALIGNMENT
 from docx.enum.section import WD_SECTION
 from docx.oxml.ns import qn
@@ -165,6 +165,12 @@ ITMO_PROFILE = UniversityProfile(
 DEFAULT_PROFILE = ITMO_PROFILE
 
 
+# Sentinel for "do not set this attribute — inherit from the paragraph style".
+# Used by _make_paragraph callers (notably list paragraphs, which must keep
+# w:before unset so the value comes from the List Number / List Bullet style).
+_INHERIT = object()
+
+
 # ============================================================
 # Стилизованный run внутри одного абзаца
 # ============================================================
@@ -179,7 +185,9 @@ class StyledRun:
     bold: bool = False
     italic: bool = False
     underline: bool = False
-    size: object = None  # None → FONT_SIZE_BODY (нельзя default до class init)
+    # docx.shared.Length (либо None → FONT_SIZE_BODY). Pt/Cm/Mm возвращают
+    # Length-объекты; используем Optional[Length] вместо object для ясности.
+    size: Optional["Length"] = None
 
 
 # ============================================================
@@ -1297,16 +1305,26 @@ class Report:
         Единая точка входа для всех «телом-уровневых» методов
         (text/task/figure/formula/table/caption/list). Возвращает Paragraph
         без runs — caller добавляет содержимое (текст, OMML, picture, и т.п.).
+
+        Любой параметр (``align``, ``line_spacing``, ``space_before``,
+        ``space_after``, ``left_indent``, ``first_line_indent``) можно явно
+        обнулить через ``_INHERIT`` чтобы оставить значение из стиля абзаца
+        (нужно для list-параграфов: их ``w:before`` берётся из стиля
+        ``List Number`` / ``List Bullet``).
         """
         p = self._doc.add_paragraph()
-        p.alignment = align
+        if align is not _INHERIT:
+            p.alignment = align
         pf = p.paragraph_format
-        pf.line_spacing = line_spacing
-        pf.space_before = space_before
-        pf.space_after = space_after
-        if left_indent is not None:
+        if line_spacing is not _INHERIT:
+            pf.line_spacing = line_spacing
+        if space_before is not _INHERIT:
+            pf.space_before = space_before
+        if space_after is not _INHERIT:
+            pf.space_after = space_after
+        if left_indent is not None and left_indent is not _INHERIT:
             pf.left_indent = left_indent
-        if first_line_indent is not None:
+        if first_line_indent is not None and first_line_indent is not _INHERIT:
             pf.first_line_indent = first_line_indent
         return p
 
@@ -1332,9 +1350,12 @@ class Report:
         p = self._make_paragraph(align=align, left_indent=left_indent)
         for r in runs:
             run = p.add_run(r.text)
+            # Explicit None-check, не `or`-fallback: иначе Pt(0) (бывает
+            # falsy) был бы перетёрт дефолтом.
+            run_size = r.size if r.size is not None else FONT_SIZE_BODY
             _set_run_font(
                 run,
-                size=r.size or FONT_SIZE_BODY,
+                size=run_size,
                 bold=r.bold,
                 italic=r.italic,
                 underline=r.underline,
@@ -1825,8 +1846,13 @@ class Report:
         return None
 
     def _add_list_paragraph(self, text: str, num_id: int):
-        # Левый дефолт — `python-docx` сам выставит alignment по стилю списка.
-        p = self._make_paragraph(align=None)
+        # align и space_before должны прийти из стиля списка
+        # (`List Number` / `List Bullet`). Без _INHERIT мы бы навязали
+        # alignment=CENTER и w:before="0" в каждом list-параграфе.
+        p = self._make_paragraph(
+            align=_INHERIT,
+            space_before=_INHERIT,
+        )
 
         pPr = p._p.get_or_add_pPr()
         numPr = OxmlElement("w:numPr")
