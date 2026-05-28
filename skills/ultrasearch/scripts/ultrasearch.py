@@ -103,8 +103,7 @@ def _build_parser() -> argparse.ArgumentParser:
                         "triggered), so memory grows ~linearly with this value.")
     p.add_argument("--sources", default=None,
                    help="comma-separated subset of "
-                        "{openalex,s2,arxiv,crossref,europepmc,core,"
-                        "datacite,hf,kiberleninka,oatd,base}")
+                        "{openalex,s2,arxiv,crossref,europepmc,core,datacite,hf}")
     # Stage 3 flags
     # v2 NOTE: --profile now selects pipeline routing (academic/dev/docs/...).
     # The legacy v1 retrieval-depth flag was renamed to --retrieval-profile to

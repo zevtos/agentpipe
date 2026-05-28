@@ -91,7 +91,7 @@ python3 ~/.claude/skills/ultrasearch/scripts/ensure_env.py ultrasearch.py \
 | `--bib-out PATH` | `<out>.bib` | Stage 2: path for .bib file |
 | `--refresh-retractions` | off | Stage 2: pull latest Retraction Watch CSV |
 | `--no-docling` | off | Stage 2: disable docling fallback (pymupdf4llm only) |
-| `--sources LIST` | all 6 | comma-separated subset of {openalex,s2,arxiv,crossref,europepmc,core,datacite,hf,kiberleninka,oatd,base} |
+| `--sources LIST` | all 8 | comma-separated subset of {openalex,s2,arxiv,crossref,europepmc,core,datacite,hf} |
 | `--profile NAME` | `academic` | v2: pipeline profile (`auto`, `academic`, `dev`, `docs`). `auto` = classifier picks. `academic` = v1 pipeline (default). Other profiles use the generic flat orchestrator. |
 | `--retrieval-profile fast\|full` | fast | Renamed from v1 `--profile fast/full`. Old `--profile=fast`/`--profile=full` still works via deprecation shim. `full` = cross-encoder rerank + RCS-cached scoring + (planned) multi-section synth |
 | `--profiles-dir PATH` | `<skill>/profiles` | override profile YAML directory |

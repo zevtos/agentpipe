@@ -36,6 +36,7 @@ import httpx
 
 from _common import (
     cache_dir,
+    default_http_timeout,
     emit_failure,
     get_env,
     json_stdout,
@@ -48,7 +49,7 @@ from discover import Candidate, _candidate_key  # type: ignore
 
 # -------- constants --------
 
-HTTP_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0)
+HTTP_TIMEOUT = default_http_timeout(read=60.0)
 MAX_PDF_BYTES = 50 * 1024 * 1024   # 50 MB
 DOWNLOAD_CHUNK = 1 << 16
 USER_AGENT = "ultrasearch/0.1 (+https://github.com/zevtos/agentpipe)"

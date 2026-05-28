@@ -295,9 +295,9 @@ def default_user_agent(email: str | None = None) -> str:
     return base
 
 
-def default_http_timeout(read: float = 30.0) -> "Any":
+def default_http_timeout(read: float = 30.0) -> "httpx.Timeout":
     """Single source for httpx.Timeout(...). Most sources fit the default
-    (connect=10, read=30, write=10, pool=10); fetch.py overrides read=60
-    for PDF downloads, package-registry sources pass read=20."""
+    (connect=10, read=30, write=10, pool=10); fetch.py passes read=60 for
+    PDF downloads, package-registry sources pass read=20."""
     import httpx
     return httpx.Timeout(connect=10.0, read=read, write=10.0, pool=10.0)

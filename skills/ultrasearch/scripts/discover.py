@@ -34,7 +34,6 @@ import httpx
 
 from _common import (
     CROSSREF_BASE,
-    RATE_BUDGET,
     S2_BASE,
     casefold_title,
     emit_failure,
@@ -47,6 +46,9 @@ from _common import (
     require_env,
     short_id,
 )
+# RATE_BUDGET lives in _common — currently consulted only as documentation
+# (no runtime rate-limiter wired up). traverse.py also references the
+# s2_refs/s2_citers/crossref entries via _common when the limiter lands.
 
 
 # -------- constants --------
@@ -772,7 +774,10 @@ async def discover(query: str, *,
         }
         tasks = []
         names: list[str] = []
-        for name in sources:
+        # dict.fromkeys preserves the user's order while dropping duplicates —
+        # the old if/elif chain ran each branch at most once even if the user
+        # passed `--sources openalex,openalex`, so we keep that contract.
+        for name in dict.fromkeys(sources):
             factory = dispatch.get(name)
             if factory is None:
                 continue
@@ -809,7 +814,8 @@ def main() -> int:
     parser.add_argument("--max-per-source", type=int, default=DEFAULT_MAX_PER_SOURCE)
     parser.add_argument("--sources", default=",".join(DEFAULT_SOURCES),
                         help="comma-separated subset of "
-                             "{openalex,s2,arxiv,crossref,europepmc,core}")
+                             "{openalex,s2,arxiv,crossref,europepmc,core,"
+                             "datacite,hf}")
     parser.add_argument("--json", action="store_true",
                         help="emit one-line JSON on stdout (else pretty-printed)")
     args = parser.parse_args()

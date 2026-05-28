@@ -22,7 +22,12 @@ _TOKEN_STOPWORDS = frozenset({
 def tokenize_package_names(query: str, *, max_tokens: int = 8) -> list[str]:
     """Extract plausible package-name candidates from a free-text query.
     Drops stopwords and de-duplicates. Used by both pypi.py and deps_dev.py
-    to seed their package lookups."""
+    to seed their package lookups.
+
+    Stopword set adopted from pypi.py (deps_dev.py historically lacked
+    `"review"`); harmless union because no real PyPI package is named
+    `review`.
+    """
     tokens = re.findall(r"[A-Za-z][A-Za-z0-9_\-]{2,}", query.lower())
     out: list[str] = []
     seen: set[str] = set()

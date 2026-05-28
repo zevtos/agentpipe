@@ -7,8 +7,10 @@ majority of citable RU work that has a DOI.
 
 ## КиберЛенинка (cyberleninka.ru)
 
-**Status in v1.0:** stub. `_query_kiberleninka()` in `discover.py` returns an
-empty list pending OAI-PMH implementation.
+**Status:** not wired. The earlier `_query_kiberleninka()` stub in
+`discover.py` was deleted (it returned `[]` unconditionally and only
+inflated the dispatch chain). A future Stage 3.1 implementation should
+re-add a real OAI-PMH client.
 
 КиберЛенинка is the largest open RU-language repository (~3M articles). It
 exposes an undocumented OAI-PMH endpoint at `cyberleninka.ru/oai` — operational
@@ -48,9 +50,11 @@ The РГБ catalog (`search.rsl.ru`) is searchable but has no API. Scraping is i
 a legal gray zone (terms forbid bulk download but explicit licensing for
 research is undefined). ultrasearch does not include a РГБ source.
 
-Disserations are better served by:
-- OATD (Open Access Theses & Dissertations) — included as `oatd` source
-- BASE (Bielefeld) — included as `base` source
+Dissertations are better served by:
+- OATD (Open Access Theses & Dissertations) — future Stage 3.1 source
+  (the earlier `oatd` stub was deleted from `discover.py`; not yet wired).
+- BASE (Bielefeld) — likewise, future Stage 3.1 source; the `base` stub was
+  removed pending a real implementation.
 - The user importing PDFs locally and pointing ultrasearch at them via a
   future `--corpus-import` flag (Stage 4 idea, not planned)
 
@@ -60,8 +64,7 @@ Disserations are better served by:
 
 1. `translate.detect_lang(query)` → ISO 639-1 code (uses `langdetect`)
 2. If detected language is not English:
-   - Original query goes to RU-capable sources (КиберЛенинка stub) and any
-     other source that accepts UTF-8 (all of them do)
+   - Original query goes to any source that accepts UTF-8 (all of them do)
    - `translate.translate_text(query, src='ru', dst='en')` produces an EN
      parallel query
    - The EN query is sent to OpenAlex / S2 / arXiv / Crossref / Europe PMC /
