@@ -166,6 +166,23 @@ DEFAULT_PROFILE = ITMO_PROFILE
 
 
 # ============================================================
+# Стилизованный run внутри одного абзаца
+# ============================================================
+
+@dataclass(frozen=True)
+class StyledRun:
+    """Кусочек текста с собственным форматированием, для абзацев из
+    нескольких run'ов (например "Группа: P3XXX" где "Группа:" подчёркнут
+    а номер — обычный). Используется на титульнике.
+    """
+    text: str
+    bold: bool = False
+    italic: bool = False
+    underline: bool = False
+    size: object = None  # None → FONT_SIZE_BODY (нельзя default до class init)
+
+
+# ============================================================
 # Ошибка валидации
 # ============================================================
 
@@ -1225,20 +1242,39 @@ class Report:
                 - self._profile.body_margin_left
                 - self._profile.body_margin_right) / 10.0
 
-    def _add_paragraph(self, text="", *, align=WD_ALIGN_PARAGRAPH.CENTER,
-                       size=FONT_SIZE_BODY, bold=False, italic=False,
-                       underline=False, left_indent=None,
-                       first_line_indent=None):
+    def _make_paragraph(self, *, align=WD_ALIGN_PARAGRAPH.CENTER,
+                        line_spacing=LINE_SPACING_BODY,
+                        space_before=Pt(0), space_after=Pt(0),
+                        left_indent=None, first_line_indent=None):
+        """Создаёт пустой параграф с заданным форматированием.
+
+        Единая точка входа для всех «телом-уровневых» методов
+        (text/task/figure/formula/table/caption/list). Возвращает Paragraph
+        без runs — caller добавляет содержимое (текст, OMML, picture, и т.п.).
+        """
         p = self._doc.add_paragraph()
         p.alignment = align
         pf = p.paragraph_format
-        pf.line_spacing = LINE_SPACING_BODY
-        pf.space_before = Pt(0)
-        pf.space_after = Pt(0)
+        pf.line_spacing = line_spacing
+        pf.space_before = space_before
+        pf.space_after = space_after
         if left_indent is not None:
             pf.left_indent = left_indent
         if first_line_indent is not None:
             pf.first_line_indent = first_line_indent
+        return p
+
+    def _add_paragraph(self, text="", *, align=WD_ALIGN_PARAGRAPH.CENTER,
+                       size=FONT_SIZE_BODY, bold=False, italic=False,
+                       underline=False, left_indent=None,
+                       first_line_indent=None,
+                       line_spacing=LINE_SPACING_BODY,
+                       space_before=Pt(0), space_after=Pt(0)):
+        p = self._make_paragraph(align=align, line_spacing=line_spacing,
+                                 space_before=space_before,
+                                 space_after=space_after,
+                                 left_indent=left_indent,
+                                 first_line_indent=first_line_indent)
         if text:
             run = p.add_run(text)
             _set_run_font(run, size=size, bold=bold, italic=italic,
@@ -1247,22 +1283,15 @@ class Report:
 
     def _add_runs_paragraph(self, runs, *, align=WD_ALIGN_PARAGRAPH.CENTER,
                             left_indent=None):
-        p = self._doc.add_paragraph()
-        p.alignment = align
-        pf = p.paragraph_format
-        pf.line_spacing = LINE_SPACING_BODY
-        pf.space_before = Pt(0)
-        pf.space_after = Pt(0)
-        if left_indent is not None:
-            pf.left_indent = left_indent
+        p = self._make_paragraph(align=align, left_indent=left_indent)
         for r in runs:
-            run = p.add_run(r["text"])
+            run = p.add_run(r.text)
             _set_run_font(
                 run,
-                size=r.get("size", FONT_SIZE_BODY),
-                bold=r.get("bold", False),
-                italic=r.get("italic", False),
-                underline=r.get("underline", False),
+                size=r.size or FONT_SIZE_BODY,
+                bold=r.bold,
+                italic=r.italic,
+                underline=r.underline,
             )
         return p
 
@@ -1370,7 +1399,7 @@ class Report:
         """Группа → "Выполнил(и): ФИО" с правым сдвигом."""
         cfg = self._title
         self._add_runs_paragraph(
-            [{"text": f"Группа: {cfg.student_group}", "underline": True}],
+            [StyledRun(f"Группа: {cfg.student_group}", underline=True)],
             align=WD_ALIGN_PARAGRAPH.LEFT,
             left_indent=_RIGHT_BLOCK_INDENT,
         )
@@ -1379,8 +1408,8 @@ class Report:
         first, *rest = names
         self._add_runs_paragraph(
             [
-                {"text": student_label, "underline": True},
-                {"text": f": {first}"},
+                StyledRun(student_label, underline=True),
+                StyledRun(f": {first}"),
             ],
             align=WD_ALIGN_PARAGRAPH.LEFT,
             left_indent=_RIGHT_BLOCK_INDENT,
@@ -1390,7 +1419,7 @@ class Report:
         rest_indent = _RIGHT_BLOCK_INDENT + _RIGHT_BLOCK_REST_INDENT
         for extra_name in rest:
             self._add_runs_paragraph(
-                [{"text": extra_name}],
+                [StyledRun(extra_name)],
                 align=WD_ALIGN_PARAGRAPH.LEFT,
                 left_indent=rest_indent,
             )
@@ -1404,8 +1433,8 @@ class Report:
                             align=WD_ALIGN_PARAGRAPH.LEFT)
         self._add_runs_paragraph(
             [
-                {"text": cfg.teacher_label, "underline": True},
-                {"text": ":"},
+                StyledRun(cfg.teacher_label, underline=True),
+                StyledRun(":"),
             ],
             align=WD_ALIGN_PARAGRAPH.LEFT,
             left_indent=_RIGHT_BLOCK_INDENT,
@@ -1460,12 +1489,12 @@ class Report:
         «Yes» в диалоге), без ручного ПКМ по полю TOC.
         """
         self._enable_update_fields_on_open()
-        heading = self._doc.add_paragraph()
-        heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        heading.paragraph_format.line_spacing = LINE_SPACING_BODY
-        heading.paragraph_format.space_after = Pt(12)
-        run = heading.add_run(self._profile.toc_title)
-        _set_run_font(run, size=Pt(self._profile.heading_size_h1), bold=True)
+        self._add_paragraph(
+            self._profile.toc_title,
+            size=Pt(self._profile.heading_size_h1),
+            bold=True,
+            space_after=Pt(12),
+        )
 
         p = self._doc.add_paragraph()
         run = p.add_run()
@@ -1504,37 +1533,30 @@ class Report:
         _set_run_font(run, size=Pt(self._profile.heading_size_h3), bold=True)
 
     def text(self, text: str, *, bold=False, italic=False):
-        p = self._doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-        pf = p.paragraph_format
-        pf.line_spacing = LINE_SPACING_BODY
-        pf.first_line_indent = FIRST_LINE_INDENT
-        pf.space_before = Pt(0)
-        pf.space_after = Pt(0)
-        run = p.add_run(_sanitize_prose(text))
-        _set_run_font(run, bold=bold, italic=italic)
+        self._add_paragraph(
+            _sanitize_prose(text),
+            align=WD_ALIGN_PARAGRAPH.JUSTIFY,
+            first_line_indent=FIRST_LINE_INDENT,
+            bold=bold, italic=italic,
+        )
 
     def task(self, text: str):
-        p = self._doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-        pf = p.paragraph_format
-        pf.line_spacing = LINE_SPACING_BODY
-        pf.first_line_indent = FIRST_LINE_INDENT
-        pf.space_before = Pt(6)
-        pf.space_after = Pt(6)
-        run = p.add_run(_sanitize_prose(text))
-        _set_run_font(run, bold=True)
+        self._add_paragraph(
+            _sanitize_prose(text),
+            align=WD_ALIGN_PARAGRAPH.JUSTIFY,
+            first_line_indent=FIRST_LINE_INDENT,
+            bold=True,
+            space_before=SPACE_BLOCK, space_after=SPACE_BLOCK,
+        )
 
     def code(self, code: str):
         for line in code.split("\n"):
-            p = self._doc.add_paragraph()
-            p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-            pf = p.paragraph_format
-            pf.line_spacing = LINE_SPACING_CODE
-            pf.first_line_indent = Pt(0)
-            pf.left_indent = Cm(0.5)
-            pf.space_before = Pt(0)
-            pf.space_after = Pt(0)
+            p = self._make_paragraph(
+                align=WD_ALIGN_PARAGRAPH.LEFT,
+                line_spacing=LINE_SPACING_CODE,
+                first_line_indent=Pt(0),
+                left_indent=Cm(0.5),
+            )
             run = p.add_run(line if line else " ")
             run.font.name = "Courier New"
             run.font.size = Pt(11)
@@ -1596,29 +1618,23 @@ class Report:
         elif width_cm > max_width_cm:
             width_cm = max_width_cm
 
-        p = self._doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        pf = p.paragraph_format
-        pf.line_spacing = LINE_SPACING_BODY
-        pf.first_line_indent = Pt(0)
-        pf.space_before = Pt(6)
-        pf.space_after = Pt(0)
+        p = self._make_paragraph(
+            align=WD_ALIGN_PARAGRAPH.CENTER,
+            first_line_indent=Pt(0),
+            space_before=SPACE_BLOCK,
+        )
         run = p.add_run()
         if width_cm is not None:
             run.add_picture(image_path_str, width=Cm(width_cm))
         else:
             run.add_picture(image_path_str)
 
-        cap = self._doc.add_paragraph()
-        cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        cpf = cap.paragraph_format
-        cpf.line_spacing = LINE_SPACING_BODY
-        cpf.first_line_indent = Pt(0)
-        cpf.space_before = Pt(0)
-        cpf.space_after = Pt(6)
-        cap_run = cap.add_run(
-            f"Рисунок {self._figure_counter} — {_sanitize_prose(caption)}")
-        _set_run_font(cap_run)
+        self._add_paragraph(
+            f"Рисунок {self._figure_counter} — {_sanitize_prose(caption)}",
+            align=WD_ALIGN_PARAGRAPH.CENTER,
+            first_line_indent=Pt(0),
+            space_after=SPACE_BLOCK,
+        )
 
     def formula(self, latex: str, *, where: Optional[str] = None) -> int:
         """Вставляет формулу из LaTeX как нативное Word-уравнение (OMML).
@@ -1649,17 +1665,17 @@ class Report:
 
         printable_cm = self._printable_cm()
 
-        p = self._doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        pf = p.paragraph_format
-        pf.line_spacing = LINE_SPACING_BODY
-        pf.first_line_indent = Pt(0)
-        pf.left_indent = Cm(0)
-        pf.space_before = Pt(6)
-        pf.space_after = Pt(0) if where else Pt(6)
+        p = self._make_paragraph(
+            align=WD_ALIGN_PARAGRAPH.LEFT,
+            first_line_indent=Pt(0),
+            left_indent=Cm(0),
+            space_before=SPACE_BLOCK,
+            space_after=Pt(0) if where else SPACE_BLOCK,
+        )
 
         # Центр-таб по середине печатной области, правый таб — по правому краю.
         # Layout: TAB(center)<formula>TAB(right)(N)
+        pf = p.paragraph_format
         pf.tab_stops.add_tab_stop(Cm(printable_cm / 2), WD_TAB_ALIGNMENT.CENTER)
         pf.tab_stops.add_tab_stop(Cm(printable_cm), WD_TAB_ALIGNMENT.RIGHT)
 
@@ -1680,16 +1696,13 @@ class Report:
         _set_run_font(num_run)
 
         if where:
-            wp = self._doc.add_paragraph()
-            wp.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-            wpf = wp.paragraph_format
-            wpf.line_spacing = LINE_SPACING_BODY
-            wpf.first_line_indent = Pt(0)
-            wpf.left_indent = Cm(0)
-            wpf.space_before = Pt(0)
-            wpf.space_after = Pt(6)
-            run = wp.add_run(f"где {_sanitize_prose(where)}")
-            _set_run_font(run)
+            self._add_paragraph(
+                f"где {_sanitize_prose(where)}",
+                align=WD_ALIGN_PARAGRAPH.JUSTIFY,
+                first_line_indent=Pt(0),
+                left_indent=Cm(0),
+                space_after=SPACE_BLOCK,
+            )
 
         return n
 
@@ -1700,16 +1713,12 @@ class Report:
         self._table_counter += 1
 
         if caption:
-            cap = self._doc.add_paragraph()
-            cap.alignment = WD_ALIGN_PARAGRAPH.LEFT
-            cpf = cap.paragraph_format
-            cpf.line_spacing = LINE_SPACING_BODY
-            cpf.first_line_indent = Pt(0)
-            cpf.space_before = Pt(6)
-            cpf.space_after = Pt(0)
-            cap_run = cap.add_run(
-                f"Таблица {self._table_counter} — {_sanitize_prose(caption)}")
-            _set_run_font(cap_run)
+            self._add_paragraph(
+                f"Таблица {self._table_counter} — {_sanitize_prose(caption)}",
+                align=WD_ALIGN_PARAGRAPH.LEFT,
+                first_line_indent=Pt(0),
+                space_before=SPACE_BLOCK,
+            )
 
         n_cols = max(len(r) for r in rows)
         table = self._doc.add_table(rows=len(rows), cols=n_cols)
@@ -1719,7 +1728,7 @@ class Report:
                 cell = table.rows[i].cells[j]
                 cell.text = ""
                 p = cell.paragraphs[0]
-                p.paragraph_format.line_spacing = 1.15
+                p.paragraph_format.line_spacing = LINE_SPACING_TABLE
                 p.paragraph_format.first_line_indent = Pt(0)
                 value = row_data[j] if j < len(row_data) else ""
                 run = p.add_run(_sanitize_prose(value))
@@ -1770,10 +1779,8 @@ class Report:
         return None
 
     def _add_list_paragraph(self, text: str, num_id: int):
-        p = self._doc.add_paragraph()
-        pf = p.paragraph_format
-        pf.line_spacing = LINE_SPACING_BODY
-        pf.space_after = Pt(0)
+        # Левый дефолт — `python-docx` сам выставит alignment по стилю списка.
+        p = self._make_paragraph(align=None)
 
         pPr = p._p.get_or_add_pPr()
         numPr = OxmlElement("w:numPr")
