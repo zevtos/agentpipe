@@ -29,7 +29,7 @@ import argparse
 import asyncio
 import json
 import os
-import sqlite3
+import re
 import subprocess
 import sys
 import time
@@ -557,7 +557,7 @@ def _resolve_profile(args) -> tuple[str, str]:
     return resolved, "v2"
 
 
-_PROFILE_NAME_RE = __import__("re").compile(r"^[a-z][a-z0-9_]*$")
+_PROFILE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 def _resolve_to_available(

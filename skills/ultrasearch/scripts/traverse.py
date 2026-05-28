@@ -24,11 +24,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import functools
 import json
 import math
 import sqlite3
-import struct
 import sys
 import time
 from typing import Any, Iterable, Literal, TypedDict

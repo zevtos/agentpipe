@@ -362,10 +362,6 @@ def parse_pdf(pdf_path: Path, *,
     }
 
 
-def _run_one(path: Path) -> dict:
-    return parse_pdf(path)
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(prog="parse.py",
                                      description="Parse a PDF to markdown via pymupdf4llm.")

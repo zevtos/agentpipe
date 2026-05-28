@@ -23,13 +23,12 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
-import os
 import sqlite3
 import struct
 import sys
 import time
 from pathlib import Path
-from typing import Any, Iterable, Iterator, TypedDict
+from typing import Any, TypedDict
 
 from _common import (
     casefold_title,

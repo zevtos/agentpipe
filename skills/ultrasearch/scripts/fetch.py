@@ -53,12 +53,11 @@ MAX_PDF_BYTES = 50 * 1024 * 1024   # 50 MB
 DOWNLOAD_CHUNK = 1 << 16
 USER_AGENT = "ultrasearch/0.1 (+https://github.com/zevtos/agentpipe)"
 DEFAULT_CONCURRENCY = 4
-MAX_RETRIES = 2
 
 
 FETCH_SOURCE = Literal[
-    "openalex_pdf", "unpaywall", "arxiv", "europepmc",
-    "publisher_oa", "zenodo", "arxiv_html", "grey"
+    "openalex_pdf", "unpaywall", "arxiv",
+    "publisher_oa", "zenodo", "grey"
 ]
 
 
@@ -217,38 +216,6 @@ async def _try_arxiv(c: Candidate) -> str | None:
 
 # -------- tier 4: Europe PMC PMC ID resolution --------
 
-EUROPEPMC_FULLTEXT_BASE = "https://www.ebi.ac.uk/europepmc/webservices/rest"
-
-
-async def _try_europepmc(client: httpx.AsyncClient, c: Candidate) -> str | None:
-    """If DOI is in Europe PMC, follow to the PMC fulltext URL."""
-    doi = c.get("doi")
-    if not doi:
-        return None
-    url = f"{EUROPEPMC_FULLTEXT_BASE}/search"
-    params = {"query": f'doi:"{doi}"', "format": "json", "resultType": "lite"}
-    try:
-        r = await client.get(url, params=params, timeout=HTTP_TIMEOUT)
-    except httpx.HTTPError as e:
-        log(f"europepmc lookup error: {e}")
-        return None
-    if r.status_code != 200:
-        return None
-    try:
-        data = r.json()
-    except Exception:
-        return None
-    items = (data.get("resultList") or {}).get("result") or []
-    if not items:
-        return None
-    item = items[0]
-    pmcid = item.get("pmcid")
-    if pmcid:
-        # PMC has a direct PDF route
-        return f"{EUROPEPMC_FULLTEXT_BASE}/{pmcid}/fullTextXML"
-    return None
-
-
 # -------- tier 5: publisher OA URL templates --------
 
 _OA_PUBLISHER_TEMPLATES: dict[str, str] = {
@@ -299,22 +266,6 @@ async def _try_zenodo(client: httpx.AsyncClient, c: Candidate) -> str | None:
         if link and (key.lower().endswith(".pdf") or "pdf" in (f.get("type") or "").lower()):
             return link
     return None
-
-
-# -------- tier 7: arXiv HTML (ar5iv) --------
-
-async def _try_arxiv_html(c: Candidate) -> str | None:
-    """arXiv ar5iv HTML route — works when PDF is blocked but HTML lives.
-    Note: we return the HTML URL; downloader treats non-PDF Content-Type as
-    failure, so HTML fetches are only useful via the orchestrator's HTML
-    fallback path (Stage 2: out of scope). For now we keep this as a hook
-    for Stage 3."""
-    aid = c.get("arxiv_id")
-    if not aid:
-        return None
-    aid = aid.split("v")[0]
-    # ar5iv host may return PDF via .pdf suffix on rare papers; otherwise HTML.
-    return f"https://ar5iv.labs.arxiv.org/html/{aid}"
 
 
 # -------- public API --------

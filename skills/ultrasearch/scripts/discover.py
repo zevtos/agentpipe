@@ -28,7 +28,6 @@ import asyncio
 import json
 import os
 import sys
-import time
 from typing import Any, Iterable, Literal, TypedDict
 
 import httpx
@@ -73,16 +72,13 @@ CROSSREF_BASE = "https://api.crossref.org/works"
 EUROPEPMC_BASE = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 CORE_BASE = "https://api.core.ac.uk/v3/search/works"
 # Stage 3 sources
-KIBERLENINKA_BASE = "https://cyberleninka.ru/article"   # search via HTML scraping
-OATD_BASE = "https://oatd.org/oatd/search"
-BASE_BASE = "https://api.base-search.net/cgi-bin/BaseHttpSearchInterface.fcgi"
 DATACITE_BASE = "https://api.datacite.org/dois"
 HF_BASE = "https://huggingface.co/api/papers"
 
 
 class Candidate(TypedDict, total=False):
     source: Literal["openalex", "s2", "arxiv", "crossref", "europepmc", "core",
-                    "kiberleninka", "oatd", "base", "datacite", "hf"]
+                    "datacite", "hf"]
     doi: str | None
     arxiv_id: str | None
     openalex_id: str | None
@@ -113,7 +109,7 @@ def _source_rank(s: str) -> int:
     return {
         "openalex": 0, "s2": 1, "crossref": 2,
         "europepmc": 3, "core": 4, "arxiv": 5,
-        "datacite": 6, "base": 7, "oatd": 8, "hf": 9, "kiberleninka": 10,
+        "datacite": 6, "hf": 7,
     }.get(s, 99)
 
 
@@ -677,32 +673,6 @@ async def _query_hf(client: httpx.AsyncClient, query: str, n: int
     return out
 
 
-# -------- OATD (Open Access Theses & Dissertations) --------
-# Stage 3: deferred to a stub. oatd.org has no JSON API; HTML scraping required.
-# We register the source so users can opt in via --sources but emit empty for now.
-
-async def _query_oatd(query: str, n: int) -> list[Candidate]:
-    # TODO Stage 3.1: implement OATD HTML parsing (trafilatura + selector list).
-    return []
-
-
-# -------- BASE (Bielefeld Academic Search Engine) --------
-# Stage 3: stub — BASE requires OAI-PMH or a free API key; scaffold reserved.
-
-async def _query_base(query: str, n: int) -> list[Candidate]:
-    return []
-
-
-# -------- КиберЛенинка (RU) --------
-# Stage 3: stub — cyberleninka has an undocumented OAI-PMH endpoint (research
-# §2 line 47); reliable scraping requires careful selector list. The orchestrator
-# pre-translates RU queries via translate.py before calling Western sources,
-# so this is opportunistic coverage for native RU literature.
-
-async def _query_kiberleninka(query: str, n: int) -> list[Candidate]:
-    return []
-
-
 # -------- arXiv --------
 
 def _arxiv_id_from_url(s: str | None) -> str | None:
@@ -770,10 +740,6 @@ async def _query_arxiv(query: str, n: int) -> list[Candidate]:
 # -------- public API --------
 
 DEFAULT_SOURCES = ("openalex", "s2", "arxiv", "crossref", "europepmc", "core")
-STAGE3_SOURCES = (
-    "openalex", "s2", "arxiv", "crossref", "europepmc", "core",
-    "datacite", "hf", "kiberleninka", "oatd", "base",
-)
 
 
 async def discover(query: str, *,
@@ -847,24 +813,6 @@ async def discover(query: str, *,
                 timeout=PER_SOURCE_TIMEOUT_S,
             ))
             names.append("hf")
-        if "oatd" in sources:
-            tasks.append(asyncio.wait_for(
-                _query_oatd(query, max_per_source),
-                timeout=PER_SOURCE_TIMEOUT_S,
-            ))
-            names.append("oatd")
-        if "base" in sources:
-            tasks.append(asyncio.wait_for(
-                _query_base(query, max_per_source),
-                timeout=PER_SOURCE_TIMEOUT_S,
-            ))
-            names.append("base")
-        if "kiberleninka" in sources:
-            tasks.append(asyncio.wait_for(
-                _query_kiberleninka(query, max_per_source),
-                timeout=PER_SOURCE_TIMEOUT_S,
-            ))
-            names.append("kiberleninka")
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for name, res in zip(names, results):
             if isinstance(res, BaseException):
