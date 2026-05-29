@@ -9,9 +9,9 @@ description: Thesis-level literature research (систематический о
 
 1. **NEVER fabricate DOIs or citations.** Every DOI in the final report MUST exist in `papers.doi` of `corpus.db`. A regex-validated check is in the Checklist section; run it before delivering output.
 2. **NEVER skip the env-var pre-flight.** `OPENALEX_API_KEY` and `UNPAYWALL_EMAIL` are not optional. Failing fast on missing env vars is correct behavior, not a bug.
-3. **NEVER bypass the venv.** Every script is invoked through `ensure_env.py` (or `.venv/bin/python` directly). Calling extract/index scripts with system `python3` will fail — `sentence-transformers`, `pymupdf4llm`, and `sqlite-vec` are only installed inside `<skill_dir>/.venv/`.
+3. **NEVER bypass the venv.** Every script is invoked through `ensure_env.py`, which resolves the skill's venv (a global state dir outside the code — ADR-008). Calling extract/index scripts with system `python3` will fail — `sentence-transformers`, `pymupdf4llm`, and `sqlite-vec` live only in that venv.
 4. **NEVER deliver a report whose paragraphs lack `[Sn]` citation markers.** `synthesize.validate_report()` returns the offenders — fix or remove them.
-5. **NEVER delete `corpus.db`.** It is user content (ADR-007). The repo `data/.gitignore` excludes it; reinstall does not touch it. If user explicitly asks to reset: `rm ~/.claude/skills/ultrasearch/data/corpus.db*`.
+5. **NEVER delete `corpus.db`.** It is user content (ADR-008), stored in a global state dir outside the code; reinstall never touches it. If the user explicitly asks to reset, resolve the path as in *Persistent corpus* and `rm "$DB"*`.
 
 ## Required environment variables
 
@@ -83,7 +83,7 @@ python3 ~/.claude/skills/ultrasearch/scripts/ensure_env.py ultrasearch.py \
 | `--top-k N` | 20 | chunks for synthesis |
 | `--no-fetch` | off | skip PDF download; index abstracts only |
 | `--no-synthesize` | off | emit pipeline JSON instead of markdown |
-| `--db PATH` | `<skill_dir>/data/corpus.db` | override corpus location |
+| `--db PATH` | global `…/agentpipe/ultrasearch/data/corpus.db` (see *Persistent corpus*) | override corpus location |
 | `--json` | off | emit pipeline statistics on stderr |
 | `--quiet` | off | suppress per-step log lines |
 | `--depth shallow\|default\|deep` | default | Stage 2: shallow=no traversal; default=1 hop; deep=2 hops |
@@ -111,6 +111,13 @@ v2 introduces profile-routed pipelines. The `academic` profile (default) is the 
 | `dev` | GitHub, Stack Exchange, HN Algolia, deps.dev, PyPI, docs_crawl | `library_matrix.md.j2` (alt: `adr.md.j2`) | Stage 1 (ships) |
 | `docs` | llms.txt → sitemap → Crawl4AI BFS → trafilatura | `literature_review.md.j2` | Stage 1 (ships; crawl4ai lazy-installed on first use) |
 | `auto` | (classifier picks) | (per primary profile) | Stage 1 ships keyword fallback; subagent integration is Stage 1.5 |
+
+**Query style by profile — this matters.** Only the `academic` profile does semantic (SPECTER-embedded) matching and handles full natural-language topics. The `dev` profile hits GitHub repo search, Stack Exchange, HN Algolia, and package registries — engines that match **short keyword / library-name** queries, *not* prose. Feed it terse terms or a tool name:
+
+- ✅ `"rust async runtime"`, `"pdf table extraction python"`, `"BFG git secrets"`, `redis`
+- ❌ `"what are the best practices for safely cleaning up a git repository and removing stale artifacts"` → returns ~zero hits; these APIs don't do sentence-level semantic search, and the output is a library-comparison matrix, not a how-to.
+
+So reach for `dev` when the question is **"which library/tool for X"**. For how-to / best-practice questions, use a few keywords, the `docs` profile against known doc roots, or plain `WebSearch` / `WebFetch`. The `auto` classifier can still mis-route a long prose query to `dev`; pass `--profile` explicitly (or shorten the query) when you know you want tool discovery.
 
 **Routing logic**: `ultrasearch.py` resolves `--profile`:
 - omitted / `academic` / legacy `fast|full` → v1 `_pipeline()` (academic)
@@ -206,11 +213,15 @@ discover (async, 6 sources concurrent)
 
 ## Persistent corpus
 
-`~/.claude/skills/ultrasearch/data/corpus.db` lives **outside the repo** (ADR-007). Reinstall (`bash install.sh --skills-only`) does NOT wipe it.
+The corpus lives in a **global state dir outside the installed code** (ADR-008), keyed by skill name so every install target (`~/.claude`, `~/.codex`) shares one. Reinstall / update / multi-target install **never** touch it. Resolve the path:
 
-- Backup: `cp ~/.claude/skills/ultrasearch/data/corpus.db /backup/corpus-$(date +%Y%m%d).db`
-- Reset: `rm ~/.claude/skills/ultrasearch/data/corpus.db*` — next invocation rebuilds from `schema.sql`
-- Inspect: `sqlite3 ~/.claude/skills/ultrasearch/data/corpus.db ".tables"` — should list `papers, chunks, vec_chunks, citations, retractions, schema_meta`
+```bash
+DB="${ULTRASEARCH_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/agentpipe/ultrasearch}/data/corpus.db"
+```
+
+- Backup: `cp "$DB" /backup/corpus-$(date +%Y%m%d).db`
+- Reset: `rm "$DB"*` — next invocation rebuilds from `schema.sql`
+- Inspect: `sqlite3 "$DB" ".tables"` — should list `papers, chunks, vec_chunks, citations, retractions, schema_meta`
 
 ## Output format
 
@@ -299,7 +310,7 @@ See LICENSE — MIT.
    ```
 4. No fabricated DOIs:
    ```bash
-   sqlite3 ~/.claude/skills/ultrasearch/data/corpus.db <<SQL
+   sqlite3 "${ULTRASEARCH_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/agentpipe/ultrasearch}/data/corpus.db" <<SQL
    .mode list
    SELECT count(*) FROM papers WHERE doi IS NOT NULL;
    SQL

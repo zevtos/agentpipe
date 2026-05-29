@@ -11,7 +11,7 @@ description: Converts a heterogeneous corpus of raw documents (PDF, DOCX, PPTX, 
 2. **NEVER silently skip a scanned PDF.** Если scout помечает PDF как `image_only` или `encrypted` — обязательно спросить пользователя одним сообщением (batch). См. `references/batch-questions.md`.
 3. **NEVER bulk-extract без scout.** Сначала всегда фаза 2 (`scout_corpus.py`), потом фаза 3 (решения пользователя), и только потом фаза 4 (extract). Это нужно для оценки стоимости и для безопасного диалога с пользователем.
 4. **NEVER touch binary files inside the kb output.** Картинки заменяются на placeholder (см. `extract_docx.py`), а не сохраняются как base64 в Markdown — base64-блобы катастрофически раздувают токены и бесполезны для LLM.
-5. **NEVER bypass the venv.** Все скрипты запускаются через `ensure_env.py` или через `.venv/bin/python` напрямую. Никогда не вызывайте extract-скрипты системным `python3` — зависимости не установятся в системный Python.
+5. **NEVER bypass the venv.** Все скрипты запускаются через `ensure_env.py` (он находит venv в глобальном state-dir вне кода — ADR-008). Никогда не вызывайте extract-скрипты системным `python3` — зависимости не установятся в системный Python.
 
 ## When to use
 
@@ -43,7 +43,7 @@ python3 <skill_dir>/scripts/ensure_env.py <target_script.py> [args ...]
 python3 <skill_dir>/scripts/ensure_env.py
 ```
 
-(No target script → bootstrap only, prints venv-python path.) Creates `.venv/` next to SKILL.md and installs the lightweight tier: pymupdf4llm, pdfplumber, pypdf, pikepdf, python-magic, python-docx, mammoth, python-pptx, openpyxl, trafilatura, markdownify, charset-normalizer, tiktoken.
+(No target script → bootstrap only, prints venv-python path.) Creates the venv in a global state dir outside the code (ADR-008 — `$DOC2KB_HOME` or `${XDG_DATA_HOME:-~/.local/share}/agentpipe/doc2kb/venv`) and installs the lightweight tier: pymupdf4llm, pdfplumber, pypdf, pikepdf, python-magic, python-docx, mammoth, python-pptx, openpyxl, trafilatura, markdownify, charset-normalizer, tiktoken.
 
 **Системные зависимости (macOS):** `brew install libmagic` — обязательно, иначе python-magic не импортируется. На Linux: `apt install libmagic1`. На WSL то же. Без libmagic scout всё равно работает (fallback на расширение файла), но `mime_confidence` будет всегда `"high"` без перекрёстной проверки.
 
@@ -272,7 +272,7 @@ python3 <skill_dir>/scripts/ensure_env.py --tier mineru
 
 This adds `mineru[all]` plus (on Apple Silicon) `mlx-vlm`, `mlx`, and
 `mlx-lm` into the same venv as the lightweight base. A separate hash
-file (`.venv/.installed_hash_mineru`) keeps the install idempotent —
+file (`<venv>/.installed_hash_mineru`) keeps the install idempotent —
 re-running `--tier mineru` is a no-op unless `requirements-mineru.txt`
 changes. The `mlx-vlm` pin matters: mineru's auto-engine selector
 (`mineru/utils/engine_utils.py::_select_mac_engine`) only picks the

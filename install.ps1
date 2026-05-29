@@ -869,12 +869,30 @@ function Do-Install {
         New-Item -ItemType Directory -Path $SkillsDst -Force | Out-Null
         Get-ChildItem $SkillsSrc -Directory | ForEach-Object {
             $dst = Join-Path $SkillsDst $_.Name
-            if (Test-Path $dst) { Remove-Item $dst -Recurse -Force }
+            # ADR-008: move any legacy in-skill durable state (e.g. ultrasearch
+            # corpus.db) out to the global state dir BEFORE removing the old code.
+            # The freshly-shipped ensure_env owns the move (no-op when no data);
+            # runtime migration alone loses the race with the Remove-Item below.
+            if (Test-Path $dst) {
+                $py = Get-Command python3 -ErrorAction SilentlyContinue
+                if (-not $py) { $py = Get-Command python -ErrorAction SilentlyContinue }
+                $envScript = Join-Path $_.FullName "scripts\ensure_env.py"
+                if ($py -and (Test-Path $envScript)) {
+                    try { & $py.Source $envScript "--migrate-from" $dst 2>&1 | Out-Null } catch { }
+                }
+                Remove-Item $dst -Recurse -Force
+            }
             Copy-Item $_.FullName -Destination $dst -Recurse -Force
-            # Скиллы могут держать свой venv в .venv/ (создаётся
-            # bootstrap-скриптом). Не тащим dev venv в системную установку.
-            Remove-Item -Path (Join-Path $dst ".venv") -Recurse -Force -ErrorAction SilentlyContinue
-            Remove-Item -Path (Join-Path $dst ".venv.lock") -Force -ErrorAction SilentlyContinue
+            # Strip dev cruft a source checkout carries — the venv and any runtime
+            # data (a dev clone may hold a corpus/cache); these must never ship.
+            # Mirrors the exclusions in scripts/build-skills.sh. Runtime state
+            # lives in the global state dir now (ADR-008).
+            foreach ($cruft in @(".venv", ".venv.lock",
+                                 "data\corpus.db", "data\corpus.db-wal", "data\corpus.db-shm",
+                                 "data\cache", "data\retraction_watch.csv",
+                                 "data\retraction_watch.csv.tmp", "data\_logs")) {
+                Remove-Item -Path (Join-Path $dst $cruft) -Recurse -Force -ErrorAction SilentlyContinue
+            }
             Write-Ok "skills/$($_.Name)/"
             $count++
         }
@@ -972,6 +990,19 @@ function Do-Uninstall {
                 Write-Ok "removed skills/$($_.Name)/"
                 $count++
             }
+        }
+        # Skill runtime state (venvs, ultrasearch corpus) lives in a global dir
+        # outside the code tree (ADR-008), shared across install targets, so
+        # uninstall leaves it untouched. Point the user at it.
+        $stateRoot = $env:AGENTPIPE_HOME
+        if (-not $stateRoot) {
+            $stateRoot = if ($env:XDG_DATA_HOME) { Join-Path $env:XDG_DATA_HOME "agentpipe" }
+                         elseif ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA "agentpipe" }
+                         else { Join-Path (Join-Path $HOME "AppData\Local") "agentpipe" }
+        }
+        if (Test-Path $stateRoot) {
+            Write-Info "skill state preserved (shared across targets): $stateRoot"
+            Write-Info "  remove manually if no longer needed (deletes venvs + ultrasearch corpus)"
         }
     }
 

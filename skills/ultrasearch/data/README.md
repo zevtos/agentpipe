@@ -1,6 +1,12 @@
 # `data/` — user-side persistent corpus
 
-This directory ships **empty** in the repo. After install (`bash install.sh --skills-only`), it lives at `~/.claude/skills/ultrasearch/data/` and accumulates:
+This directory ships only **code** (`schema.sql`, this README, `.gitignore`, `.gitkeep`). At runtime the corpus + caches live in a **global state dir outside the installed code** (ADR-008), keyed by skill name and shared across install targets:
+
+```bash
+STATE="${ULTRASEARCH_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/agentpipe/ultrasearch}/data"
+```
+
+`$STATE/` accumulates:
 
 | File | Created by | Purpose |
 |---|---|---|
@@ -11,14 +17,14 @@ This directory ships **empty** in the repo. After install (`bash install.sh --sk
 | `retraction_watch.csv` | `quality.py` (Stage 2) | weekly Retraction Watch dump |
 | `_logs/` | orchestrator | per-invocation log files |
 
-## Persistence guarantee (ADR-007)
+## Persistence guarantee (ADR-008)
 
-Reinstalling the skill (`bash install.sh --skills-only`) **never wipes** these files. The repo ships only this README, `.gitkeep`, `.gitignore`, and `schema.sql`; everything user-generated stays put.
+The corpus lives in a global state dir **outside** the installed code, keyed by skill name. Reinstall, update, and multi-target installs **never** touch it — the installer only ever replaces `~/.claude/skills/ultrasearch/` (code). On first run after upgrading from the legacy in-code layout, `ensure_env.py` **moves** any old `~/.claude/skills/ultrasearch/data/corpus.db` to `$STATE` (move, never rebuild). Supersedes ADR-007, which kept the corpus inside the code dir where reinstall actually wiped it.
 
 ## Backup
 
 ```bash
-cp ~/.claude/skills/ultrasearch/data/corpus.db /backup/corpus-$(date +%Y%m%d).db
+cp "$STATE/corpus.db" /backup/corpus-$(date +%Y%m%d).db
 ```
 
 ## Reset
@@ -26,8 +32,8 @@ cp ~/.claude/skills/ultrasearch/data/corpus.db /backup/corpus-$(date +%Y%m%d).db
 If you want to start fresh:
 
 ```bash
-rm ~/.claude/skills/ultrasearch/data/corpus.db*
-rm -rf ~/.claude/skills/ultrasearch/data/cache/
+rm "$STATE/corpus.db"*
+rm -rf "$STATE/cache/"
 ```
 
 The next invocation rebuilds `corpus.db` from `schema.sql`.

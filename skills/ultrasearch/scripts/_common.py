@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import sys
 import unicodedata
@@ -191,14 +192,37 @@ def cosine(a: Sequence[float], b: Sequence[float]) -> float:
 # ---------- skill dir resolution ----------
 
 def skill_dir() -> Path:
-    """Return the ultrasearch skill root directory (one level above scripts/)."""
+    """Return the ultrasearch skill *code* root (one level above scripts/).
+    Use for code assets (schema.sql, prompts/, templates/) — NOT for durable
+    state; that lives in data_dir()/the XDG state root (ADR-008)."""
     return Path(__file__).resolve().parent.parent
 
 
+def _skill_state_dir() -> Path:
+    """Durable per-skill state root (venv + data/corpus.db), OUTSIDE the volatile
+    code dir, keyed by skill NAME so every install target shares one. See ADR-008.
+    DUP: path math kept byte-identical with ensure_env.py:_skill_state_dir()."""
+    per_skill = os.environ.get("ULTRASEARCH_HOME")
+    if per_skill:
+        return Path(per_skill).expanduser()
+    root = os.environ.get("AGENTPIPE_HOME")
+    if not root:
+        xdg = os.environ.get("XDG_DATA_HOME")
+        if xdg:
+            base = xdg
+        elif os.name == "nt":
+            base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        else:
+            base = str(Path.home() / ".local" / "share")
+        root = str(Path(base) / "agentpipe")
+    return Path(root).expanduser() / "ultrasearch"
+
+
 def data_dir() -> Path:
-    """Return the data directory (corpus.db, cache/) — relative to the skill
-    root. After install lives at ~/.claude/skills/ultrasearch/data/."""
-    return skill_dir() / "data"
+    """Return the durable data directory (corpus.db, cache/). XDG global, keyed
+    by skill name, OUTSIDE the installed code dir (ADR-008) — survives reinstall.
+    ensure_env.py owns the one-time migration of any legacy in-skill data here."""
+    return _skill_state_dir() / "data"
 
 
 def cache_dir(*parts: str) -> Path:

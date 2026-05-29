@@ -965,12 +965,27 @@ do_install() {
             [[ -d "$d" ]] || continue
             local name
             name=$(basename "$d")
+            # ADR-008: move any legacy in-skill durable state (e.g. ultrasearch
+            # corpus.db) out to the global state dir BEFORE removing the old code.
+            # The freshly-shipped ensure_env owns the move (no-op for skills with
+            # no durable data); runtime migration alone loses the race with this rm.
+            if [[ -d "$SKILLS_DST/$name" ]] && command -v python3 >/dev/null 2>&1; then
+                python3 "$d/scripts/ensure_env.py" --migrate-from "$SKILLS_DST/$name" >/dev/null 2>&1 || true
+            fi
             rm -rf "$SKILLS_DST/$name"
             cp -R "$d" "$SKILLS_DST/$name"
-            # Скиллы могут держать собственный venv в .venv/ (создаётся
-            # bootstrap-скриптом). Не тащим dev-овский venv в системную
-            # установку — пути и питон у пользователя другие.
-            rm -rf "$SKILLS_DST/$name/.venv" "$SKILLS_DST/$name/.venv.lock"
+            # Strip dev cruft a source checkout carries — the venv and any runtime
+            # data (a dev clone may hold a corpus/cache); these must never ship.
+            # Mirrors the exclusions in scripts/build-skills.sh. Runtime state
+            # lives in the global state dir now (ADR-008).
+            rm -rf "$SKILLS_DST/$name/.venv" "$SKILLS_DST/$name/.venv.lock" \
+                   "$SKILLS_DST/$name/data/corpus.db" \
+                   "$SKILLS_DST/$name/data/corpus.db-wal" \
+                   "$SKILLS_DST/$name/data/corpus.db-shm" \
+                   "$SKILLS_DST/$name/data/cache" \
+                   "$SKILLS_DST/$name/data/retraction_watch.csv" \
+                   "$SKILLS_DST/$name/data/retraction_watch.csv.tmp" \
+                   "$SKILLS_DST/$name/data/_logs"
             log "skills/$name/"
             count=$((count + 1))
         done
@@ -1076,6 +1091,14 @@ do_uninstall() {
                 count=$((count + 1))
             fi
         done
+        # Skill runtime state (venvs, ultrasearch corpus) lives in a global dir
+        # outside the code tree (ADR-008) and is shared across install targets,
+        # so uninstall leaves it untouched. Point the user at it.
+        local state_root="${AGENTPIPE_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/agentpipe}"
+        if [[ -d "$state_root" ]]; then
+            info "skill state preserved (shared across targets): $state_root"
+            info "  remove manually if no longer needed (deletes venvs + ultrasearch corpus)"
+        fi
     fi
 
     cleanup_legacy_codex_skills

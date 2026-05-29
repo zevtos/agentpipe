@@ -3,7 +3,11 @@
 ensure_env.py — изолированное окружение для скилла ultrasearch.
 
 Расположение скрипта: <skill_dir>/scripts/ensure_env.py
-Расположение venv:    <skill_dir>/.venv/   (всегда, независимо от CWD)
+Расположение venv+data: глобально, вне кода скилла (переживает reinstall, ADR-008):
+                      $ULTRASEARCH_HOME | $AGENTPIPE_HOME/ultrasearch |
+                      ${XDG_DATA_HOME:-~/.local/share}/agentpipe/ultrasearch/{venv,data}
+                      (Windows: %LOCALAPPDATA%\\agentpipe\\ultrasearch\\...).
+                      Ключ — имя скилла, поэтому claude- и codex-таргеты делят venv+corpus.
 
 Зачем это:
     Скилл тянет тяжёлые зависимости (torch ~150 MB на arm64, sentence-transformers,
@@ -33,13 +37,51 @@ import sys
 from pathlib import Path
 
 
-SKILL_DIR = Path(__file__).resolve().parent.parent
+SKILL_NAME = "ultrasearch"
+SKILL_HOME_VAR = "ULTRASEARCH_HOME"
+
+SKILL_DIR = Path(__file__).resolve().parent.parent   # installed code dir (volatile)
 SCRIPTS_DIR = Path(__file__).resolve().parent
-VENV_DIR = SKILL_DIR / ".venv"
 REQ_FILE = SCRIPTS_DIR / "requirements.txt"
-HASH_FILE = VENV_DIR / ".installed_hash"
-LOCK_FILE = SKILL_DIR / ".venv.lock"
 PTH_NAME = "ultrasearch.pth"
+
+
+def _skill_state_dir() -> Path:
+    """Durable per-skill state root (venv + data/corpus.db), OUTSIDE the volatile
+    code dir so re-install / update / multi-target install never wipe it.
+    Keyed by skill NAME, so every install target (~/.claude, ~/.codex, ...)
+    converges on one dir. Precedence (highest first):
+        $ULTRASEARCH_HOME (verbatim leaf) → $AGENTPIPE_HOME/<name>
+        → ${XDG_DATA_HOME:-~/.local/share}/agentpipe/<name>   (POSIX)
+        → %LOCALAPPDATA%\\agentpipe\\<name>                    (Windows, non-roaming)
+    Stdlib-only — runs before the venv exists. See ADR-008.
+    DUP: path math kept byte-identical with _common.py:_skill_state_dir()."""
+    per_skill = os.environ.get(SKILL_HOME_VAR)
+    if per_skill:
+        return Path(per_skill).expanduser()
+    root = os.environ.get("AGENTPIPE_HOME")
+    if not root:
+        xdg = os.environ.get("XDG_DATA_HOME")
+        if xdg:
+            base = xdg
+        elif os.name == "nt":
+            base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        else:
+            base = str(Path.home() / ".local" / "share")
+        root = str(Path(base) / "agentpipe")
+    return Path(root).expanduser() / SKILL_NAME
+
+
+STATE_DIR = _skill_state_dir()
+VENV_DIR = STATE_DIR / "venv"
+DATA_DIR = STATE_DIR / "data"
+HASH_FILE = VENV_DIR / ".installed_hash"
+LOCK_FILE = STATE_DIR / ".venv.lock"
+
+# Legacy in-skill locations (pre-ADR-008) — migrated away on next bootstrap.
+_LEGACY_VENV = SKILL_DIR / ".venv"
+_LEGACY_LOCK = SKILL_DIR / ".venv.lock"
+_LEGACY_DATA = SKILL_DIR / "data"
 
 
 def log(msg: str) -> None:
@@ -188,8 +230,106 @@ def _release_lock(fh) -> None:
         pass
 
 
+def _has_legacy_state() -> bool:
+    """True while pre-ADR-008 in-skill state still exists and needs migrating."""
+    return (_LEGACY_VENV.exists() or _LEGACY_LOCK.exists()
+            or (_LEGACY_DATA / "corpus.db").exists())
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _safe_move_file(src: Path, dst: Path) -> None:
+    """Move one file src→dst. Same-filesystem rename is atomic; a cross-fs move
+    copies to a .partial sibling, verifies sha256, atomically renames into
+    place, then unlinks the source — so an interrupted move never leaves a
+    half-written file at the final name (which the 'new exists' guard trusts)."""
+    try:
+        os.rename(src, dst)
+        return
+    except OSError:
+        pass  # cross-device — fall through to verified copy
+    tmp = dst.with_name(dst.name + ".partial")
+    shutil.copy2(src, tmp)
+    if _sha256(tmp) != _sha256(src):
+        tmp.unlink(missing_ok=True)
+        raise OSError(f"checksum mismatch copying {src} -> {dst}")
+    os.replace(tmp, dst)
+    src.unlink()
+
+
+def _migrate_corpus(legacy_data: "Path | None" = None) -> None:
+    """Relocate a legacy in-skill corpus.db to DATA_DIR. MOVE, never rebuild —
+    it is irreplaceable user data. Never overwrites an existing new corpus.
+    `legacy_data` overrides the source dir; the installer passes it via
+    --migrate-from to move the corpus out BEFORE it removes the old skill dir
+    (runtime migration alone is too late — the installer's rm wins the race)."""
+    legacy = legacy_data if legacy_data is not None else _LEGACY_DATA
+    legacy_db = legacy / "corpus.db"
+    new_db = DATA_DIR / "corpus.db"
+    if not legacy_db.exists():
+        return
+    if new_db.exists():
+        log(f"Legacy corpus at {legacy_db} left untouched — a corpus already "
+            f"exists at {new_db}. Delete the legacy copy manually if it is stale.")
+        return
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    # Fold the WAL into the main db so a single-file move stays consistent.
+    try:
+        import sqlite3
+        con = sqlite3.connect(str(legacy_db))
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        con.close()
+    except Exception as e:  # best-effort; sidecars are moved too just in case
+        log(f"WAL checkpoint on legacy corpus failed ({e}); moving files as-is")
+    try:
+        _safe_move_file(legacy_db, new_db)
+    except OSError as e:
+        log(f"Corpus migration failed ({e}); legacy corpus left at {legacy_db}")
+        return
+    for sidecar in ("corpus.db-wal", "corpus.db-shm"):
+        src = legacy / sidecar
+        if src.exists():
+            try:
+                _safe_move_file(src, DATA_DIR / sidecar)
+            except OSError:
+                src.unlink(missing_ok=True)  # stale post-checkpoint; safe to drop
+    legacy_cache = legacy / "cache"
+    if legacy_cache.is_dir() and not (DATA_DIR / "cache").exists():
+        try:
+            os.rename(legacy_cache, DATA_DIR / "cache")
+        except OSError:
+            shutil.copytree(legacy_cache, DATA_DIR / "cache", dirs_exist_ok=True)
+            shutil.rmtree(legacy_cache, ignore_errors=True)
+    log(f"Migrated corpus → {new_db}")
+
+
+def _migrate_legacy_state() -> None:
+    """One-time relocation of pre-ADR-008 in-skill state, under the lock.
+    corpus.db is MOVED (irreplaceable); the non-relocatable venv is removed and
+    rebuilt at STATE_DIR by bootstrap(). Idempotent."""
+    _migrate_corpus()  # data first — irreplaceable
+    had_venv = _LEGACY_VENV.exists()
+    for legacy in (_LEGACY_VENV, _LEGACY_LOCK):
+        try:
+            if legacy.is_dir():
+                shutil.rmtree(legacy, ignore_errors=True)
+            elif legacy.exists():
+                legacy.unlink()
+        except OSError as e:
+            log(f"Could not remove legacy {legacy}: {e}")
+    if had_venv and not _LEGACY_VENV.exists():
+        log(f"Migrated to global state layout (ADR-008): legacy in-skill venv "
+            f"removed; a fresh venv will be built at {VENV_DIR}")
+
+
 def bootstrap() -> None:
-    if not needs_update():
+    if not needs_update() and not _has_legacy_state():
         if not pth_exists():
             lock = _acquire_lock()
             try:
@@ -200,6 +340,7 @@ def bootstrap() -> None:
         return
     lock = _acquire_lock()
     try:
+        _migrate_legacy_state()
         if not needs_update():
             if not pth_exists():
                 write_pth()
@@ -216,6 +357,17 @@ def bootstrap() -> None:
 
 
 def main() -> int:
+    # Install-time hook: relocate a legacy in-skill corpus to the global state
+    # dir BEFORE the installer removes the old skill dir (runtime migration
+    # alone loses the race against the installer's rm -rf). Stdlib-only, no venv
+    # build; safe to run repeatedly. Used by install.sh / install.ps1.
+    if len(sys.argv) >= 3 and sys.argv[1] == "--migrate-from":
+        lock = _acquire_lock()
+        try:
+            _migrate_corpus(Path(sys.argv[2]).expanduser() / "data")
+        finally:
+            _release_lock(lock)
+        return 0
     if not REQ_FILE.exists():
         log(f"requirements.txt not found at {REQ_FILE}")
         return 1

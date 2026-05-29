@@ -7,16 +7,24 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-05-29
+
 ### Added
 - **`/tidy` command — repository tidy-up.** Revalidates docs against the real repo (count/list drift, stale references, broken internal links, sync-pair mismatches, out-of-date instructions) and prunes cruft, with **git as the safety net**: clean-tree prerequisite → one reviewable commit → final diff with keep/amend/revert. Removals follow a reversibility ladder — `git rm --cached` + `.gitignore` for tracked artifacts, a labelled `git stash` for untracked junk (never `git clean`), and history-level cruft (large blobs, secrets) is flagged for hand-off, never auto-rewritten. Hygiene only — code smells go to `/refactor`. Uses the `docs` agent. Design grounded in `research/18`.
 - **`research/18_repository_tidy_and_cruft_cleanup.md`** — verified cruft taxonomy, the git reversibility ladder, and safe-cleanup tooling backing `/tidy` (from an adversarially-verified deep-research sweep over primary git/GitHub sources).
 
 ### Changed
+- **Skill runtime state moved to a global, install-target-agnostic root** (ADR-008). Python venvs and `ultrasearch`'s `corpus.db` + cache now live in `${XDG_DATA_HOME:-~/.local/share}/agentpipe/<skill>/` (POSIX) / `%LOCALAPPDATA%\agentpipe\<skill>\` (Windows), keyed by skill **name** so `~/.claude` and `~/.codex` installs share one venv/corpus. Override with `AGENTPIPE_HOME` (root) or `DOC2KB_HOME`/`ULTRASEARCH_HOME`/`GOST_REPORT_HOME` (per-skill, verbatim leaf). On upgrade, the installer **moves** any legacy in-skill `corpus.db` to the new path **before** it replaces the code (move — never rebuild; WAL-checkpointed + checksum-verified, never overwrites an existing corpus — via `ensure_env.py --migrate-from`), so the install's `rm -rf` can't race the migration; the legacy venv is rebuilt at the new path on next run (uv wheel + model caches survive). `ensure_env.py` also self-migrates at runtime as a backup (e.g. for manual zip extraction). An opt-in tier (e.g. `--tier mineru`) is not auto-reinstalled — re-run it once after upgrading.
+- **`ultrasearch` SKILL.md: documented `dev`-profile query style.** The `dev` profile hits GitHub / Stack Exchange / HN / package registries, which match short keyword / library-name queries — long natural-language prose returns ~zero hits. Added explicit guidance (use `dev` for "which library/tool", keywords or `docs`/`WebSearch` for how-to questions) after a live run surfaced the gap.
 - **Docs revalidated against the repo.** Corrected stale counts in `CLAUDE.md` and `README.md`: **3 skills** (added `ultrasearch`) and **17 research docs** (were «2 skills / 15 docs» and «numbered 01-14»). Added research entries 15–17 to the README table, trimmed the verbose README skills table, and reinforced the 1024-byte `SKILL.md` description cap in the «Adding a New Skill» checklist (authoring note + a `validate-skills.py` step).
 - **Fixed a stale `itmo-report` single-skill build example** in `docs/installation.md` and `scripts/build-skills.ps1` — the skill is `gost-report`.
 
 ### Removed
 - **`.gitignore` now ignores generated gost-report artifacts** (`*.docx`, `*.gost-meta.json`) and the two stray ones that had landed in `docs/`.
+
+### Fixed
+- **Installer no longer ships a dev clone's runtime data.** `install.sh` / `install.ps1` `cp -R` the skill source and only stripped `.venv` afterward, so a development checkout's `data/corpus.db`, `cache/`, `_logs/`, etc. leaked into installs. The copy step now strips all runtime data too, mirroring `scripts/build-skills.sh`'s exclusions.
+- **Installer no longer destroys skill runtime state on re-install** (root-cause fix via the state relocation above). `install.sh` / `install.ps1` did `rm -rf <skill>` then `cp`, wiping any in-skill venv — e.g. `doc2kb` `--tier mineru` (~3 GB) — and `ultrasearch`'s `corpus.db`, on every `bash install.sh`. With state now outside the code dir, the copy is safe again; `--uninstall` prints where the preserved global state lives so it can be removed manually.
 
 ## [0.19.1] - 2026-05-29
 

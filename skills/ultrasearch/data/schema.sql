@@ -20,9 +20,10 @@
 --
 -- ADR-003: vector store is sqlite-vec 0.1.9 (vec0 virtual table, 768-dim
 --          float embeddings — matches allenai-specter output dimension).
--- ADR-007: the materialised corpus.db lives at
---          ~/.claude/skills/ultrasearch/data/corpus.db, NEVER inside the
---          repo. This file ships in-repo, but is consumed only post-install.
+-- ADR-008: the materialised corpus.db lives in a global state dir outside the
+--          installed code (e.g. ~/.local/share/agentpipe/ultrasearch/data/),
+--          keyed by skill name, NEVER inside the repo or the code dir. This
+--          schema file ships in-repo (code) and is read from <skill>/data/.
 --
 -- Writer locking discipline (read this before issuing any write):
 --   - Every writer MUST open its transaction with `BEGIN IMMEDIATE;` rather

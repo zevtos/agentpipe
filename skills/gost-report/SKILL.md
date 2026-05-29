@@ -53,7 +53,7 @@ description: Generate Russian academic reports (.docx) formatted to GOST 7.32 �
 
 ## Quickstart
 
-**Запуск всегда через bootstrap.** Скилл управляет своим venv в `<skill_dir>/.venv/` сам — не запускай `pip install` глобально:
+**Запуск всегда через bootstrap.** Скилл сам управляет своим venv в глобальном state-dir вне кода (ADR-008 — `$GOST_REPORT_HOME` или `${XDG_DATA_HOME:-~/.local/share}/agentpipe/gost-report/venv`) — не запускай `pip install` глобально:
 
 ```bash
 python3 <skill_dir>/scripts/ensure_env.py твой_скрипт.py

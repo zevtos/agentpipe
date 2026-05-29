@@ -3,7 +3,11 @@
 ensure_env.py — изолированное окружение для скилла gost-report.
 
 Расположение скрипта: <skill_dir>/scripts/ensure_env.py
-Расположение venv:    <skill_dir>/.venv/   (всегда, независимо от CWD)
+Расположение venv:    глобально, вне кода скилла (переживает reinstall, ADR-008):
+                      $GOST_REPORT_HOME | $AGENTPIPE_HOME/gost-report |
+                      ${XDG_DATA_HOME:-~/.local/share}/agentpipe/gost-report/venv
+                      (Windows: %LOCALAPPDATA%\\agentpipe\\gost-report\\venv).
+                      Ключ — имя скилла, поэтому claude- и codex-таргеты делят venv.
 
 Зачем это:
     Скилл нужен зависимостям (python-docx, latex2mathml), но ставить их
@@ -34,13 +38,48 @@ import sys
 from pathlib import Path
 
 
-SKILL_DIR = Path(__file__).resolve().parent.parent
+SKILL_NAME = "gost-report"
+SKILL_HOME_VAR = "GOST_REPORT_HOME"
+
+SKILL_DIR = Path(__file__).resolve().parent.parent   # installed code dir (volatile)
 SCRIPTS_DIR = Path(__file__).resolve().parent
-VENV_DIR = SKILL_DIR / ".venv"
 REQ_FILE = SCRIPTS_DIR / "requirements.txt"
-HASH_FILE = VENV_DIR / ".installed_hash"
-LOCK_FILE = SKILL_DIR / ".venv.lock"
 PTH_NAME = "gost_report.pth"
+
+
+def _skill_state_dir() -> Path:
+    """Durable per-skill state root (venv), OUTSIDE the volatile code dir so
+    re-install / update / multi-target install never wipe it. Keyed by skill
+    NAME, so every install target (~/.claude, ~/.codex, ...) converges on one
+    dir. Precedence (highest first):
+        $GOST_REPORT_HOME (verbatim leaf) → $AGENTPIPE_HOME/<name>
+        → ${XDG_DATA_HOME:-~/.local/share}/agentpipe/<name>   (POSIX)
+        → %LOCALAPPDATA%\\agentpipe\\<name>                    (Windows, non-roaming)
+    Stdlib-only — runs before the venv exists. See ADR-008."""
+    per_skill = os.environ.get(SKILL_HOME_VAR)
+    if per_skill:
+        return Path(per_skill).expanduser()
+    root = os.environ.get("AGENTPIPE_HOME")
+    if not root:
+        xdg = os.environ.get("XDG_DATA_HOME")
+        if xdg:
+            base = xdg
+        elif os.name == "nt":
+            base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        else:
+            base = str(Path.home() / ".local" / "share")
+        root = str(Path(base) / "agentpipe")
+    return Path(root).expanduser() / SKILL_NAME
+
+
+STATE_DIR = _skill_state_dir()
+VENV_DIR = STATE_DIR / "venv"
+HASH_FILE = VENV_DIR / ".installed_hash"
+LOCK_FILE = STATE_DIR / ".venv.lock"
+
+# Legacy in-skill locations (pre-ADR-008) — migrated away on next bootstrap.
+_LEGACY_VENV = SKILL_DIR / ".venv"
+_LEGACY_LOCK = SKILL_DIR / ".venv.lock"
 
 
 def log(msg: str) -> None:
@@ -196,9 +235,33 @@ def _release_lock(fh) -> None:
         pass
 
 
+def _has_legacy_state() -> bool:
+    """True while pre-ADR-008 in-skill state still exists and needs migrating."""
+    return _LEGACY_VENV.exists() or _LEGACY_LOCK.exists()
+
+
+def _migrate_legacy_state() -> None:
+    """One-time relocation of pre-ADR-008 in-skill state. The venv is
+    non-relocatable (absolute shebangs / pyvenv.cfg home), so the legacy one is
+    removed and a fresh venv is rebuilt at STATE_DIR by bootstrap() — cheap, the
+    uv wheel cache survives. Idempotent; runs under the lock."""
+    had_venv = _LEGACY_VENV.exists()
+    for legacy in (_LEGACY_VENV, _LEGACY_LOCK):
+        try:
+            if legacy.is_dir():
+                shutil.rmtree(legacy, ignore_errors=True)
+            elif legacy.exists():
+                legacy.unlink()
+        except OSError as e:
+            log(f"Could not remove legacy {legacy}: {e}")
+    if had_venv and not _LEGACY_VENV.exists():
+        log(f"Migrated to global state layout (ADR-008): legacy in-skill venv "
+            f"removed; a fresh venv will be built at {VENV_DIR}")
+
+
 def bootstrap() -> None:
     # Self-heal: даже если deps in sync, .pth мог быть удалён руками — переписываем.
-    if not needs_update():
+    if not needs_update() and not _has_legacy_state():
         if not pth_exists():
             lock = _acquire_lock()
             try:
@@ -209,6 +272,7 @@ def bootstrap() -> None:
         return
     lock = _acquire_lock()
     try:
+        _migrate_legacy_state()
         if not needs_update():
             if not pth_exists():
                 write_pth()
@@ -225,6 +289,11 @@ def bootstrap() -> None:
 
 
 def main() -> int:
+    # Install-time hook (uniform across skills): gost-report has no durable data
+    # to migrate — its venv is rebuilt at the global state dir on next bootstrap
+    # — so accept --migrate-from and no-op, letting the installer call it uniformly.
+    if len(sys.argv) >= 3 and sys.argv[1] == "--migrate-from":
+        return 0
     if not REQ_FILE.exists():
         log(f"requirements.txt not found at {REQ_FILE}")
         return 1
