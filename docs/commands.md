@@ -224,3 +224,20 @@ Mandatory for any schema changes. Enforces zero-downtime safety.
 Types: `api`, `readme`, `adr`, `runbook`, `all`
 
 Runs the **docs agent** to generate/update documentation, then verifies everything against actual code. Flags unverifiable claims with `[NEEDS REVIEW]`.
+
+---
+
+### `/tidy` — Repository Tidy-Up
+> Revalidate docs against the real repo and prune cruft, with git as the safety net.
+
+**Usage**: `/tidy [docs|artifacts|refs|all]`
+
+Pipeline:
+1. Prerequisite gate — clean tracked tree (so the whole run is one revertible commit); else stop
+2. Establish ground truth — derive real counts/file lists, sync-pairs, generated-file patterns (never trusts the docs)
+3. **Docs agent** — fix provably-false claims directly (counts, dead internal links, renamed/removed references, sync-pair drift); propose cruft, flag history-level items
+4. Plan & report — each item tagged by reversibility tier
+5. Apply atomically (gated) — `git rm --cached` + `.gitignore` for tracked artifacts, a labelled `git stash` for untracked junk (never `git clean`), all in one commit
+6. Final confirm — `git show` + stash ref → keep / amend / revert
+
+Safety contract: clean-tree prerequisite, recoverable removals only; secrets and history rewrites are flagged for hand-off, never auto-performed. Hygiene only — code smells go to `/refactor`. Design grounded in `research/18`.

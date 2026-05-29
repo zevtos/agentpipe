@@ -6,7 +6,7 @@
     Produces dist\<skill>.zip with <skill>\ at the top level.
 .EXAMPLE
     scripts\build-skills.ps1
-    scripts\build-skills.ps1 -Name itmo-report
+    scripts\build-skills.ps1 -Name gost-report
 #>
 param(
     [string]$Name = ""

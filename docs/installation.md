@@ -32,7 +32,7 @@ The installer supports two targets via `--target`:
 ```
 ~/.claude/
   agents/                 <- 9 specialist agents (.md files)
-  commands/               <- 15 orchestration commands (.md files)
+  commands/               <- 16 orchestration commands (.md files)
   skills/                 <- skill folders (each contains SKILL.md + optional scripts/references)
     gost-report/
 ```
@@ -313,7 +313,7 @@ Maintainers / forks who want to publish skills as standalone downloads:
 
 ```bash
 bash scripts/build-skills.sh             # build dist/<skill>.zip for every skill
-bash scripts/build-skills.sh itmo-report # build a single skill
+bash scripts/build-skills.sh gost-report # build a single skill
 ```
 
 Output lands in `dist/` (gitignored). On `git push --tags vX.Y.Z`, the `release.yml` workflow runs the same script and attaches the resulting zips to the GitHub release. The workflow refuses to publish if the tag does not match `VERSION`.

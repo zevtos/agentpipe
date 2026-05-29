@@ -7,6 +7,17 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- **`/tidy` command — repository tidy-up.** Revalidates docs against the real repo (count/list drift, stale references, broken internal links, sync-pair mismatches, out-of-date instructions) and prunes cruft, with **git as the safety net**: clean-tree prerequisite → one reviewable commit → final diff with keep/amend/revert. Removals follow a reversibility ladder — `git rm --cached` + `.gitignore` for tracked artifacts, a labelled `git stash` for untracked junk (never `git clean`), and history-level cruft (large blobs, secrets) is flagged for hand-off, never auto-rewritten. Hygiene only — code smells go to `/refactor`. Uses the `docs` agent. Design grounded in `research/18`.
+- **`research/18_repository_tidy_and_cruft_cleanup.md`** — verified cruft taxonomy, the git reversibility ladder, and safe-cleanup tooling backing `/tidy` (from an adversarially-verified deep-research sweep over primary git/GitHub sources).
+
+### Changed
+- **Docs revalidated against the repo.** Corrected stale counts in `CLAUDE.md` and `README.md`: **3 skills** (added `ultrasearch`) and **17 research docs** (were «2 skills / 15 docs» and «numbered 01-14»). Added research entries 15–17 to the README table, trimmed the verbose README skills table, and reinforced the 1024-byte `SKILL.md` description cap in the «Adding a New Skill» checklist (authoring note + a `validate-skills.py` step).
+- **Fixed a stale `itmo-report` single-skill build example** in `docs/installation.md` and `scripts/build-skills.ps1` — the skill is `gost-report`.
+
+### Removed
+- **`.gitignore` now ignores generated gost-report artifacts** (`*.docx`, `*.gost-meta.json`) and the two stray ones that had landed in `docs/`.
+
 ## [0.19.1] - 2026-05-29
 
 ### Fixed

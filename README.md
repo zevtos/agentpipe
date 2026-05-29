@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Gated pipeline orchestration for Claude Code and Codex CLI.</strong><br>
-  9 specialist agents, 15 multi-agent workflows, multi-vendor skills — installed globally in 30 seconds.
+  9 specialist agents, 16 multi-agent workflows, multi-vendor skills — installed globally in 30 seconds.
 </p>
 
 <p align="center">
@@ -49,7 +49,7 @@ Vanilla Claude Code already ships agents, commands, and skills — but they're *
 | | Vanilla Claude Code | + agentpipe |
 |---|---|---|
 | Agents | meta/utility (`general-purpose`, `Explore`, `Plan`, `claude-code-guide`, `statusline-setup`) — generic helpers | **9 domain specialists** with role-bounded tool access (architect, dba, devops, docs, pm, refactorer, reviewer, security, tester) — e.g. reviewer = Read+Grep only, can't accidentally edit |
-| Slash commands | session/config (`/init`, `/clear`, `/agents`, `/mcp`, `/model`, `/config`, ...) | **15 gated multi-agent workflows** (`/feature`, `/sprint`, `/audit`, `/release`, `/refactor`, ...) with conditional steps and parallel gates |
+| Slash commands | session/config (`/init`, `/clear`, `/agents`, `/mcp`, `/model`, `/config`, ...) | **16 gated multi-agent workflows** (`/feature`, `/sprint`, `/audit`, `/release`, `/refactor`, ...) with conditional steps and parallel gates |
 | Skills | dev-tooling utilities (`claude-api`, `loop`, `schedule`, `update-config`, ...) — for power-users of Claude Code | **end-user domain skills** — `gost-report` (Russian academic .docx), `doc2kb` (heterogeneous document corpus → LLM-optimized knowledge base) |
 | Per-agent model selection | global / manual | **auto** — opus for high-reasoning roles (architect, security), sonnet for the rest. Override at install: `--model-profile opus` / `sonnet` / `mixed` (default), persisted across updates. |
 | Multi-vendor distribution | Claude Code only | **same skills** in Codex CLI via `bash install.sh --target codex` |
@@ -89,6 +89,7 @@ Vanilla Claude Code already ships agents, commands, and skills — but they're *
 | `/release` | Version bump, changelog, tag | docs |
 | `/db` | Safe database schema migrations | dba + reviewer + tester |
 | `/docs` | Generate/update project documentation | docs |
+| `/tidy` | Tidy the repo — revalidate docs, prune stray artifacts | docs |
 | `/onboard` | Understand a new codebase | (exploration only) |
 
 \* conditional — only fires when relevant (e.g. `dba` only when migrations changed)
@@ -97,9 +98,9 @@ Vanilla Claude Code already ships agents, commands, and skills — but they're *
 
 | Skill | Purpose | Triggers on |
 |-------|---------|-------------|
-| `gost-report` | Generate Russian academic reports (`.docx`) formatted to GOST 7.32 — лабораторные, отчёты по практике, курсовые, ВКР. Two built-in profiles (`ITMO_PROFILE`, `GOST_PROFILE`) plus `UniversityProfile` for any other vuz. | Russian-language asks for «лабораторную», «отчёт по ГОСТ», «курсовую», «ИТМО», etc. |
-| `doc2kb` | Convert a folder of mixed documents (PDF text-layer, DOCX, PPTX with speaker notes, IPYNB Jupyter notebooks, MD, TXT, HTML) into an LLM-optimized knowledge base — per-source Markdown + `manifest.json` + `INDEX.md` + `AGENTS.md`. Two-session pattern: extraction session prepares the kb, a second session ingests it. Local-first, no paid APIs. **Opt-in heavy tier**: `ensure_env.py --tier mineru` enables the MinerU 2.5+ VLM backend for image-only / math-heavy PDFs (`extract_pdf_mineru.py`), with optional stage-2 hierarchy reconstruction via the upstream MinerU-Popo model (`postprocess_popo.py`). Heavy deps never activate by default. | «обработай папку с документами», «сделай базу знаний из папки», "build a knowledge base", "feed files to Claude", "RAG prep", "doc corpus", "ingest Jupyter notebooks". |
-| `ultrasearch` | Thesis-level literature research. Queries OpenAlex + Semantic Scholar + arXiv, downloads OA PDFs, parses with pymupdf4llm, embeds with `allenai-specter` into a persistent `sqlite-vec` corpus, retrieves top-k, synthesizes a markdown report with grounded `[Sn]` → DOI citations. Stage 1 MVP — citation traversal (PaperQA2 Algorithm 1), docling fallback, Retraction Watch, Russian sources land in v0.5 / v1.0. | "literature review", "related work", "deep research", «систематический обзор», «ВКР», «найди все статьи про X», thesis prep. |
+| `gost-report` | Russian academic reports (`.docx`) to GOST 7.32 — лабораторные, отчёты по практике, курсовые, ВКР. Built-in `ITMO_PROFILE` / `GOST_PROFILE` plus `UniversityProfile` for any other vuz. | «лабораторную», «отчёт по ГОСТ», «курсовую», «ИТМО», etc. |
+| `doc2kb` | A folder of mixed documents (PDF, DOCX, PPTX, IPYNB, MD, TXT, HTML) → LLM-optimized knowledge base: per-source Markdown + `manifest.json` + `INDEX.md` + `AGENTS.md`. Local-first, no paid APIs; the heavy MinerU VLM tier is strictly opt-in (`ensure_env.py --tier mineru`). | «обработай папку с документами», «сделай базу знаний», "build a knowledge base", "RAG prep". |
+| `ultrasearch` | Thesis-level literature research: queries OpenAlex + Semantic Scholar + arXiv, downloads OA PDFs, embeds into a persistent `sqlite-vec` corpus, synthesizes a markdown report with grounded `[Sn]` → DOI citations. Stage-1 MVP. | "literature review", "related work", «систематический обзор», «ВКР», «найди все статьи про X». |
 
 Each release attaches every skill as a standalone `.zip` to the GitHub release page. Two install paths depending on where you use Claude:
 
@@ -132,9 +133,9 @@ If you use both clients, run the installer twice — once per target. The instal
 ```
 agentpipe/
   agents/                9 specialist agent definitions
-  commands/              15 orchestration commands
+  commands/              16 orchestration commands
   skills/                Domain-specific skills (folders with SKILL.md + assets)
-  research/              14 reference documents
+  research/              18 reference documents
   tests/                 Agent eval scenarios — empty by default, see docs/eval.md
   scripts/               build-skills.sh, eval.sh
   .github/workflows/     release.yml — auto-attaches skill zips to GH releases on tag push
@@ -197,7 +198,7 @@ Contributions welcome — new agents, commands, skills, and improvements to exis
 
 ## Research Documents
 
-The `research/` directory contains reference material used by agents:
+The `research/` directory contains the reference material the agent prompts were distilled from. It is **not** auto-imported into sessions:
 
 | File | Topic |
 |------|-------|
@@ -215,3 +216,7 @@ The `research/` directory contains reference material used by agents:
 | 12 | Test refactoring and quality patterns |
 | 13 | Building an AI refactoring agent |
 | 14 | Architecture-level refactoring |
+| 15 | Document corpus → LLM knowledge base (doc2kb design) |
+| 16 | ultrasearch — Claude Code skill design |
+| 17 | ultrasearch v2 design |
+| 18 | Repository tidy & cruft cleanup (backs `/tidy`) |

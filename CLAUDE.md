@@ -1,7 +1,7 @@
 # agentpipe
 
 Gated pipeline orchestration for Claude Code and Codex CLI: specialist agents, slash commands, and skills.
-9 agents, 15 commands, 2 skills (`gost-report`, `doc2kb`), 15 research docs. Multi-target installer:
+9 agents, 16 commands, 3 skills (`gost-report`, `doc2kb`, `ultrasearch`), 18 research docs. Multi-target installer:
 default puts everything in `~/.claude/`; `--target codex` puts skills in `~/.codex/skills/`
 and skips agents/commands (Codex format differences).
 The only build step is packaging skills into release zips — no runtime, no tests, no dependencies.
@@ -37,7 +37,7 @@ git config core.hooksPath scripts/git-hooks  # one-time per clone: enable repo p
 agents/*.md             Agent definitions — YAML frontmatter + system prompt
 commands/*.md           Slash commands — YAML frontmatter + orchestration pipeline
 skills/<name>/SKILL.md  Skills — folder with SKILL.md plus optional scripts/, references/
-research/*.md           Reference docs, numbered 01-14. Not auto-imported by agents.
+research/*.md           Reference docs, numbered 01-18. Not auto-imported by agents.
 docs/                   User-facing documentation (commands.md, agents.md, installation.md, eval.md)
 scripts/build-skills.*  Package skills/* into dist/*.zip for releases
 scripts/validate-skills.py  Enforces the 1024-byte cap on skills/*/SKILL.md descriptions (Codex limit)
@@ -167,13 +167,13 @@ Skills are installed as folders to `~/.claude/skills/<name>/` and discovered by 
 
 ## Adding a New Skill
 
-1. Create `skills/<name>/SKILL.md` with frontmatter: `name` (must equal the folder name) and `description` (trigger sentence)
+1. Create `skills/<name>/SKILL.md` with frontmatter: `name` (must equal the folder name) and `description` (trigger sentence, **≤ 1024 UTF-8 bytes** — Codex silently skips skills that exceed the cap)
 2. Body explains *when* the skill applies, then *how* to use it (minimal example + API reference)
 3. Add `skills/<name>/LICENSE` (MIT by default — copy from `skills/gost-report/LICENSE` and update the year/owner)
 4. Optional: `skills/<name>/scripts/` for supporting code, `skills/<name>/references/` for long-form docs
 5. Update README.md skills table and CHANGELOG.md
 6. Run `bash install.sh` to deploy locally, then test by invoking the skill in a real project
-7. Run `bash scripts/build-skills.sh` to verify the release archive builds cleanly and includes LICENSE
+7. Run `python3 scripts/validate-skills.py` (description within the 1024-byte cap) and `bash scripts/build-skills.sh` (release archive builds cleanly and includes LICENSE)
 
 ## Contributing
 
