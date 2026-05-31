@@ -88,9 +88,9 @@ The skill becomes globally available across all your conversations on that accou
 | No CLAUDE.md | `--no-claude-md` | `-NoClaudeMd` | Skip neutral CLAUDE.md baseline (default: install-if-missing) |
 | No gost-validation | `--no-gost-validation` | `-NoGostValidation` | Skip gost-report Stop-hook validator (default-on for claude target) |
 | Skills only | `--skills-only` | `-SkillsOnly` | Copy only `skills/*` — skip agents, commands, and every `settings.json`/hook layer. Composes with both targets and with `--dry`/`--diff`/`--pull`/`--uninstall` |
-| With sound hooks | `--with-sound-hooks` | `-WithSoundHooks` | Opt-in: Stop sound hook only (one beep when Claude finishes) |
-| With notification sound | `--with-notification-sound` | `-WithNotificationSound` | Opt-in: Notification sound hook only (permission/wait-for-input) |
-| Clean sound hooks | `--clean-sound-hooks` | `-CleanSoundHooks` | Strip every sound hook (Stop+Notification) from `settings.json` |
+| With sound hooks | `--with-sound-hooks` | `-WithSoundHooks` | Opt-in: Stop sound hook only (one beep when Claude or Codex finishes) |
+| With notification sound | `--with-notification-sound` | `-WithNotificationSound` | Opt-in: Claude-only Notification sound hook (permission/wait-for-input) |
+| Clean sound hooks | `--clean-sound-hooks` | `-CleanSoundHooks` | Strip every sound hook (Stop+Notification) from the target hook config |
 | With thinking summaries | `--with-thinking-summaries` | `-WithThinkingSummaries` | Opt-in: `showThinkingSummaries=true` |
 | Model profile | `--model-profile <preset>` | `-ModelProfile <preset>` | Per-agent model assignment: `opus`, `sonnet`, `mixed` (default) |
 | Help | `--help` | `-Help` | Show usage information |
@@ -163,14 +163,14 @@ If any hard-fail rule trips, the hook returns `{"decision": "block", "reason": "
 
 Pass `--no-gost-validation` (Bash) or `-NoGostValidation` (PowerShell) to skip the hook. The validator script itself still ships with the skill regardless of the flag — `r.save()` always runs L1 validation in-library and raises `GostValidationError` on failures. The hook is the deterministic L2 backup that catches cases where the model bypassed `r.save()` (e.g. used `python-docx` directly, or edited the file via `Bash sed`).
 
-Codex target intentionally skips this layer — Codex CLI has no hooks. The validator script still ships in the codex skill `.zip` and remains usable for manual debugging via `python validate.py --check <docx>`.
+Codex target intentionally skips this validation layer. The validator script still ships in the codex skill `.zip` and remains usable for manual debugging via `python validate.py --check <docx>`.
 
 ## Optional: Sound Hooks (`--with-sound-hooks` / `--with-notification-sound`)
 
 Two **independent** opt-in flags, both off by default:
 
-- `--with-sound-hooks` (`-WithSoundHooks`) — installs only the `Stop` sound hook. Fires one beep when Claude finishes a turn. This is the typical "Claude is done" cue most people want.
-- `--with-notification-sound` (`-WithNotificationSound`) — installs only the `Notification` sound hook. Fires when Claude is waiting for input or requests a permission.
+- `--with-sound-hooks` (`-WithSoundHooks`) — installs only the `Stop` sound hook. Fires one beep when Claude or Codex finishes a turn. This is the typical "agent is done" cue most people want.
+- `--with-notification-sound` (`-WithNotificationSound`) — installs only the Claude `Notification` sound hook. Fires when Claude is waiting for input or requests a permission.
 
 The OS-appropriate command is auto-detected:
 
@@ -179,13 +179,15 @@ The OS-appropriate command is auto-detected:
 - **WSL**: `powershell.exe -c '[console]::beep(800,200)'`
 - **Windows (PowerShell installer)**: `[console]::beep(880,150)` (Stop) / `[console]::beep(660,250)` (Notification)
 
-The merge is set-union — your existing hook entries are preserved.
+The merge is set-union — your existing hook entries are preserved. Claude writes to `~/.claude/settings.json`; Codex writes to `~/.codex/hooks.json`.
 
-**Both flags together** are allowed but warned. `Notification` often fires immediately after `Stop` (Claude finishes → "waiting for input" notification), so you'd hear two beeps in sequence at the end of each chat. Pass only one flag if that's not what you want.
+Codex will show its normal hook review prompt after a new or changed hook is installed. The installer does not pre-trust hooks in `config.toml`.
+
+On Claude, **both flags together** are allowed but warned. `Notification` often fires immediately after `Stop` (Claude finishes → "waiting for input" notification), so you'd hear two beeps in sequence at the end of each chat. Pass only one flag if that's not what you want.
 
 ### Resetting Sound Hooks (`--clean-sound-hooks`)
 
-`--clean-sound-hooks` (`-CleanSoundHooks`) is an **action** (like `--uninstall`) that strips every sound-hook entry from `~/.claude/settings.json`. Useful if:
+`--clean-sound-hooks` (`-CleanSoundHooks`) is an **action** (like `--uninstall`) that strips every sound-hook entry from the target hook config: `~/.claude/settings.json` for Claude or `~/.codex/hooks.json` for Codex. Useful if:
 
 - You earlier installed both hooks (the previous default, before this flag split) and want to keep only one.
 - You want a clean slate before re-adding with the new single-purpose flags.

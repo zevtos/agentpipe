@@ -14,14 +14,14 @@
     .\install.ps1 -Pull                    # copy installed back to repo
     .\install.ps1 -Update                  # git pull --ff-only, then install
     .\install.ps1 -Uninstall               # remove installed files
-    .\install.ps1 -CleanSoundHooks         # strip Stop+Notification sound hooks from settings.json
+    .\install.ps1 -CleanSoundHooks         # strip Stop+Notification sound hooks from settings/hooks config
     .\install.ps1 -NoAttributionFix        # skip Co-Authored-By suppression layer
     .\install.ps1 -NoConfigDefaults        # skip $schema + safe defaults + deny list
     .\install.ps1 -NoClaudeMd              # skip neutral CLAUDE.md baseline (install-if-missing)
     .\install.ps1 -NoGostValidation        # skip gost-report Stop-hook validator (default: on)
     .\install.ps1 -SkillsOnly              # copy only skills/* (skip agents, commands, hooks)
     .\install.ps1 -WithSoundHooks          # opt-in: Stop sound hook only (one beep per turn)
-    .\install.ps1 -WithNotificationSound   # opt-in: Notification sound hook only
+    .\install.ps1 -WithNotificationSound   # opt-in: Claude Notification sound hook only
     .\install.ps1 -WithThinkingSummaries   # opt-in: showThinkingSummaries=true
     .\install.ps1 -ModelProfile opus       # all agents on opus (default: mixed)
     .\install.ps1 -ShowVersion             # show version
@@ -128,7 +128,7 @@ function Show-CodexSkipNotice {
 
 function Show-SkillsOnlyNotice {
     if ($SkillsOnly -and $Target -eq "claude") {
-        Write-Warn "-SkillsOnly - skipped agents/, commands/, and all settings.json layers"
+        Write-Warn "-SkillsOnly - skipped agents/, commands/, and all settings/hook layers"
     }
 }
 
@@ -202,7 +202,7 @@ function Test-ClaudeMdActive {
 }
 
 function Test-StopSoundActive {
-    return ($Target -eq "claude" -and $WithSoundHooks)
+    return (($Target -eq "claude" -or $Target -eq "codex") -and $WithSoundHooks)
 }
 
 function Test-NotificationSoundActive {
@@ -224,7 +224,7 @@ function Files-Equal($a, $b) {
 
 function Read-SettingsJson {
     # Returns @{Hash=<hashtable>; Ok=$true} or @{Ok=$false} on parse error.
-    $settings = Join-Path $Base "settings.json"
+    $settings = Join-Path $script:Base "settings.json"
     $base = @{}
     if (Test-Path $settings) {
         try {
@@ -242,18 +242,62 @@ function Read-SettingsJson {
     return @{ Hash = $base; Ok = $true }
 }
 
-function Write-SettingsJson($base) {
-    $settings = Join-Path $Base "settings.json"
-    New-Item -ItemType Directory -Path $Base -Force | Out-Null
+function Write-SettingsJson($settingsData) {
+    $settings = Join-Path $script:Base "settings.json"
+    New-Item -ItemType Directory -Path $script:Base -Force | Out-Null
     $tmp = "$settings.agentpipe.tmp"
     try {
-        ($base | ConvertTo-Json -Depth 32) | Set-Content -Path $tmp -Encoding UTF8 -NoNewline
+        ($settingsData | ConvertTo-Json -Depth 32) | Set-Content -Path $tmp -Encoding UTF8 -NoNewline
         Add-Content -Path $tmp -Value "" -Encoding UTF8
         Move-Item -Path $tmp -Destination $settings -Force
         return $true
     } catch {
         if (Test-Path $tmp) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
         Write-Warn "settings.json write failed: $_"
+        return $false
+    }
+}
+
+function Get-SoundHookConfigPath {
+    if ($Target -eq "codex") {
+        return (Join-Path $script:Base "hooks.json")
+    }
+    return (Join-Path $script:Base "settings.json")
+}
+
+function Read-SoundHookJson {
+    # Returns @{Hash=<hashtable>; Ok=$true} or @{Ok=$false} on parse error.
+    $path = Get-SoundHookConfigPath
+    $base = @{}
+    if (Test-Path $path) {
+        try {
+            $raw = (Get-Content $path -Raw -ErrorAction Stop)
+            if ($raw.Trim()) {
+                $parsed = $raw | ConvertFrom-Json -ErrorAction Stop
+                $parsed.PSObject.Properties | ForEach-Object {
+                    $base[$_.Name] = $_.Value
+                }
+            }
+        } catch {
+            return @{ Ok = $false }
+        }
+    }
+    return @{ Hash = $base; Ok = $true }
+}
+
+function Write-SoundHookJson($hookData) {
+    $path = Get-SoundHookConfigPath
+    $dir = Split-Path $path -Parent
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $tmp = "$path.agentpipe.tmp"
+    try {
+        ($hookData | ConvertTo-Json -Depth 32) | Set-Content -Path $tmp -Encoding UTF8 -NoNewline
+        Add-Content -Path $tmp -Value "" -Encoding UTF8
+        Move-Item -Path $tmp -Destination $path -Force
+        return $true
+    } catch {
+        if (Test-Path $tmp) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+        Write-Warn "$(Split-Path $path -Leaf) write failed: $_"
         return $false
     }
 }
@@ -516,9 +560,9 @@ function Do-GostConfigDry {
     Write-Host ""
 }
 
-# --- Sound hooks (claude target only, opt-in) ---
-# -WithSoundHooks         → Stop sound hook only (one beep when Claude finishes)
-# -WithNotificationSound  → Notification sound hook only (permission/wait-for-input)
+# --- Sound hooks (opt-in) ---
+# -WithSoundHooks         → Stop sound hook only (one beep when Claude/Codex finishes)
+# -WithNotificationSound  → Notification sound hook only (Claude permission/wait-for-input)
 # Passing both is allowed; a warning is printed because Notification often
 # fires right after Stop, producing two beeps in sequence.
 
@@ -531,9 +575,10 @@ function Test-SoundCommand($cmd) {
 }
 
 function Merge-SoundHook($eventName, $cmd) {
-    $r = Read-SettingsJson
+    $r = Read-SoundHookJson
+    $path = Get-SoundHookConfigPath
     if (-not $r.Ok) {
-        Write-Warn "settings.json has invalid JSON - skipping sound hook ($eventName)"
+        Write-Warn "$(Split-Path $path -Leaf) has invalid JSON - skipping sound hook ($eventName)"
         return
     }
     $base = $r.Hash
@@ -566,8 +611,9 @@ function Merge-SoundHook($eventName, $cmd) {
     }
     $base["hooks"] = $hooks
 
-    if (Write-SettingsJson $base) {
-        Write-Ok "settings/hooks.$eventName (Windows beep) merged"
+    if (Write-SoundHookJson $base) {
+        $label = if ($Target -eq "codex") { "hooks.$eventName" } else { "settings/hooks.$eventName" }
+        Write-Ok "$label (Windows beep) merged"
     }
 }
 
@@ -593,7 +639,11 @@ function Warn-SoundOverlap {
 function Do-StopSoundHookDry {
     if (-not (Test-StopSoundActive)) { return }
     Write-Host "Sound hook (Stop):"
-    Write-Info "+ settings/hooks.Stop (Windows beep)"
+    if ($Target -eq "codex") {
+        Write-Info "+ hooks.json/hooks.Stop (Windows beep)"
+    } else {
+        Write-Info "+ settings/hooks.Stop (Windows beep)"
+    }
     Write-Host ""
 }
 
@@ -605,26 +655,22 @@ function Do-NotificationSoundHookDry {
 }
 
 # -CleanSoundHooks action — strip every sound-hook entry (Stop+Notification)
-# from settings.json. Recognises afplay, paplay, [console]::beep, powershell beep.
+# from hook config. Recognises afplay, paplay, [console]::beep, powershell beep.
 # Leaves non-sound hooks (gost-validation, user customs) intact.
 function Do-CleanSoundHooks {
-    if ($Target -ne "claude") {
-        Write-Info "clean-sound-hooks: no-op for codex (Codex CLI has no hooks)"
+    $path = Get-SoundHookConfigPath
+    if (-not (Test-Path $path)) {
+        Write-Info "no $(Split-Path $path -Leaf) at $path - nothing to clean"
         return
     }
-    $settings = Join-Path $Base "settings.json"
-    if (-not (Test-Path $settings)) {
-        Write-Info "no settings.json at $settings - nothing to clean"
-        return
-    }
-    $r = Read-SettingsJson
+    $r = Read-SoundHookJson
     if (-not $r.Ok) {
-        Write-Err "settings.json has invalid JSON - cannot clean sound hooks"
+        Write-Err "$(Split-Path $path -Leaf) has invalid JSON - cannot clean sound hooks"
         exit 1
     }
     $base = $r.Hash
     if (-not $base.ContainsKey("hooks")) {
-        Write-Info "no hooks section in $settings - nothing to clean"
+        Write-Info "no hooks section in $path - nothing to clean"
         return
     }
 
@@ -685,12 +731,12 @@ function Do-CleanSoundHooks {
     }
 
     if ($totalRemoved -gt 0) {
-        if (Write-SettingsJson $base) {
+        if (Write-SoundHookJson $base) {
             $word = if ($totalRemoved -eq 1) { "entry" } else { "entries" }
-            Write-Ok "removed $totalRemoved sound hook $word from $settings"
+            Write-Ok "removed $totalRemoved sound hook $word from $path"
         }
     } else {
-        Write-Info "no sound hook entries found in $settings"
+        Write-Info "no sound hook entries found in $path"
     }
 }
 
@@ -722,7 +768,7 @@ function Do-ThinkingSummariesDry {
 # Stop hook runs validate.py against any .docx with a sibling sentinel,
 # emits {"decision":"block","reason":"..."} JSON on failure. Always exits 0.
 # Sentinel-only scoping → no false fires in non-gost-report projects.
-# Codex target skips this layer (Codex CLI has no hooks).
+# Codex target skips this validation layer.
 
 function Do-GostValidation {
     if (-not (Test-GostValidationActive)) { return }
