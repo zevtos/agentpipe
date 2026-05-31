@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 agentpipe: strip every sound-hook entry (Stop and Notification) from a Claude
-Code settings.json. Used by `install.sh --clean-sound-hooks` to undo earlier
-`--with-sound-hooks` / `--with-notification-sound` merges without touching
-unrelated hooks (gost-validation, user customs).
+Code settings.json or Codex hooks.json. Used by `install.sh --clean-sound-hooks`
+to undo earlier `--with-sound-hooks` / `--with-notification-sound` merges
+without touching unrelated hooks (gost-validation, user customs).
 
 Usage:
     python3 scripts/clean-sound-hooks.py <settings-path>

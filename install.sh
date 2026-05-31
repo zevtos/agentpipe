@@ -11,13 +11,13 @@ set -euo pipefail
 #   bash install.sh --diff                # show repo vs installed differences
 #   bash install.sh --pull                # copy installed back to repo
 #   bash install.sh --uninstall           # remove installed files
-#   bash install.sh --clean-sound-hooks   # strip Stop+Notification sound hooks from settings.json
+#   bash install.sh --clean-sound-hooks   # strip Stop+Notification sound hooks from settings/hooks config
 #   bash install.sh --no-attribution-fix  # skip Co-Authored-By suppression layer
 #   bash install.sh --no-config-defaults  # skip $schema + secret deny-list
 #   bash install.sh --no-gost-validation  # skip gost-report Stop-hook validator
 #   bash install.sh --skills-only         # copy only skills/* (skip agents, commands, hooks)
 #   bash install.sh --with-sound-hooks         # opt-in: Stop sound hook only
-#   bash install.sh --with-notification-sound  # opt-in: Notification sound hook only
+#   bash install.sh --with-notification-sound  # opt-in: Claude Notification sound hook only
 #   bash install.sh --model-profile opus  # all agents on opus (default: mixed)
 #   bash install.sh --version             # show version
 #
@@ -150,7 +150,7 @@ Actions:
   --update      git pull --ff-only, then install (one-shot upgrade to latest)
   --uninstall   Remove installed files
   --clean-sound-hooks  Strip every sound hook entry (Stop+Notification) from
-                ~/.claude/settings.json. Leaves non-sound hooks intact
+                ~/.claude/settings.json or ~/.codex/hooks.json. Leaves non-sound hooks intact
                 (gost-validation, user customs). Use to reset before re-adding
                 with --with-sound-hooks / --with-notification-sound.
   --version     Show version
@@ -169,20 +169,20 @@ Options:
                             validate.py against any .docx with a sibling sentinel file.
                             On by default for --target claude — invisible to the model
                             in normal flow, fires only when the generated .docx fails
-                            ГОСТ checks. Off by default for codex (Codex has no hooks).
+                            ГОСТ checks. Not installed for codex.
   --skills-only             Copy only skills/* — skip agents, commands, and every
                             settings.json / hook layer (attribution, config-defaults,
                             CLAUDE.md baseline, sound hooks, thinking summaries,
                             gost-validation). Works with both --target claude and
                             --target codex. Composes with --dry / --diff / --pull /
                             --uninstall, scoping each action to skills only.
-  --with-sound-hooks        Add a Stop sound hook (one beep when Claude finishes a turn).
+  --with-sound-hooks        Add a Stop sound hook (one beep when Claude/Codex finishes a turn).
                             OS auto-detected: afplay/paplay/powershell beep. Off by default —
-                            personal preference. Always off for codex.
+                            personal preference.
   --with-notification-sound Add a Notification sound hook (beep on permission prompts and
                             "waiting for input"). Independent of --with-sound-hooks. Passing
                             both is allowed but warns: Notification often fires right after
-                            Stop, producing two beeps in sequence. Always off for codex.
+                            Stop, producing two beeps in sequence. Claude target only.
   --with-thinking-summaries Set showThinkingSummaries=true. Off by default — some users
                             find the thinking output noisy. Always off for codex.
   --model-profile <preset>  Per-agent model assignment. Presets: opus (all agents on opus),
@@ -231,7 +231,7 @@ esac
 # command destinations (every action already gates on `[[ -n "$X_DST" ]]`) and
 # turn off every feature-flag layer. Same effect under --target codex (where
 # agents/commands are already null) — the flag just additionally suppresses
-# settings.json layers if a user opted those in.
+# settings/hook layers if a user opted those in.
 if [[ "$SKILLS_ONLY" -eq 1 ]]; then
     AGENTS_DST=""
     COMMANDS_DST=""
@@ -246,7 +246,7 @@ fi
 
 skills_only_notice() {
     if [[ "$SKILLS_ONLY" -eq 1 && "$TARGET" == "claude" ]]; then
-        warn "--skills-only — skipped agents/, commands/, and all settings.json layers"
+        warn "--skills-only — skipped agents/, commands/, and all settings/hook layers"
     fi
 }
 
@@ -595,15 +595,15 @@ do_gost_config_dry() {
     echo ""
 }
 
-# --- Sound hooks (claude target only, opt-in) ---
+# --- Sound hooks (opt-in) ---
 # Stop and Notification are independent audible cues. OS auto-detected.
-# --with-sound-hooks         → Stop only (one beep when Claude finishes a turn)
-# --with-notification-sound  → Notification only (beep on permission/wait-for-input)
+# --with-sound-hooks         → Stop only (one beep when Claude/Codex finishes a turn)
+# --with-notification-sound  → Notification only (Claude permission/wait-for-input)
 # Both flags together print a warning — Notification often fires right after
 # Stop, producing two beeps in sequence at the end of a chat.
 
 stop_sound_active() {
-    [[ "$TARGET" == "claude" && "$SOUND_HOOKS" -eq 1 ]]
+    [[ ( "$TARGET" == "claude" || "$TARGET" == "codex" ) && "$SOUND_HOOKS" -eq 1 ]]
 }
 
 notification_sound_active() {
@@ -635,7 +635,7 @@ sound_command_for() {
     esac
 }
 
-# Internal helper: merge a single sound hook (Stop or Notification) into settings.
+# Internal helper: merge a single sound hook (Stop or Notification) into hook config.
 # $1 = "Stop" or "Notification", $2 = OS-detected command string.
 _merge_sound_hook() {
     local event="$1" cmd="$2"
@@ -643,7 +643,12 @@ _merge_sound_hook() {
         warn "python3 not found — skipping sound hook ($event)"
         return 0
     fi
-    local settings="$BASE/settings.json"
+    local hook_config="$BASE/settings.json"
+    local hook_label="settings/hooks"
+    if [[ "$TARGET" == "codex" ]]; then
+        hook_config="$BASE/hooks.json"
+        hook_label="hooks"
+    fi
     local payload
     payload=$(EVENT="$event" CMD="$cmd" python3 -c '
 import json, os
@@ -653,10 +658,10 @@ print(json.dumps({
     }
 }))
 ')
-    if python3 "$JSON_MERGE" --list-union "hooks.$event" "$settings" "$payload" 2>/dev/null; then
-        log "settings/hooks.$event (sound: $(uname -s)) merged"
+    if python3 "$JSON_MERGE" --list-union "hooks.$event" "$hook_config" "$payload" 2>/dev/null; then
+        log "$hook_label.$event (sound: $(uname -s)) merged"
     else
-        warn "settings.json sound-hook merge failed ($event)"
+        warn "$(basename "$hook_config") sound-hook merge failed ($event)"
     fi
 }
 
@@ -685,7 +690,11 @@ warn_sound_overlap() {
 do_stop_sound_hook_dry() {
     stop_sound_active || return 0
     echo "Sound hook (Stop):"
-    info "  + settings/hooks.Stop ($(uname -s) auto-detected)"
+    if [[ "$TARGET" == "codex" ]]; then
+        info "  + hooks.json/hooks.Stop ($(uname -s) auto-detected)"
+    else
+        info "  + settings/hooks.Stop ($(uname -s) auto-detected)"
+    fi
     echo ""
 }
 
@@ -696,32 +705,31 @@ do_notification_sound_hook_dry() {
     echo ""
 }
 
-# --clean-sound-hooks action — strip every sound hook entry from settings.json.
+# --clean-sound-hooks action — strip every sound hook entry from hook config.
 # Recognises afplay (macOS), paplay (Linux), [console]::beep / powershell beep
 # (WSL + Windows). Leaves non-sound hooks (gost-validation, user customs) alone.
 do_clean_sound_hooks() {
-    if [[ "$TARGET" != "claude" ]]; then
-        info "clean-sound-hooks: no-op for codex (Codex CLI has no hooks)"
-        return 0
-    fi
     if ! command -v python3 >/dev/null 2>&1; then
         err "python3 not found — cannot clean sound hooks"
         exit 1
     fi
-    local settings="$BASE/settings.json"
-    if [[ ! -f "$settings" ]]; then
-        info "no settings.json at $settings — nothing to clean"
+    local hook_config="$BASE/settings.json"
+    if [[ "$TARGET" == "codex" ]]; then
+        hook_config="$BASE/hooks.json"
+    fi
+    if [[ ! -f "$hook_config" ]]; then
+        info "no $(basename "$hook_config") at $hook_config — nothing to clean"
         return 0
     fi
     local removed
-    if ! removed=$(python3 "$SCRIPT_DIR/scripts/clean-sound-hooks.py" "$settings"); then
+    if ! removed=$(python3 "$SCRIPT_DIR/scripts/clean-sound-hooks.py" "$hook_config"); then
         err "clean-sound-hooks failed"
         exit 1
     fi
     if [[ "$removed" -eq 0 ]]; then
-        info "no sound hook entries found in $settings"
+        info "no sound hook entries found in $hook_config"
     else
-        log "removed $removed sound hook entr$( [[ "$removed" -eq 1 ]] && echo y || echo ies ) from $settings"
+        log "removed $removed sound hook entr$( [[ "$removed" -eq 1 ]] && echo y || echo ies ) from $hook_config"
     fi
 }
 
@@ -765,7 +773,7 @@ do_thinking_summaries_dry() {
 # projects that don't use gost-report there are no sentinels and the hook
 # is a ~5ms no-op.
 #
-# Codex target skips this — Codex CLI has no hooks. The validate.py script
+# Codex target skips this validation layer. The validate.py script
 # still ships in the codex skill .zip and works in CLI mode (--check) for
 # manual debugging.
 
