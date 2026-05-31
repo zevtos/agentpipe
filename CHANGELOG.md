@@ -7,6 +7,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- **Codex Stop sound hook (`--with-sound-hooks --target codex`).** The opt-in Stop sound hook now installs for the Codex target, writing to `~/.codex/hooks.json` in Codex's lifecycle-hook schema (`{"hooks":{"Stop":[{"hooks":[{"type":"command","command":...}]}]}}`) — the same OS-detected command and idempotent set-union merge already used for Claude's `settings.json`. This reverses the previous "Codex CLI has no hooks" assumption: Codex CLI gained `hooks.json` lifecycle hooks, and `Stop` is among them. Codex has no `Notification` event, so `--with-notification-sound` stays Claude-only. `--clean-sound-hooks` now also strips Stop entries from `~/.codex/hooks.json` (was previously a no-op for codex). Codex shows its normal hook-review prompt on first run after a new/changed hook is installed — the installer never pre-trusts hooks. README, `docs/installation.md`, and both installers' help/dry-run messaging updated for the per-target hook config split.
+
+### Fixed
+- **`update.ps1` forwarded named flags positionally.** It used `[Parameter(ValueFromRemainingArguments)]`, so `update.ps1 -Target codex -WithSoundHooks` reached `install.ps1` as positional strings instead of binding by name. Replaced with explicit typed params forwarded via `$PSBoundParameters` splatting (`-Update` added on top). `update.sh` was already correct.
+- **PowerShell settings writer hardened against a name collision.** `Write-SettingsJson`'s parameter was named `$base` while its body read the case-insensitive `$Base` for the install directory — so the directory reference resolved to the settings hashtable rather than the script-scoped path. Renamed the parameter to `$settingsData` and qualified the directory as `$script:Base` (same hardening applied to `Read-SettingsJson`).
+
 ## [0.20.0] - 2026-05-29
 
 ### Added
