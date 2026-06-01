@@ -9,7 +9,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1068,3 +1071,194 @@ def save_image_safe(
         original_width=original_w, original_height=original_h,
         downscaled=downscaled, sha256=digest,
     )
+
+
+# ---------- pandoc conversion ----------
+
+# Hard cap on a single pandoc invocation. Pandoc on a typical lab docx/rtf
+# finishes in <500 ms, so 60 s is generous and still catches a wedged process.
+PANDOC_TIMEOUT_SEC = 60
+
+_PANDOC_IMG_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+
+
+def pandoc_available() -> bool:
+    """True iff a `pandoc` binary is resolvable on PATH."""
+    return shutil.which("pandoc") is not None
+
+
+def pandoc_to_markdown(
+    input_path: Path,
+    *,
+    from_format: str = "docx",
+    doc_id: str = "doc-000",
+    assets_dir: Path | None = None,
+    assets_rel_prefix: str = "../assets",
+    extract_images: bool = True,
+    timeout: int = PANDOC_TIMEOUT_SEC,
+) -> tuple[str, list[str], list[str]]:
+    """Convert a pandoc-readable document to Markdown. Shared by the DOCX
+    (math route — `from_format="docx"`) and RTF (`from_format="rtf"`)
+    extractors so the media-rewrite and warning-promotion logic lives in one
+    place. Returns (body, warnings, assets).
+
+    `from_format` is passed straight to pandoc's `-f` flag. When image
+    extraction is enabled, pandoc writes media to a tempdir via
+    `--extract-media`; each image is funnelled through save_image_safe() so
+    the 2000-px cap and decorative-pixel filter apply uniformly with the
+    other extractors, and every body image link is rewritten from the temp
+    path to the canonical `<assets_rel_prefix>/<filename>`.
+
+    Raises RuntimeError on pandoc failure, timeout, or absence so the caller
+    can fall back (mammoth for DOCX, striprtf for RTF) with a loud warning.
+    """
+    warnings: list[str] = []
+    assets: list[str] = []
+    do_extract = extract_images and assets_dir is not None
+    cmd = [
+        "pandoc",
+        "-f", from_format,
+        "-t", "markdown",
+        "--wrap=none",
+        str(input_path),
+    ]
+
+    tmp_media: Path | None = None
+    if do_extract:
+        try:
+            assets_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            warnings.append(
+                f"cannot create assets dir {assets_dir}: {e} — pandoc images will be dropped"
+            )
+            do_extract = False
+    if do_extract:
+        tmp_media = Path(tempfile.mkdtemp(prefix="doc2kb-pandoc-media-"))
+        cmd.insert(1, "--extract-media")
+        cmd.insert(2, str(tmp_media))
+
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, timeout=timeout, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        if tmp_media is not None:
+            shutil.rmtree(tmp_media, ignore_errors=True)
+        raise RuntimeError(f"pandoc timed out after {timeout}s")
+    except FileNotFoundError:
+        if tmp_media is not None:
+            shutil.rmtree(tmp_media, ignore_errors=True)
+        raise RuntimeError("pandoc binary not found on PATH")
+    if proc.returncode != 0:
+        stderr = (proc.stderr or b"").decode("utf-8", "replace").strip()
+        if tmp_media is not None:
+            shutil.rmtree(tmp_media, ignore_errors=True)
+        raise RuntimeError(
+            f"pandoc exited with code {proc.returncode}: {stderr[:200]}"
+        )
+    body = clean_whitespace(proc.stdout.decode("utf-8", "replace"))
+    if proc.stderr:
+        stderr = proc.stderr.decode("utf-8", "replace").strip()
+        for ln in stderr.splitlines():
+            ln = ln.strip()
+            if ln and ln.lower().startswith(("warning", "[warning]")):
+                warnings.append(f"pandoc: {ln}"[:200])
+
+    if tmp_media is not None:
+        try:
+            body, pandoc_assets, pandoc_warnings = _rewrite_pandoc_media(
+                body, tmp_media, assets_dir, assets_rel_prefix, doc_id,
+            )
+            assets.extend(pandoc_assets)
+            warnings.extend(pandoc_warnings)
+        finally:
+            shutil.rmtree(tmp_media, ignore_errors=True)
+
+    return body, warnings, assets
+
+
+def _rewrite_pandoc_media(
+    body: str,
+    tmp_media: Path,
+    assets_dir: Path,
+    assets_rel_prefix: str,
+    doc_id: str,
+) -> tuple[str, list[str], list[str]]:
+    """Walk the pandoc-extracted media tree, push each image through
+    save_image_safe(), and rewrite every Markdown image link in `body`
+    from the temp path to the canonical `<assets_rel_prefix>/<filename>`.
+    Pandoc emits paths with forward slashes on every platform, so a
+    string-based rewrite is sufficient — no regex over POSIX/Windows
+    separators.
+    """
+    warnings: list[str] = []
+    assets: list[str] = []
+    dedup_cache: dict = {}
+    # path_in_body (string) → new relative path (string)
+    rewrite: dict[str, str] = {}
+    idx = 0
+    for match in _PANDOC_IMG_RE.finditer(body):
+        link = match.group(2).strip()
+        # Pandoc uses POSIX paths even on Windows; strip optional `<...>`
+        # angle brackets pandoc sometimes wraps around paths with spaces.
+        if link.startswith("<") and link.endswith(">"):
+            link = link[1:-1]
+        src = (tmp_media / link.replace("\\", "/")).resolve() \
+            if not Path(link).is_absolute() else Path(link).resolve()
+        # Guardrail: never read outside tmp_media — defends against an
+        # untrusted source coaxing pandoc into emitting a `..` traversal.
+        try:
+            src.relative_to(tmp_media.resolve())
+        except ValueError:
+            warnings.append(
+                f"pandoc emitted image path outside media dir, skipping: {link}"
+            )
+            rewrite[match.group(2)] = ""
+            continue
+        if not src.is_file():
+            continue
+        if link in rewrite:
+            continue
+        idx += 1
+        ext = src.suffix.lstrip(".").lower() or "png"
+        filename = f"{doc_id}-img{idx:03d}.{ext}"
+        target = assets_dir / filename
+        try:
+            blob = src.read_bytes()
+        except OSError as e:
+            warnings.append(f"pandoc image {src.name}: cannot read ({e})")
+            rewrite[match.group(2)] = ""
+            continue
+        result = save_image_safe(
+            blob, target, dedup_cache=dedup_cache, source_ext=ext,
+        )
+        if not result:
+            if result.reason == "skipped_format":
+                warnings.append(
+                    f"pandoc image {src.name}: skipped non-viewable format ({ext})"
+                )
+            elif result.reason == "skipped_corrupt":
+                warnings.append(
+                    f"pandoc image {src.name}: corrupt image bytes — skipped"
+                )
+            rewrite[match.group(2)] = ""
+            continue
+        rel = f"{assets_rel_prefix}/{result.path.name}"
+        rewrite[match.group(2)] = rel
+        if rel not in assets:
+            assets.append(rel)
+
+    if not rewrite:
+        return body, assets, warnings
+
+    def _repl(m):
+        new = rewrite.get(m.group(2))
+        if new is None:
+            return m.group(0)
+        if new == "":
+            # Drop the image element entirely when the source was unusable.
+            return f"![{m.group(1)}]()"
+        return f"![{m.group(1)}]({new})"
+
+    new_body = _PANDOC_IMG_RE.sub(_repl, body)
+    return new_body, assets, warnings

@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import sys
 import time
 from datetime import datetime, timezone
@@ -75,6 +76,7 @@ SILENT_SKIP_DIRS = {
 EXT_TO_TYPE = {
     ".pdf": "pdf",
     ".docx": "docx",
+    ".doc": "doc",
     ".pptx": "pptx",
     ".xlsx": "xlsx",
     ".md": "md",
@@ -131,6 +133,10 @@ def detect_source_type(path: Path, mime: str | None) -> tuple[str, str]:
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         ):
             mime_type = "docx"
+        elif mime in ("application/msword",):
+            # Legacy binary Word. libmagic returns application/msword for
+            # .doc; some builds return the generic OLE2 type below.
+            mime_type = "doc"
         elif mime in (
             "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         ):
@@ -400,6 +406,19 @@ def text_encoding(path: Path, sample_bytes: int = 65536) -> dict[str, Any]:
 
 # ---------- strategy + token estimate ----------
 
+def _doc_converter() -> str | None:
+    """Name of the first available legacy-.doc converter on PATH, or None.
+    Mirrors extract_doc.py's cascade so scout can warn early when a corpus
+    contains .doc files but the host has no way to read them."""
+    if shutil.which("soffice") or shutil.which("libreoffice"):
+        return "soffice"
+    if shutil.which("textutil"):
+        return "textutil"
+    if shutil.which("antiword"):
+        return "antiword"
+    return None
+
+
 def set_strategy_and_tokens(info: dict[str, Any], *, enable_mineru: bool = False) -> None:
     """Sets extraction_strategy and estimated_tokens on info in place.
 
@@ -453,6 +472,23 @@ def set_strategy_and_tokens(info: dict[str, Any], *, enable_mineru: bool = False
         para = info.get("paragraphs") or 0
         info["extraction_strategy"] = "mammoth"
         info["estimated_tokens"] = max(para * 25, 200) if para else None
+    elif t == "doc":
+        # Legacy binary Word — no pure-Python reader; extract_doc.py shells out
+        # to a system converter (soffice/textutil → DOCX pipeline, or antiword
+        # → text). Size-based token proxy; refined after extraction.
+        info["extraction_strategy"] = "doc"
+        info["estimated_tokens"] = max(info.get("size_bytes", 0) // 8, 200)
+        if _doc_converter() is None:
+            warnings.append(
+                "no .doc converter on PATH (need soffice/libreoffice, "
+                "textutil on macOS, or antiword) — extraction will fail until "
+                "one is installed"
+            )
+    elif t == "rtf":
+        # Pandoc preferred (structure + images); striprtf is the pure-Python
+        # lightweight fallback, so rtf always has a working path.
+        info["extraction_strategy"] = "rtf"
+        info["estimated_tokens"] = max(info.get("size_bytes", 0) // 6, 100)
     elif t == "pptx":
         slides = info.get("slides") or 0
         notes = info.get("notes_chars") or 0
@@ -476,7 +512,7 @@ def set_strategy_and_tokens(info: dict[str, Any], *, enable_mineru: bool = False
         info["estimated_tokens"] = (
             max(cells * 80 + code_cells * 60, 200) if cells else None
         )
-    elif t in {"xlsx", "epub", "rtf", "odt", "image"}:
+    elif t in {"xlsx", "epub", "odt", "image"}:
         info["extraction_strategy"] = "not_in_mvp"
         info["estimated_tokens"] = None
         warnings.append(f"{t}: not supported in MVP (follow-up release)")
@@ -492,7 +528,7 @@ def set_strategy_and_tokens(info: dict[str, Any], *, enable_mineru: bool = False
     if info.get("size_bytes", 0) > HUGE_BYTES:
         warnings.append(f"large file: {info['size_bytes'] // (1024 * 1024)} MB")
         if info.get("extraction_strategy") in (
-            "pymupdf4llm", "mammoth", "python-pptx",
+            "pymupdf4llm", "mammoth", "doc", "rtf", "python-pptx",
             "passthrough-md", "passthrough-txt", "trafilatura", "ipynb",
         ) and not info.get("action_required"):
             info["action_required"] = "ask_user_proceed_huge"
@@ -732,6 +768,8 @@ def main() -> int:
         if strategy == "mineru":
             pages = f.get("pages") or 1
             return max(pages * 2, 30)  # ~2 s/page on Apple Silicon VLM
+        if strategy == "doc":
+            return 6   # soffice/textutil headless cold-start dominates
         if f.get("source_type") == "pdf":
             return 2
         return 1

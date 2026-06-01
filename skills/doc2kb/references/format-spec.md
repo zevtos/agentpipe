@@ -55,7 +55,7 @@ Emitted by `scout_corpus.py`. Schema:
       "size_bytes": int,
       "mime": "application/pdf" | null,
       "mime_confidence": "high" | "low",     // low if magic ↔ ext disagree
-      "source_type": "pdf"|"docx"|"pptx"|"xlsx"|"md"|"txt"|"html"|"ipynb"|"epub"|"rtf"|"odt"|"image"|"unknown",
+      "source_type": "pdf"|"docx"|"doc"|"pptx"|"xlsx"|"md"|"txt"|"html"|"ipynb"|"epub"|"rtf"|"odt"|"image"|"unknown",
       "pdf_class": "text"|"image_only"|"mixed"|"encrypted"|"corrupt" | null,
       "pages": int | null,
       "slides": int | null,
@@ -70,7 +70,7 @@ Emitted by `scout_corpus.py`. Schema:
       "raw_cells": int | null,               // ipynb
       "has_outputs": bool | null,            // ipynb
       "encoding": "utf-8" | "cp1251" | ... | null,
-      "extraction_strategy": "pymupdf4llm"|"mineru"|"mammoth"|"python-pptx"|"passthrough-md"|"passthrough-txt"|"trafilatura"|"ipynb"|"needs_password"|"needs_ocr_or_vlm"|"not_in_mvp"|"skip",
+      "extraction_strategy": "pymupdf4llm"|"mineru"|"mammoth"|"doc"|"rtf"|"python-pptx"|"passthrough-md"|"passthrough-txt"|"trafilatura"|"ipynb"|"needs_password"|"needs_ocr_or_vlm"|"not_in_mvp"|"skip",
       "estimated_tokens": int | null,
       "warnings": [string],
       "action_required": "ask_user_password_or_skip"|"ask_user_ocr_strategy"|"ask_user_proceed_huge"|"ask_user_skip_corrupt"|"ask_user_skip_unsupported" | null
@@ -98,7 +98,7 @@ Every extracted document has a YAML frontmatter block. Required fields:
 |---------------------|-------------|------------------|
 | `id`                | string      | scout-assigned doc-NNN |
 | `source`            | string      | relative path inside input corpus |
-| `source_type`       | string      | `pdf`/`docx`/`pptx`/`ipynb`/`md`/`txt`/`html` |
+| `source_type`       | string      | `pdf`/`docx`/`doc`/`pptx`/`ipynb`/`rtf`/`md`/`txt`/`html` |
 | `source_sha256`     | string      | sha256 of original bytes |
 | `extraction_method` | string      | `name@version` of the extractor used |
 | `extraction_date`   | string      | YYYY-MM-DD UTC |
@@ -113,12 +113,12 @@ Per-type optional fields:
 | `slides`           | pptx       | total slide count |
 | `has_notes`        | pptx       | bool — speaker notes present |
 | `notes_chars`      | pptx       | total chars in notes |
-| `inline_images`    | docx/pptx  | count of embedded pictures |
-| `has_tables`       | docx/pptx  | bool — at least one table |
-| `has_equations`    | docx       | bool — OOXML `<m:oMath>` present |
+| `inline_images`    | docx/doc/pptx | count of embedded pictures |
+| `has_tables`       | docx/doc/pptx | bool — at least one table |
+| `has_equations`    | docx/doc   | bool — OOXML `<m:oMath>` present (`.doc` after converter→`.docx`) |
 | `has_charts`       | pptx       | bool — chart shapes present |
-| `has_tracked_changes` | docx    | bool — `w:ins`/`w:del` present |
-| `paragraphs`       | docx       | total paragraph count |
+| `has_tracked_changes` | docx/doc | bool — `w:ins`/`w:del` present |
+| `paragraphs`       | docx/doc   | total paragraph count |
 | `source_encoding`  | md/txt/html | detected source encoding |
 | `cells`            | ipynb      | total cell count |
 | `code_cells`       | ipynb      | code-cell count |
@@ -138,7 +138,14 @@ Per-type optional fields:
 - `pymupdf4llm@<ver>` — default PDF extractor.
 - `mammoth+markdownify@<ver>` — default DOCX extractor (no math).
 - `pandoc@<ver>` — DOCX extractor used when source has OOXML math and pandoc
-  is available; math is preserved as `$...$` / `$$...$$` LaTeX.
+  is available; math is preserved as `$...$` / `$$...$$` LaTeX. Also the
+  default RTF route (`extract_rtf.py`) when pandoc is on PATH.
+- `striprtf@<ver>` — pure-Python RTF fallback (plain text) when pandoc absent.
+- `libreoffice+<inner>@<ver>` / `textutil+<inner>@<ver>` — legacy `.doc`
+  extractor (`extract_doc.py`): the converter prefix records how `.doc` was
+  turned into `.docx`, `<inner>` is the DOCX extractor that ran on it
+  (`mammoth+markdownify` or `pandoc`). `antiword@<ver>` — plain-text `.doc`
+  fallback.
 - `python-pptx@<ver>` — PPTX extractor.
 - `passthrough-md@<ver>` / `passthrough-txt@<ver>` — plain text/markdown.
 - `trafilatura@<ver>` — HTML extractor.

@@ -43,6 +43,8 @@ assert payload["ok"]
 | `pymupdf4llm`       | `extract_pdf_pymupdf4llm.py`    | `<input> <output> --doc-id <id> --source-rel <rel>` (auto image extraction to `<kb_dir>/assets/`; override with `--assets-dir`/`--assets-rel`, disable with `--no-extract-images`) |
 | `mineru`            | `extract_pdf_mineru.py`         | **Opt-in tier** — requires `ensure_env.py --tier mineru` once. `<input> <output> --doc-id <id> --source-rel <rel>` (default backend `auto`, language `cyrillic`; pass `--backend pipeline` for CPU-only, `--lang en` for English-only; `--keep-raw` preserves MinerU output under `<kb_dir>/_mineru/<doc_id>/` for follow-up `postprocess_popo.py`). Exits 2 with install hint when mineru CLI is missing — parent loop should mark the file as needing install rather than skipping silently. |
 | `mammoth`           | `extract_docx.py`               | `<input> <output> --doc-id <id> --source-rel <rel>` (auto-routes to `pandoc` when `has_equations: true` and pandoc is on PATH; force mammoth with `--force-mammoth`) |
+| `doc`               | `extract_doc.py`                | `<input> <output> --doc-id <id> --source-rel <rel>` (legacy binary `.doc`; converter cascade `soffice`/`libreoffice` → `.docx` → DOCX pipeline, macOS `textutil` same path, else `antiword` → text. Force one with `--converter soffice\|textutil\|antiword`. **Exits 2 with an install hint when no converter is on PATH** — treat as "needs install", not corrupt, same as the mineru CLI) |
+| `rtf`               | `extract_rtf.py`                | `<input> <output> --doc-id <id> --source-rel <rel>` (pandoc when on PATH — preserves tables/images/structure; else pure-Python `striprtf` → plain text. Force the fallback with `--force-striprtf`) |
 | `python-pptx`       | `extract_pptx.py`               | `<input> <output> --doc-id <id> --source-rel <rel>` |
 | `passthrough-md`    | `extract_md_txt.py --mode md`   | `<input> <output> --doc-id <id> --source-rel <rel> --mode md` |
 | `passthrough-txt`   | `extract_md_txt.py --mode txt`  | `<input> <output> --doc-id <id> --source-rel <rel> --mode txt` |
@@ -51,7 +53,7 @@ assert payload["ok"]
 | `skip`              | (none — file is skipped) | — |
 | `needs_password`    | (Phase 3 user decision; if password given, re-classify and use `pymupdf4llm`) | — |
 | `needs_ocr_or_vlm`  | (Phase 3 user decision; pick `vlm_mlx` to route through `mineru` strategy — requires opt-in tier; default behaviour is `skip`) | — |
-| `not_in_mvp`        | (XLSX/EPUB/RTF/ODT/image — Phase 3 user decision; skip in MVP) | — |
+| `not_in_mvp`        | (XLSX/EPUB/ODT/image — Phase 3 user decision; skip in MVP) | — |
 
 ## Opt-in MinerU tier
 

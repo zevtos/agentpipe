@@ -1,6 +1,6 @@
 ---
 name: doc2kb
-description: Converts a heterogeneous corpus of raw documents (PDF, DOCX, PPTX, IPYNB, MD, TXT, HTML, etc.) into a structured, LLM-optimized knowledge base — per-source Markdown + manifest.json + INDEX.md + AGENTS.md, ready for ingestion in a separate Claude / Codex session. USE WHEN the user asks to ingest, index, preprocess, or build a knowledge base from a folder of mixed documents; "feed files to Claude", "prepare a corpus", "build a doc index", "RAG prep", "convert documents to markdown", "ingest Jupyter notebooks". RU triggers: "обработай папку с документами", "сделай базу знаний из папки", "подготовь корпус для LLM", "извлеки markdown из файлов". Output is for AI agents, not human reading. For single-file PDF use Anthropic's `pdf` skill.
+description: Converts a heterogeneous corpus of raw documents (PDF, DOCX, DOC, PPTX, IPYNB, RTF, MD, TXT, HTML, etc.) into a structured, LLM-optimized knowledge base — per-source Markdown + manifest.json + INDEX.md + AGENTS.md, ready for ingestion in a separate Claude / Codex session. USE WHEN the user asks to ingest, index, preprocess, or build a knowledge base from a folder of mixed documents; "feed files to Claude", "prepare a corpus", "build a doc index", "RAG prep", "convert documents to markdown", "ingest Jupyter notebooks". RU triggers: "обработай папку с документами", "сделай базу знаний из папки", "подготовь корпус для LLM", "извлеки markdown из файлов". Output is for AI agents, not human reading. For single-file PDF use Anthropic's `pdf` skill.
 ---
 
 # doc2kb — Document Corpus → LLM Knowledge Base
@@ -43,11 +43,13 @@ python3 <skill_dir>/scripts/ensure_env.py <target_script.py> [args ...]
 python3 <skill_dir>/scripts/ensure_env.py
 ```
 
-(No target script → bootstrap only, prints venv-python path.) Creates the venv in a global state dir outside the code (ADR-008 — `$DOC2KB_HOME` or `${XDG_DATA_HOME:-~/.local/share}/agentpipe/doc2kb/venv`) and installs the lightweight tier: pymupdf4llm, pdfplumber, pypdf, pikepdf, python-magic, python-docx, mammoth, python-pptx, openpyxl, trafilatura, markdownify, charset-normalizer, tiktoken.
+(No target script → bootstrap only, prints venv-python path.) Creates the venv in a global state dir outside the code (ADR-008 — `$DOC2KB_HOME` or `${XDG_DATA_HOME:-~/.local/share}/agentpipe/doc2kb/venv`) and installs the lightweight tier: pymupdf4llm, pdfplumber, pypdf, pikepdf, python-magic, python-docx, mammoth, python-pptx, openpyxl, trafilatura, markdownify, charset-normalizer, striprtf, tiktoken.
 
 **Системные зависимости (macOS):** `brew install libmagic` — обязательно, иначе python-magic не импортируется. На Linux: `apt install libmagic1`. На WSL то же. Без libmagic scout всё равно работает (fallback на расширение файла), но `mime_confidence` будет всегда `"high"` без перекрёстной проверки.
 
-**Опциональная зависимость для DOCX с математикой:** `pandoc` (`brew install pandoc` / `apt install pandoc`). Если установлен, `extract_docx.py` автоматически переключается на него для документов, помеченных scout'ом как `has_equations: true`, и сохраняет OOXML math как `$...$` LaTeX. Без pandoc такие документы извлекаются через mammoth и теряют формулы (warning будет в JSON output).
+**Опциональная зависимость для DOCX с математикой:** `pandoc` (`brew install pandoc` / `apt install pandoc`). Если установлен, `extract_docx.py` автоматически переключается на него для документов, помеченных scout'ом как `has_equations: true`, и сохраняет OOXML math как `$...$` LaTeX. Без pandoc такие документы извлекаются через mammoth и теряют формулы (warning будет в JSON output). `pandoc` также используется как предпочтительный маршрут для **`.rtf`** (`extract_rtf.py`): он сохраняет таблицы/картинки/структуру. Без pandoc `.rtf` всё равно извлекается через pure-Python `striprtf` (plain text), так что rtf никогда не падает.
+
+**Системный конвертер для legacy `.doc`:** бинарный формат `.doc` (OLE2) не читается чистым Python, поэтому `extract_doc.py` шеллится во внешний конвертер по убыванию точности: `soffice`/`libreoffice` (`brew install --cask libreoffice` / `apt install libreoffice-writer`) → конвертит в `.docx` и переиспользует весь DOCX-пайплайн (таблицы, картинки, OOXML math); на macOS — `textutil` (встроен) тем же путём; иначе `antiword` (`apt install antiword`) — только plain text. Ни один из конвертеров не ставится в venv (как и opt-in mineru CLI). Если ни одного нет на PATH, `extract_doc.py` выходит с кодом 2 и install-hint — главный цикл должен трактовать это как «нужна установка конвертера», а не как corrupt-файл, и залогировать в `_logs/errors.json`. Scout заранее предупреждает (`no .doc converter on PATH ...`), когда в корпусе есть `.doc`, а конвертера нет.
 
 ### Phase 2: Scout
 
@@ -70,7 +72,7 @@ python3 <skill_dir>/scripts/ensure_env.py scout_corpus.py <input_dir> <kb_dir>
 - `scanned_pdf` — image-only PDF; опции: `skip`, `ocr_tesseract`, `vlm_mlx`, `claude_pagewise`. *MVP поддерживает только `skip`.*
 - `huge_file` — >50 MB или >500 страниц; опции: `skip`, `proceed`, `split`.
 - `corrupt` — не открывается; опции: `skip`.
-- `unsupported_format` — XLSX/EPUB/RTF/ODT/IMAGE (не в MVP); опции: `skip`.
+- `unsupported_format` — XLSX/EPUB/ODT/IMAGE (не в MVP); опции: `skip`. (`.doc` и `.rtf` теперь поддержаны — см. Phase 4.)
 
 ### Phase 4: Extract
 
@@ -81,6 +83,8 @@ python3 <skill_dir>/scripts/ensure_env.py scout_corpus.py <input_dir> <kb_dir>
 | `pymupdf4llm`     | `extract_pdf_pymupdf4llm.py` |
 | `mineru`          | `extract_pdf_mineru.py` *(opt-in tier, see below)* |
 | `mammoth`         | `extract_docx.py` |
+| `doc`             | `extract_doc.py` *(legacy `.doc`; needs system converter)* |
+| `rtf`             | `extract_rtf.py` |
 | `python-pptx`     | `extract_pptx.py` |
 | `passthrough-md`  | `extract_md_txt.py --mode md` |
 | `passthrough-txt` | `extract_md_txt.py --mode txt` |
@@ -209,6 +213,8 @@ python3 <skill_dir>/scripts/ensure_env.py build_manifest.py <kb_dir>
 | `extract_pdf_pymupdf4llm.py` | text-layer PDF → Markdown; auto-extracts embedded images to `<kb_dir>/assets/` and rewires `picture intentionally omitted` placeholders to those files |
 | `extract_pdf_mineru.py`      | **opt-in** VLM-grade PDF → Markdown via the opendatalab/MinerU CLI; mirrors the other extractors' single-file contract, copies images to `<kb_dir>/assets/` via `save_image_safe`, optionally caches raw mineru output under `<kb_dir>/_mineru/<doc_id>/` for follow-up Popo runs. Supports `--pages 2,18-19,35` for page-targeted patching and `--patch-into <target.md>` to splice the result directly into an existing extraction (no temp files, frontmatter records `mineru_patched_pages` + `extraction_method_supplementary`). Requires `ensure_env.py --tier mineru`. |
 | `extract_docx.py`            | DOCX → Markdown via mammoth + markdownify; switches to pandoc when source contains OOXML math so formulas survive as LaTeX |
+| `extract_doc.py`             | legacy binary `.doc` → Markdown via a system-converter cascade (`soffice`/`libreoffice` or macOS `textutil` → `.docx` → full DOCX pipeline; `antiword` → plain text). Exits 2 with an install hint when no converter is on PATH |
+| `extract_rtf.py`             | RTF → Markdown via pandoc when available (tables/images/structure), else the pure-Python `striprtf` fallback (plain text) |
 | `extract_pptx.py`            | PPTX → Markdown, preserves speaker notes |
 | `extract_ipynb.py`           | Jupyter notebook (.ipynb) → Markdown; per-cell anchors, text outputs preserved, base64 images dropped |
 | `extract_md_txt.py`          | normalize Markdown/text, encoding-aware |
@@ -460,8 +466,13 @@ to iterate without redoing earlier steps.
 **MVP lightweight tier (всегда установлен):**
 - PDF (text-layer), DOCX, PPTX (с speaker notes), IPYNB (Jupyter notebook —
   source + text outputs, base64-картинки заменяются placeholder),
-  MD, TXT, HTML.
+  RTF, MD, TXT, HTML.
 - `.ipynb` парсится stdlib `json` — никаких jupyter/nbformat в venv.
+- `.rtf` — pure-Python `striprtf` всегда доступен; pandoc (если на PATH)
+  даёт более качественный маршрут с таблицами/картинками.
+- `.doc` (legacy binary Word) — поддержан через системный конвертер
+  (`soffice`/`libreoffice`, macOS `textutil`, или `antiword`). Конвертер
+  НЕ ставится в venv; без него `extract_doc.py` выходит с install-hint.
 
 **Opt-in heavy tier (`ensure_env.py --tier mineru`):**
 - VLM-grade PDF extraction через MinerU 2.5+ (`extract_pdf_mineru.py`).
@@ -470,6 +481,6 @@ to iterate without redoing earlier steps.
   (`postprocess_popo.py`, требует пользовательской установки Popo).
 
 **Follow-up (ещё не в скилле):**
-- XLSX, EPUB, RTF, ODT, standalone images.
+- XLSX, EPUB, ODT, standalone images.
 - Scanned PDFs через OCRmyPDF + Tesseract (альтернатива MinerU без VLM).
 - Heavy tier на базе docling / marker-pdf для специфических layout-кейсов.

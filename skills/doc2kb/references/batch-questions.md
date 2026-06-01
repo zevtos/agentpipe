@@ -77,12 +77,17 @@ split = пока не поддержано, эквивалентно proceed.
 
 ```
 Форматы, не поддержанные в MVP:
-  - .xlsx, .epub, .rtf, .odt, изображения
+  - .xlsx, .epub, .odt, изображения
 Варианты: skip
 По умолчанию: skip
 
 Поддержка этих форматов придёт в follow-up release.
 ```
+
+(`.doc` и `.rtf` поддержаны и сюда не попадают. `.doc` требует системного
+конвертера — `soffice`/`libreoffice`, macOS `textutil`, или `antiword`; если
+его нет, scout добавит warning к файлу, а `extract_doc.py` вернёт install-hint.
+`.rtf` всегда извлекается — pandoc при наличии, иначе pure-Python `striprtf`.)
 
 ## Example end-to-end question
 

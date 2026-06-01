@@ -14,6 +14,12 @@ openpyxl>=3.1.0,<4.0
 trafilatura>=1.12.0,<3.0
 markdownify>=0.13.0,<2.0
 charset-normalizer>=3.3.0,<4.0
+# striprtf powers the pure-Python RTF fallback (extract_rtf.py) when pandoc is
+# absent. Tiny, dependency-free, plain-text only — pandoc remains the
+# preferred RTF route when on PATH. Legacy .doc has no pure-Python reader and
+# relies on a system converter (soffice/textutil/antiword), so nothing is
+# pinned here for it.
+striprtf>=0.0.26,<1.0
 # Pillow powers save_image_safe() — every extractor funnels image bytes
 # through it to enforce the 2000-px max-dimension cap (Claude's vision
 # encoder breaks above ~2 k px) and to re-encode palette/RGBA images that
