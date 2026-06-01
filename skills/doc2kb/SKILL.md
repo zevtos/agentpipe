@@ -74,9 +74,29 @@ python3 <skill_dir>/scripts/ensure_env.py scout_corpus.py <input_dir> <kb_dir>
 - `corrupt` — не открывается; опции: `skip`.
 - `unsupported_format` — XLSX/EPUB/ODT/IMAGE (не в MVP); опции: `skip`. (`.doc` и `.rtf` теперь поддержаны — см. Phase 4.)
 
+**Применение решений (важно для Phase 4).** Разрешив группу, обновите каждый файл в `_scout.json`: проставьте итоговый `extraction_strategy` (`skip` для отказа, либо рабочую стратегию для `proceed`) **и обнулите `action_required` (`null`)**. `extract_corpus.py` (Phase 4) откажется стартовать (exit 2), пока хоть у одного файла остался непустой `action_required` — это и есть гейт, гарантирующий, что Phase 3 пройдена.
+
 ### Phase 4: Extract
 
-Для каждого файла из `_scout.files[]` (где `extraction_strategy` не `skip`) выберите скрипт по `references/extraction-recipes.md`:
+**Запускайте один батч-диспетчер — не парсите файлы вручную.** `extract_corpus.py` читает `_scout.json` и сам прогоняет весь механический Phase-4 цикл: диспатчит каждую `extraction_strategy` на нужный extractor через `ensure_env.py`, пишет `docs/<id>-<slug>.md`, копит `_logs/errors.json`, и печатает **один** JSON-summary последней строкой stdout. Это заменяет ручной цикл «построить команду → запустить → распарсить JSON → залогировать» по каждому файлу.
+
+```bash
+python3 <skill_dir>/scripts/ensure_env.py extract_corpus.py <kb_dir>
+# опции: --timeout 600 (на файл), --normalize (прогнать normalize_md после каждого), --quiet
+```
+
+Exit codes: `0` — все файлы дошли до терминального состояния (`needs_attention` это НЕ ошибка); `2` — отказ старта (нет `_scout.json`, либо у какого-то файла остался непустой `action_required` — вернитесь в Phase 3); `3` — был хотя бы один файл в `error`-бакете (см. `_logs/errors.json`).
+
+Каждый файл попадает ровно в один бакет `counts`: `extracted` / `unchanged` (sha совпал, переэкстракция пропущена) / `skipped_by_decision` / `error` / `needs_attention` (= число `needs_install`). **Идемпотентность по `source_sha256`:** повторный запуск переэкстрактит только изменившиеся файлы — безопасно гонять много раз (например, после установки конвертера для `.doc`).
+
+**Разберите `needs_attention[]` после диспетчера — это файлы, требующие ВАШЕГО суждения (диспетчер их НЕ решает сам, только surface'ит):**
+- `reason: "needs_install"` — extractor вышел с кодом 2: `.doc` без системного конвертера, либо `mineru` CLI не установлен. `install_hint` подскажет, что поставить. Это НЕ ошибка и НЕ corrupt — поставьте инструмент и **перезапустите `extract_corpus.py`** (идемпотентность доделает только этот файл).
+- `reason: "visual_transcription"` — `ok:true` PDF с warning'ом `mangled_visual_layout`: body извлечён, но позиционная математика рассыпана. Перечитайте исходный PDF через `Read` и перепишите body `docs/<id>-*.md` вручную (см. pitfalls #13), затем `extraction_method: claude-pagewise-manual@1`.
+- `reason: "dropped_pictures_residual"` — `ok:true` PDF с остаточными `dropped_pictures`: поле `pages` (список номеров страниц, восстановленный из тела документа) подскажет, какие страницы догнать через mineru page-patch (`extract_pdf_mineru.py --pages … --patch-into …`) или ручную транскрипцию.
+
+Файлы `visual_transcription`/`dropped_pictures_residual` помечены `extracted_but_flagged: true` — считаются в `extracted` И присутствуют в `needs_attention[]` (body уже на диске, но требует доводки). `unclassified_warnings[]` эхо-ит любые нераспознанные warning'и дословно — **ничего не глотается молча**. После разбора `needs_attention[]` переходите к Phase 5 (`build_manifest.py` подхватит `_logs/errors.json`).
+
+> Диспетчер использует таблицу стратегий ниже внутри себя. Прямой вызов одного extractor'а нужен только для адресных доводок (mineru page-patch, ручная переэкстракция одного файла):
 
 | extraction_strategy | script |
 |---|---|
@@ -91,8 +111,6 @@ python3 <skill_dir>/scripts/ensure_env.py scout_corpus.py <input_dir> <kb_dir>
 | `trafilatura`     | `extract_html.py` |
 | `ipynb`           | `extract_ipynb.py` |
 
-Запускайте extract-скрипт через `ensure_env.py`:
-
 ```bash
 python3 <skill_dir>/scripts/ensure_env.py extract_pdf_pymupdf4llm.py \
     "<absolute input path>" \
@@ -101,7 +119,7 @@ python3 <skill_dir>/scripts/ensure_env.py extract_pdf_pymupdf4llm.py \
     --source-rel "<source_path from scout>"
 ```
 
-Каждый extract-скрипт пишет один `.md` в `<kb_dir>/docs/` и возвращает JSON `{ok, out, tokens_estimated, warnings, ...}` в stdout. **Парсите этот JSON** — `warnings` непустые означают, что extraction прошёл с deficiency (пустой результат, charts dropped, и т.д.).
+Каждый extract-скрипт пишет один `.md` в `<kb_dir>/docs/` и возвращает JSON `{ok, out, tokens_estimated, warnings, ...}` в stdout (диспетчер парсит его за вас). `warnings` непустые означают, что extraction прошёл с deficiency (пустой результат, charts dropped, и т.д.).
 
 **DOCX с математикой (автоматический pandoc-маршрут).** Если scout пометил DOCX как `has_equations: true` и `pandoc` есть на `PATH`, `extract_docx.py` автоматически переключается с mammoth на pandoc — он сохраняет OOXML math (`<m:oMath>`) как `$...$`/`$$...$$` LaTeX. Mammoth по-тихому дропает math элементы, и body после него ссылается на "формулу (1)", у которой нет содержимого. JSON `extractor` поле сообщит, какой маршрут был использован (`pandoc` или `mammoth+markdownify`). Если pandoc недоступен на машине с math-документом — будет warning с инструкцией установить (`brew install pandoc` / `apt install pandoc`).
 
@@ -210,6 +228,7 @@ python3 <skill_dir>/scripts/ensure_env.py build_manifest.py <kb_dir>
 |---|---|
 | `ensure_env.py`              | idempotent venv bootstrap (run once or on requirements change). Accepts `--tier mineru` for the opt-in heavy install. |
 | `scout_corpus.py`            | Phase 2 — classify corpus, emit `_scout.json`. `--enable-mineru` opt-in routes `image_only` PDFs through the mineru extractor. |
+| `extract_corpus.py`          | Phase 4 batch dispatcher — runs the whole mechanical extract loop from `_scout.json` (strategy→extractor via `ensure_env.py`, writes `docs/*.md` + `_logs/errors.json`), idempotent by `source_sha256`, and prints one JSON summary with a `needs_attention[]` queue (`needs_install` / `visual_transcription` / `dropped_pictures_residual`). Refuses to start (exit 2) on unresolved `action_required`. The agent runs this instead of looping per-file, then handles `needs_attention[]`. |
 | `extract_pdf_pymupdf4llm.py` | text-layer PDF → Markdown; auto-extracts embedded images to `<kb_dir>/assets/` and rewires `picture intentionally omitted` placeholders to those files |
 | `extract_pdf_mineru.py`      | **opt-in** VLM-grade PDF → Markdown via the opendatalab/MinerU CLI; mirrors the other extractors' single-file contract, copies images to `<kb_dir>/assets/` via `save_image_safe`, optionally caches raw mineru output under `<kb_dir>/_mineru/<doc_id>/` for follow-up Popo runs. Supports `--pages 2,18-19,35` for page-targeted patching and `--patch-into <target.md>` to splice the result directly into an existing extraction (no temp files, frontmatter records `mineru_patched_pages` + `extraction_method_supplementary`). Requires `ensure_env.py --tier mineru`. |
 | `extract_docx.py`            | DOCX → Markdown via mammoth + markdownify; switches to pandoc when source contains OOXML math so formulas survive as LaTeX |

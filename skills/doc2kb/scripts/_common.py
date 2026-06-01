@@ -79,9 +79,15 @@ def slugify(text: str, maxlen: int = 48) -> str:
 
 def kb_doc_filename(doc_id: str, source_path: str) -> str:
     """Returns <doc_id>-<slug>.md given a source path. The slug uses
-    Path.stem so 'Pro_GOST.pdf' → 'pro-gost'."""
+    Path.stem so 'Pro_GOST.pdf' → 'pro-gost'.
+
+    Both components are sanitized so a hostile `doc_id` or `source_path`
+    (path separators, '..', NUL) from an untrusted/agent-mutable _scout.json
+    can never redirect the output path outside the kb's docs/ dir. For a
+    well-formed `doc-NNN` id this is a no-op."""
+    safe_id = re.sub(r"[^A-Za-z0-9_-]", "", str(doc_id)) or "doc"
     stem = Path(source_path).stem
-    return f"{doc_id}-{slugify(stem)}.md"
+    return f"{safe_id}-{slugify(stem)}.md"
 
 
 _HEADING_BAD_CHARS_RE = re.compile(r"[\r\n\t\x00-\x08\x0b\x0c\x0e-\x1f]+")
@@ -590,6 +596,66 @@ def assemble_body_from_sections(
     for page_no in sorted(sections):
         parts.append(sections[page_no].rstrip() + "\n")
     return "\n".join(parts).rstrip() + "\n"
+
+
+# ---------- pdf extractor warning classification ----------
+
+# Canonical prefixes for the two pymupdf4llm warnings that REQUIRE agent
+# judgment (visual transcription of positioned math / residual dropped
+# pictures). Hoisted here so the emitter (extract_pdf_pymupdf4llm.py) and the
+# Phase-4 dispatcher (extract_corpus.py, which classifies the warnings to build
+# its needs_attention[] queue) can never drift apart — pitfall #13. The emitter
+# builds its warning string from these constants; the dispatcher matches by
+# `str.startswith(prefix)`.
+PDF_WARN_MANGLED_PREFIX = "mangled_visual_layout:"
+PDF_WARN_DROPPED_PICTURES_PREFIX = "dropped_pictures:"
+
+# Recognized-but-benign pymupdf4llm warning prefixes — auto-healed in the
+# extractor, NOT agent-actionable. Listed so the dispatcher's "unknown warning"
+# echo does not fire on them.
+PDF_WARN_BENIGN_PREFIXES = (
+    "ligatures_recovered:",
+    "ligature_residual:",
+    "suspiciously small extraction:",
+    "image extraction failed:",
+)
+
+# pymupdf4llm replaces positioned figures it cannot extract with
+# `==> picture [W x H] intentionally omitted <==` placeholders. Shared here so
+# both the emitter and the dispatcher (which re-scans a produced doc to recover
+# the residual pages for a dropped_pictures_residual follow-up) use one pattern.
+PICTURE_PLACEHOLDER_RE = re.compile(
+    r"==>\s*picture\s*\[\s*\d+\s*x\s*\d+\s*\]\s*intentionally\s*omitted\s*<=="
+)
+
+
+def classify_pdf_warning(w: str) -> str | None:
+    """Classify a single pymupdf4llm warning string. Returns one of
+    'visual_transcription', 'dropped_pictures_residual', 'benign', or None
+    (unrecognized). The dispatcher routes the first two into needs_attention[]
+    and echoes the None case verbatim so nothing is silently swallowed."""
+    if w.startswith(PDF_WARN_MANGLED_PREFIX):
+        return "visual_transcription"
+    if w.startswith(PDF_WARN_DROPPED_PICTURES_PREFIX):
+        return "dropped_pictures_residual"
+    if w.startswith(PDF_WARN_BENIGN_PREFIXES):
+        return "benign"
+    return None
+
+
+def residual_picture_pages(body: str) -> list[int]:
+    """Return the sorted page numbers (from `[page N]` anchors) whose section
+    still contains an unrecovered `==> picture … intentionally omitted <==`
+    placeholder. Used by the dispatcher to populate
+    needs_attention[].pages for a `dropped_pictures_residual` follow-up — the
+    warning string itself carries only counts, not a page list, so the pages
+    are recovered from the produced document. Returns [] when no anchored
+    placeholder is found (the agent then inspects the whole doc)."""
+    _, sections = split_body_by_page_anchors(body)
+    return sorted(
+        page_no for page_no, section in sections.items()
+        if PICTURE_PLACEHOLDER_RE.search(section)
+    )
 
 
 # ---------- frontmatter reader ----------

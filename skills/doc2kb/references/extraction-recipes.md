@@ -14,6 +14,46 @@ All commands assume:
   as `<DOCID>-<slugify(stem)>.md` (slugify: NFKD-strip → drop non-ASCII →
   collapse non-alnum to `-` → lowercase, ≤48 chars).
 
+## Preferred: the batch dispatcher (`extract_corpus.py`)
+
+Do NOT hand-loop the per-file recipes below in normal operation. Run the
+Phase-4 dispatcher once — it reads `_scout.json`, applies the strategy→script
+map for you, writes every `docs/<id>-<slug>.md` + `_logs/errors.json`, and
+returns one JSON summary:
+
+```bash
+python3 <skill_dir>/scripts/ensure_env.py extract_corpus.py <kb_dir> \
+    [--timeout 600] [--normalize] [--quiet]
+```
+
+Summary shape (last stdout line):
+
+```json
+{
+  "ok": true,
+  "counts": {"extracted": N, "unchanged": N, "skipped_by_decision": N,
+             "error": N, "needs_attention": N},
+  "extracted_but_flagged": N,
+  "needs_attention": [ /* see format-spec.md */ ],
+  "unclassified_warnings": [ {"id","source_path","warnings":[...]} ],
+  "errors_log": "<kb>/_logs/errors.json" | null
+}
+```
+
+- Idempotent: a file whose produced doc already has a matching
+  `source_sha256` is counted `unchanged` and not re-extracted.
+- Refuses to start (exit 2) if any `_scout.files[]` entry still has a non-null
+  `action_required` — resolve Phase 3 first (set the final `extraction_strategy`
+  AND null `action_required`).
+- Exit 0 = all terminal (needs_attention is not failure); 2 = refused; 3 = had errors.
+- After it returns, act on `needs_attention[]` (`needs_install` → install the
+  converter/CLI and re-run; `visual_transcription` / `dropped_pictures_residual`
+  → mineru page-patch or Read-tool transcription), then run `build_manifest.py`.
+
+The per-file recipes below are what the dispatcher invokes internally, and are
+the right tool for **ad-hoc** single-file work (mineru page-patch, manual
+re-extraction). Don't use them to replace the dispatcher for a whole corpus.
+
 The canonical invocation uses `ensure_env.py` as a wrapper — it bootstraps
 the venv on first call and execs the target script through `.venv/bin/python`:
 

@@ -319,3 +319,56 @@ Failure:
 ```
 
 Stderr is used only for human-readable progress logs.
+
+## Stdout JSON from `extract_corpus.py` (Phase 4 dispatcher)
+
+The dispatcher prints exactly one JSON object as its last stdout line. Every
+`_scout.files[]` entry lands in exactly one `counts` bucket; flagged-but-
+extracted files (`visual_transcription` / `dropped_pictures_residual`) are
+counted in `extracted` AND listed in `needs_attention[]` with
+`extracted_but_flagged: true`, so `counts.needs_attention` holds only
+`needs_install` entries and `sum(counts.values()) == len(files)`.
+
+```json
+{
+  "ok": true,                       // false iff error count > 0 or refused to start
+  "kb_root": "/abs/kb",
+  "scout": "/abs/kb/_scout.json",
+  "counts": {
+    "extracted": int,               // ok:true (includes extracted_but_flagged)
+    "unchanged": int,               // produced doc's source_sha256 == scout sha256
+    "skipped_by_decision": int,     // strategy ∈ {skip, not_in_mvp, needs_ocr_or_vlm, needs_password}
+    "error": int,                   // ok:false / non-2 exit / timeout / invalid scout field
+    "needs_attention": int          // == number of needs_install entries only
+  },
+  "extracted_but_flagged": int,     // subset of `extracted` also in needs_attention[]
+  "needs_attention": [
+    { "id": "doc-007", "source_path": "rel", "reason": "needs_install",
+      "doc": null, "extracted_but_flagged": false, "install_hint": "..." },
+    { "id": "doc-011", "source_path": "rel", "reason": "visual_transcription",
+      "doc": "docs/doc-011-...md", "extracted_but_flagged": true, "warning": "..." },
+    { "id": "doc-020", "source_path": "rel", "reason": "dropped_pictures_residual",
+      "doc": "docs/doc-020-...md", "extracted_but_flagged": true,
+      "pages": [2, 18, 19], "warning": "..." }
+  ],
+  "unclassified_warnings": [ { "id": "...", "source_path": "...", "warnings": [string] } ],
+  "errors_log": "/abs/kb/_logs/errors.json" | null,   // present iff error count > 0
+  "elapsed_seconds": float,
+  "driver": "doc2kb-extract-corpus@<VERSION>"
+}
+```
+
+`reason` ∈ {`needs_install`, `visual_transcription`, `dropped_pictures_residual`}.
+`pages` (list[int]) appears only for `dropped_pictures_residual`, recovered by
+re-scanning the produced doc for residual `==> picture … omitted <==`
+placeholders mapped to `[page N]` anchors (the warning string itself carries
+only counts). `unclassified_warnings[]` echoes every unrecognized `ok:true`
+warning verbatim — nothing is silently swallowed.
+
+Refusal (missing `_scout.json`, unparseable, or any unresolved
+`action_required`) prints `{"ok": false, "reason": "...", "files": [...], "driver": ...}`
+and exits 2 without extracting anything.
+
+`_logs/errors.json` (written by the dispatcher, read by `build_manifest.py`) is
+the array `[{"source_path": str, "error": str}, ...]`; it is overwritten on
+every run (empty `[]` on a clean run) so a stale list is never surfaced.

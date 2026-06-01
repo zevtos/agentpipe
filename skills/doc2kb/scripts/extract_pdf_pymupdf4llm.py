@@ -46,6 +46,9 @@ from pathlib import Path
 # doc2kb.pth that ensure_env.py wrote).
 from _common import (  # noqa: E402
     _RESIDUAL_LIGATURE_RE,
+    PDF_WARN_DROPPED_PICTURES_PREFIX,
+    PDF_WARN_MANGLED_PREFIX,
+    PICTURE_PLACEHOLDER_RE,
     add_assets_args,
     clean_whitespace,
     count_tokens,
@@ -89,10 +92,8 @@ MANGLED_MIN_TABLE_CELLS = 4       # tables smaller than this can't trip the flag
 # the dropped pictures ARE the equations — body text references "уравнение
 # (1)", "формула", "матрица" but the formulas themselves are gone. The kb
 # document looks mostly intact but is missing the math the agent will be
-# asked about.
-PICTURE_PLACEHOLDER_RE = re.compile(
-    r"==>\s*picture\s*\[\s*\d+\s*x\s*\d+\s*\]\s*intentionally\s*omitted\s*<=="
-)
+# asked about. PICTURE_PLACEHOLDER_RE is shared via _common so the Phase-4
+# dispatcher (extract_corpus.py) re-scans produced docs with the same pattern.
 DROPPED_PICTURES_PER_PAGE_MIN = 2.0  # avg pictures/page above this → suspicious
 DROPPED_PICTURES_ABS_MIN = 5         # OR: absolute count above this on any doc
 
@@ -438,7 +439,7 @@ def extract(
     mangled = _detect_mangled_layout(body)
     if mangled is not None:
         warnings.append(
-            "mangled_visual_layout: detected fragmented text in "
+            f"{PDF_WARN_MANGLED_PREFIX} detected fragmented text in "
             f"{mangled['mangled_cells']}/{mangled['table_cells']} table cells "
             f"(ratio {mangled['ratio']}) suggestive of visual math/equation "
             "layout that pymupdf4llm cannot represent faithfully — re-extract "
@@ -492,14 +493,14 @@ def extract(
         )
         if replaced > 0:
             warnings.append(
-                f"dropped_pictures: {replaced}/{total_drops} placeholder(s) "
+                f"{PDF_WARN_DROPPED_PICTURES_PREFIX} {replaced}/{total_drops} placeholder(s) "
                 f"were auto-recovered as assets, but {dropped['count']} "
                 f"still remain over {dropped['pages']} page(s) "
                 f"({dropped['per_page']}/page). " + remediation
             )
         else:
             warnings.append(
-                f"dropped_pictures: pymupdf4llm omitted {dropped['count']} "
+                f"{PDF_WARN_DROPPED_PICTURES_PREFIX} pymupdf4llm omitted {dropped['count']} "
                 f"picture(s) over {dropped['pages']} page(s) "
                 f"({dropped['per_page']}/page); in scientific/lab PDFs "
                 "these placeholders typically hide equations, matrices, "
