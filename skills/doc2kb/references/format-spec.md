@@ -255,7 +255,10 @@ Emitted by `build_manifest.py`. Schema:
 
 ## `INDEX.md`
 
-Human + agent readable. Generated structure:
+Human + agent readable. It is the single agent-facing catalog: each document
+carries its `headings` and any `warnings` inline, so the agent does not need
+to read `manifest.json` or `llms.txt` to navigate (those remain for tooling /
+standard compliance). Generated structure:
 
 ```markdown
 # Knowledge Base Index
@@ -263,11 +266,14 @@ Human + agent readable. Generated structure:
 N document(s) extracted on YYYY-MM-DD. Estimated total: ~X,XXX tokens.
 
 ## How to use
-(1. INDEX.md, 2. manifest.json, 3. AGENTS.md, 4. docs/*)
+(1. AGENTS.md, 2. this catalog, 3. docs/* as needed; manifest.json/llms.txt
+ are for tooling, not navigation)
 
 ## By source type
 ### pdf (M document(s), ~X tokens)
 - [source name](docs/doc-NNN-slug.md) — Mp, ~X tok
+  - Heading One · Heading Two · Heading Three
+  - ⚠ warning text (only when the doc has warnings)
 ...
 
 ## Skipped (K)

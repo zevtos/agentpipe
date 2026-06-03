@@ -79,6 +79,12 @@ POPO_BASH_SCRIPTS = (
 )
 POPO_OUTPUT_TREE_DIR = "outputs/build_tree/mineru"
 
+SCRIPTS_DIR = Path(__file__).resolve().parent
+# Sentinel written by bootstrap_popo.py holding the path to Popo's dedicated env
+# python. Its bin/ dir is prepended to PATH when running Popo's bash scripts
+# (which call `python3` from PATH, not `conda activate`).
+POPO_PY_SENTINEL = ".doc2kb-popo-python"
+
 POPO_NOT_FOUND_HINT = (
     "MinerU-Popo repo not configured. Either:\n"
     f"  1) Set the env var: export {POPO_ENV_VAR}=/abs/path/to/MinerU-Popo\n"
@@ -93,13 +99,55 @@ POPO_NOT_FOUND_HINT = (
 
 
 def _resolve_popo_repo(arg: str | None) -> Path | None:
-    """Return the Popo repo path from --popo-repo or the env var, or None
-    if neither is set. We don't try to auto-detect — too easy to pick the
-    wrong checkout and silently overwrite someone else's working copy."""
+    """Return the Popo repo path. Precedence: --popo-repo > $DOC2KB_POPO_REPO >
+    the bootstrap_popo.py auto-default (<state-dir>/popo/MinerU-Popo) if it
+    exists. We don't otherwise auto-detect — too easy to pick the wrong checkout
+    and silently overwrite someone else's working copy."""
     candidate = arg or os.environ.get(POPO_ENV_VAR)
-    if not candidate:
+    if candidate:
+        return Path(candidate).expanduser().resolve()
+    try:
+        from ensure_env import _skill_state_dir
+        auto = (_skill_state_dir() / "popo" / "MinerU-Popo").resolve()
+        if auto.is_dir():
+            return auto
+    except Exception:  # noqa: BLE001 — auto-default is a convenience, never fatal
+        pass
+    return None
+
+
+def _popo_subprocess_env(popo_repo: Path) -> dict | None:
+    """Build the env for Popo's bash scripts. On macOS we always return an env
+    (even without a sentinel) so the MPS knobs are set; the sentinel additionally
+    PATH-injects the bootstrapped env's python. Returns None (ambient env) only on
+    non-darwin without a sentinel."""
+    sentinel = popo_repo / POPO_PY_SENTINEL
+    py = ""
+    if sentinel.is_file():
+        try:
+            py = sentinel.read_text(encoding="utf-8").strip()
+        except OSError:
+            py = ""
+
+    if not py and sys.platform != "darwin":
         return None
-    return Path(candidate).expanduser().resolve()
+
+    env = dict(os.environ)
+    if py:
+        bindir = str(Path(py).parent)
+        env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+    # Popo's transformers backend (model_utils._transformers_generate) reads the
+    # model from os.environ["POPO_MODEL_PATH"] (default "popo_model" — a relative
+    # dir that won't exist). run_inference.sh never exports it, so wire it to the
+    # model the bootstrap downloaded.
+    model_dir = popo_repo / "models" / "Mineru-Popo"
+    if model_dir.is_dir():
+        env.setdefault("POPO_MODEL_PATH", str(model_dir))
+    if sys.platform == "darwin":
+        # Popo's transformers backend runs the 4B VLM on MPS; route any op that
+        # MPS doesn't implement to CPU instead of crashing.
+        env.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+    return env
 
 
 def _validate_popo_layout(repo: Path) -> list[str]:
@@ -143,9 +191,10 @@ def _stage_doc_into_popo(
     return target
 
 
-def _run_bash(script: Path, cwd: Path) -> tuple[int, str]:
+def _run_bash(script: Path, cwd: Path, env: dict | None = None) -> tuple[int, str]:
     """Invoke a Popo bash script. We force `bash` even on macOS where the
-    user's default shell may be zsh, since Popo's scripts use bash-isms."""
+    user's default shell may be zsh, since Popo's scripts use bash-isms.
+    `env` (when given) carries the bootstrapped Popo env's bin/ on PATH."""
     if not script.is_file():
         return 127, f"script not found: {script}"
     log(f"$ bash {script.relative_to(cwd)} (cwd={cwd})", prefix="popo")
@@ -155,6 +204,7 @@ def _run_bash(script: Path, cwd: Path) -> tuple[int, str]:
         capture_output=True,
         text=True,
         check=False,
+        env=env,
     )
     if proc.returncode != 0:
         tail = "\n".join((proc.stderr or proc.stdout or "").splitlines()[-12:])
@@ -257,6 +307,11 @@ def main() -> int:
         help="Skip step 3 (run_inference.sh) — useful when re-building "
              "trees from existing inference output.",
     )
+    ap.add_argument(
+        "--auto-setup", action="store_true",
+        help="If no Popo repo is configured, run bootstrap_popo.py first "
+             "(clone + env + ~8 GB model download), then proceed.",
+    )
     args = ap.parse_args()
 
     kb_dir = Path(args.kb_dir).expanduser().resolve()
@@ -265,6 +320,15 @@ def main() -> int:
         return 1
 
     popo_repo = _resolve_popo_repo(args.popo_repo)
+    if popo_repo is None and args.auto_setup:
+        log("Popo repo not configured; --auto-setup → running bootstrap_popo.py "
+            "(this may clone the repo, build an env, and download ~8 GB)",
+            prefix="popo")
+        subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "ensure_env.py"), "bootstrap_popo.py"],
+            check=False,
+        )
+        popo_repo = _resolve_popo_repo(args.popo_repo)
     if popo_repo is None:
         emit_failure(POPO_NOT_FOUND_HINT)
         return 2
@@ -314,6 +378,12 @@ def main() -> int:
     log(f"staged {len(staged)} doc(s) under {popo_repo}/post-process/mineru/{args.run_name}/",
         prefix="popo")
 
+    # Use the bootstrapped env's python (if bootstrap_popo.py set one up) when
+    # invoking Popo's bash scripts — they resolve `python3` from PATH.
+    popo_env = _popo_subprocess_env(popo_repo)
+    if popo_env is not None:
+        log(f"using bootstrapped Popo env (sentinel {POPO_PY_SENTINEL})", prefix="popo")
+
     # Run Popo's three bash scripts in order. Each step can be skipped via
     # a flag for iterative re-runs without re-normalizing/re-inferring.
     steps: list[tuple[str, str, bool]] = [
@@ -325,7 +395,7 @@ def main() -> int:
         if skip:
             log(f"skipping {label} (--skip-{label.split('_')[0]} set)", prefix="popo")
             continue
-        rc, err = _run_bash(popo_repo / rel_script, popo_repo)
+        rc, err = _run_bash(popo_repo / rel_script, popo_repo, env=popo_env)
         if rc != 0:
             emit_failure(
                 f"popo {label} failed (exit {rc}):\n{err or 'no stderr captured'}"

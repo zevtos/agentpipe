@@ -41,6 +41,16 @@ Scope — what this dispatcher OWNS vs. what stays the agent's:
     exits 2 and the file surfaces as `needs_install`, so the driver never
     silently auto-installs the ~3 GB ML tier (doc2kb heavy-deps-opt-in rule).
 
+Per-file MinerU settings + env-gated Popo (both default-off):
+    - `_scout.files[].mineru` (a structured `{backend,lang,keep_raw}` block,
+      stamped by apply_overrides.py) is rendered into whitelisted CLI flags for
+      the mineru extractor — never raw arg strings (scout is agent-mutable).
+    - DOC2KB_ALWAYS_POPO (env) routes every mineru-extracted doc through Popo as
+      a non-fatal stage-2 pass; a per-file `popo` bool overrides it. Routed docs
+      get `--keep-raw` forced so Popo finds the `<kb>/_mineru/<id>/` cache. With
+      DOC2KB_POPO_AUTO set, Popo self-bootstraps (clone+env+model). With neither
+      env nor any per-file popo flag, NOTHING extra runs — behavior is unchanged.
+
 Refuse-to-start (exit 2, nothing extracted):
     - `_scout.json` missing or unparseable.
     - Any file still carries a non-null `action_required` (Phase 3 not done).
@@ -64,6 +74,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -80,6 +91,7 @@ from _common import (  # noqa: E402
     tool_version_string,
     validate_source_rel,
 )
+from extract_pdf_mineru import SUPPORTED_BACKENDS  # noqa: E402  (constant only)
 
 
 # Canonical scout id shape (`doc-001`, `doc-042`, …). The driver re-asserts it
@@ -111,9 +123,45 @@ DISPATCH: dict[str, tuple[str, list[str]]] = {
 # Explicit "do not extract" outcomes already decided upstream (scout or Phase 3).
 NON_RUNNABLE = {"skip", "not_in_mvp", "needs_ocr_or_vlm", "needs_password"}
 
+_LANG_RE = re.compile(r"^[a-z]{2,}$")
+# Popo (and its optional auto-bootstrap) are heavy: VLM inference on a 4B model
+# and, when DOC2KB_POPO_AUTO is set, a multi-GB model download. Give them a
+# generous ceiling independent of the per-file extractor --timeout.
+POPO_TIMEOUT_SEC = 6 * 3600
+
 
 def log(msg: str) -> None:
     _common_log(msg, prefix="doc2kb extract")
+
+
+def _truthy(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _mineru_flags(file_entry: dict, force_keep_raw: bool) -> tuple[list[str], list[str]]:
+    """Render safe per-file MinerU CLI flags from the structured `mineru` block
+    that apply_overrides stamped onto the scout entry. Whitelisted values only —
+    never raw arg strings (scout is agent-mutable / untrusted-corpus-derived).
+    Returns (flags, warnings)."""
+    flags: list[str] = []
+    warns: list[str] = []
+    block = file_entry.get("mineru")
+    if isinstance(block, dict):
+        backend = block.get("backend")
+        if backend in SUPPORTED_BACKENDS:
+            flags += ["--backend", backend]
+        elif backend is not None:
+            warns.append(f"ignored invalid mineru.backend {backend!r}")
+        lang = block.get("lang")
+        if isinstance(lang, str) and _LANG_RE.match(lang):
+            flags += ["--lang", lang]
+        elif lang is not None:
+            warns.append(f"ignored invalid mineru.lang {lang!r}")
+        if block.get("keep_raw") is True:
+            force_keep_raw = True
+    if force_keep_raw and "--keep-raw" not in flags:
+        flags.append("--keep-raw")
+    return flags, warns
 
 
 def _emit(obj: dict) -> None:
@@ -139,7 +187,8 @@ def _parse_last_json_line(stdout: str) -> dict | None:
 
 
 def _run_extractor(strategy: str, in_path: Path, out_path: Path,
-                   doc_id: str, source_rel: str, timeout: int):
+                   doc_id: str, source_rel: str, timeout: int,
+                   extra_flags: list[str] | None = None):
     """Invoke one extractor through ensure_env.py. Returns
     (returncode_or_'timeout', parsed_json_or_None, stderr_tail)."""
     script, extra = DISPATCH[strategy]
@@ -147,12 +196,60 @@ def _run_extractor(strategy: str, in_path: Path, out_path: Path,
         sys.executable, str(ENSURE_ENV), script,
         str(in_path), str(out_path),
         "--doc-id", doc_id, "--source-rel", source_rel, *extra,
+        *(extra_flags or []),
     ]
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return "timeout", None, f"timeout after {timeout}s"
     return proc.returncode, _parse_last_json_line(proc.stdout or ""), (proc.stderr or "").strip()
+
+
+def _invoke_popo(kb_root: Path, doc_id: str, auto_setup: bool):
+    """Run postprocess_popo.py for one mineru-extracted doc through ensure_env.py.
+    Returns (returncode_or_'timeout', parsed_json_or_None, stderr_tail)."""
+    argv = [sys.executable, str(ENSURE_ENV), "postprocess_popo.py",
+            str(kb_root), "--doc-id", doc_id]
+    if auto_setup:
+        argv.append("--auto-setup")
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True,
+                              timeout=POPO_TIMEOUT_SEC)
+    except subprocess.TimeoutExpired:
+        return "timeout", None, f"timeout after {POPO_TIMEOUT_SEC}s"
+    return proc.returncode, _parse_last_json_line(proc.stdout or ""), (proc.stderr or "").strip()
+
+
+def _run_popo(kb_root: Path, doc_ids: list[str],
+              needs_attention: list[dict], quiet: bool) -> list[dict]:
+    """Post-extraction Popo stage for every mineru doc routed through it. Strictly
+    non-fatal: a Popo failure never flips the file's already-`extracted` state.
+    Popo-not-configured (exit 2) surfaces in needs_attention[] (not counted in the
+    file buckets, mirroring extracted_but_flagged). With DOC2KB_POPO_AUTO set,
+    postprocess_popo self-bootstraps via --auto-setup before running."""
+    auto = _truthy(os.environ.get("DOC2KB_POPO_AUTO"))
+    results: list[dict] = []
+    for doc_id in doc_ids:
+        if not quiet:
+            log(f"popo {doc_id}" + (" (auto-setup)" if auto else ""))
+        rc, parsed, stderr_tail = _invoke_popo(kb_root, doc_id, auto_setup=auto)
+        if rc == 2:
+            hint = (parsed or {}).get("reason") or stderr_tail or "Popo not configured"
+            needs_attention.append({
+                "id": doc_id, "stage": "popo", "reason": "needs_install",
+                "doc": None, "extracted_but_flagged": False, "install_hint": hint,
+            })
+            results.append({"doc_id": doc_id, "ok": False, "reason": "popo_not_configured"})
+        elif rc == 0 and isinstance(parsed, dict) and parsed.get("ok") is True:
+            results.append({"doc_id": doc_id, "ok": True,
+                            "results": parsed.get("results")})
+        else:
+            reason = ((parsed or {}).get("reason") if isinstance(parsed, dict) else None) \
+                or stderr_tail or f"exit {rc}"
+            results.append({"doc_id": doc_id, "ok": False, "reason": reason})
+            if not quiet:
+                log(f"popo {doc_id} failed (non-fatal): {reason}")
+    return results
 
 
 def _normalize(out_path: Path, timeout: int) -> None:
@@ -219,6 +316,12 @@ def main() -> int:
     errors: list[dict] = []
     extracted_but_flagged = 0
 
+    # Env-gated MinerU→Popo auto-route (default OFF — preserves the heavy-deps-
+    # opt-in rule). DOC2KB_ALWAYS_POPO routes every mineru-extracted doc through
+    # Popo; a per-file `popo` bool (set via apply_overrides) overrides it.
+    popo_default = _truthy(os.environ.get("DOC2KB_ALWAYS_POPO"))
+    popo_targets: list[str] = []
+
     t0 = time.time()
     for f in files:
         raw_id = f.get("id")
@@ -284,8 +387,25 @@ def main() -> int:
                         log(f"unchanged {source_rel}")
                     continue
 
+            # Per-file Popo routing decision (mineru only — Popo consumes the
+            # mineru raw cache) and the safe per-file mineru CLI flags.
+            popo_pref = f.get("popo")
+            popo_in_effect = (
+                (popo_pref if isinstance(popo_pref, bool) else popo_default)
+                and strategy == "mineru"
+            )
+            if isinstance(popo_pref, bool) and popo_pref and strategy != "mineru":
+                log(f"note: {source_rel} has popo=true but strategy={strategy} — "
+                    "Popo only applies to mineru output; ignoring")
+            extra_flags: list[str] = []
+            if strategy == "mineru":
+                extra_flags, fwarns = _mineru_flags(f, force_keep_raw=popo_in_effect)
+                for w in fwarns:
+                    log(f"{source_rel}: {w}")
+
             rc, parsed, stderr_tail = _run_extractor(
-                strategy, in_path, out_path, doc_id, source_rel, args.timeout)
+                strategy, in_path, out_path, doc_id, source_rel, args.timeout,
+                extra_flags=extra_flags)
 
             if rc == "timeout":
                 counts["error"] += 1
@@ -349,6 +469,8 @@ def main() -> int:
             # Count extracted last — after classification — so an unexpected
             # throw above routes to the error bucket without double-counting.
             counts["extracted"] += 1
+            if popo_in_effect:
+                popo_targets.append(doc_id)
             if args.normalize:
                 _normalize(out_path, args.timeout)
             if not args.quiet:
@@ -360,6 +482,13 @@ def main() -> int:
             if not args.quiet:
                 log(f"error {label}: dispatch crashed: {e}")
             continue
+
+    # Env-gated stage 2: route every mineru-extracted doc through Popo. Runs
+    # only when DOC2KB_ALWAYS_POPO (or a per-file popo=true) put docs in the
+    # queue — the default path leaves popo_targets empty and runs nothing.
+    popo: list[dict] | None = None
+    if popo_targets:
+        popo = _run_popo(kb_root, popo_targets, needs_attention, args.quiet)
 
     # Write errors.json — overwrite even when empty so build_manifest never
     # reads a stale error list from a previous run.
@@ -380,6 +509,7 @@ def main() -> int:
         "extracted_but_flagged": extracted_but_flagged,
         "needs_attention": needs_attention,
         "unclassified_warnings": unclassified,
+        "popo": popo,
         "errors_log": str(errors_path) if errors else None,
         "elapsed_seconds": round(time.time() - t0, 2),
         "driver": driver,

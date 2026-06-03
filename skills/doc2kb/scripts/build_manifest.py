@@ -159,10 +159,15 @@ def write_index_md(kb_dir: Path, manifest: dict[str, Any]) -> None:
         "",
         "## How to use",
         "",
-        "1. Read this file first — corpus overview.",
-        "2. Read `manifest.json` for machine-readable metadata.",
-        "3. Read `AGENTS.md` for navigation instructions.",
-        "4. Open individual files in `docs/` only when relevant — do **not** bulk-load.",
+        "1. Read `AGENTS.md` first — navigation rules, citation, trust boundary.",
+        "2. Use this file as the corpus catalog: each document's headings and",
+        "   warnings are listed inline below — enough to decide what is relevant.",
+        "3. Open individual files in `docs/` only when relevant — do **not** bulk-load.",
+        "",
+        "> `manifest.json` (machine-readable: per-doc sha256, extraction_method,",
+        "> token estimates in JSON) and `llms.txt` (llmstxt.org catalog for external",
+        "> tools) carry no navigation info beyond this file — read them only for",
+        "> programmatic filtering or sha256 provenance, not for normal navigation.",
         "",
     ]
 
@@ -198,6 +203,12 @@ def write_index_md(kb_dir: Path, manifest: dict[str, Any]) -> None:
                 title = d.get("source_path") or d.get("id")
                 lines.append(f"- [{title}]({d['kb_path']})"
                              + (f" — {meta}" if meta else ""))
+                headings = d.get("headings") or []
+                if headings:
+                    lines.append("  - " + " · ".join(str(h) for h in headings))
+                warnings = d.get("warnings") or []
+                if warnings:
+                    lines.append("  - ⚠ " + "; ".join(str(w) for w in warnings))
             lines.append("")
 
     # Skipped / errors.
@@ -272,8 +283,10 @@ def write_agents_md(kb_dir: Path) -> None:
     else:
         # Fallback minimal AGENTS.md if template went missing.
         (kb_dir / "AGENTS.md").write_text(
-            "# Knowledge Base\n\nRead INDEX.md first, then manifest.json. "
-            "Open docs/<file>.md only as needed.\n", encoding="utf-8"
+            "# Knowledge Base\n\nRead INDEX.md — it is the corpus catalog "
+            "(headings + warnings per doc). Open docs/<file>.md only as needed. "
+            "manifest.json / llms.txt are for tooling, not navigation.\n",
+            encoding="utf-8",
         )
 
 

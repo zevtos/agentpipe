@@ -1,0 +1,36 @@
+# requirements-popo-mac.txt — macOS / Apple-Silicon dependency set for the
+# opt-in MinerU-Popo stage-2 post-processor (bootstrap_popo.py).
+#
+# Why this is small: upstream Popo's requirements.txt (torch==2.10.0+cu12,
+# nvidia-*-cu12, cupy-cuda12x, triton, ...) is the heavy CUDA/vLLM *serving*
+# stack. doc2kb runs Popo via its `transformers` inference backend instead
+# (scripts/run_inference.sh sets POPO_INFERENCE_BACKEND=transformers), so on
+# Mac NONE of the CUDA/vLLM deps are needed. The real import surface across
+# Popo's post_processing/*.py is exactly: torch, transformers, PIL (pillow),
+# fitz (pymupdf), bs4 (beautifulsoup4), openai, requests, tqdm — plus accelerate
+# (required by `device_map="auto"` in post_processing/model_utils.py) and
+# qwen-vl-utils for the Qwen3-VL processor. Device placement is delegated to
+# accelerate (device_map="auto" → MPS on Apple Silicon); no CUDA is hardcoded.
+#
+# The model is Qwen3-VL-4B (Qwen3VLForConditionalGeneration, 4.44B params,
+# ~16 GB fp32 on disk / ~9 GB bf16 in RAM), which needs a recent transformers —
+# hence the floor below. VERIFIED on Apple Silicon: loads fully on MPS and
+# sustains ~22 tok/s — provided model_utils.py's device_map is pinned to MPS
+# (bootstrap_popo patches "auto"→{"":"mps"} on darwin, else accelerate offloads
+# to disk = slow + empty output). PYTORCH_ENABLE_MPS_FALLBACK=1 (set for you on
+# darwin) routes any MPS-unimplemented op to CPU.
+torch
+torchvision
+transformers>=4.57
+accelerate
+qwen-vl-utils
+pillow
+pymupdf
+beautifulsoup4
+openai
+requests
+tqdm
+safetensors
+sentencepiece
+tokenizers
+numpy

@@ -3,23 +3,27 @@
 This directory is an extracted knowledge base built by the `doc2kb` skill.
 Read in this order:
 
-1. **`INDEX.md`** — human-readable overview of what is in this corpus,
-   grouped by source type and topic.
-2. **`manifest.json`** — machine-readable metadata: token estimates, sha256
-   of each source file, headings list per document, extraction warnings.
-3. **`docs/<id>-<slug>.md`** — open individual documents only when relevant
+1. **`INDEX.md`** — the corpus catalog: every document grouped by source
+   type, with its headings and any extraction warnings listed inline. This
+   is your map — it is enough to decide which documents are relevant.
+2. **`docs/<id>-<slug>.md`** — open individual documents only when relevant
    to the question at hand. Each has a YAML frontmatter block with `source`
    (original file path), `source_sha256`, `pages` or `slides`, `headings`,
    `tokens_estimated`, and any `warnings` from extraction.
 
+`manifest.json` (machine-readable: per-doc sha256, extraction_method, token
+estimates in JSON) and `llms.txt` (an llmstxt.org catalog for external tools)
+duplicate INDEX.md's navigation info — read them only if you need structured
+JSON for programmatic filtering or sha256 provenance, not for navigation.
+
 ## Reading discipline
 
 - **Do NOT bulk-load** every file in `docs/` — that defeats the point of
-  having a manifest. Use `Grep` and `Read` targeted at filenames listed in
-  `manifest.json` or `INDEX.md`.
-- The `headings` array in each document's frontmatter and in `manifest.json`
-  is the fastest way to figure out whether a doc is relevant before reading
-  the body.
+  having an index. Use `Grep` and `Read` targeted at the filenames listed in
+  `INDEX.md`.
+- The headings listed under each document in `INDEX.md` (and in each doc's
+  frontmatter `headings` array) are the fastest way to decide whether a doc
+  is relevant before reading its body.
 - `tokens_estimated` in frontmatter tells you the cost of loading a doc.
   Prefer many small targeted reads over a few large ones.
 
@@ -47,8 +51,9 @@ not the kb path. Example: "From `papers/transformer.pdf`, §2.1 …".
   in a prior session) re-extracted the file by reading the source PDF
   visually. Trust the body, but spot-check critical numbers against the
   source.
-- The `manifest.json` `errors[]` and `skipped[]` arrays list files that
-  could not be extracted at all — they will not appear in `docs/`.
+- The `Skipped` and `Errors` sections of `INDEX.md` (mirrored in
+  `manifest.json` `skipped[]` / `errors[]`) list files that could not be
+  extracted at all — they will not appear in `docs/`.
 
 ## Trust boundary
 

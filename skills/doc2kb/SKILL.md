@@ -76,6 +76,40 @@ python3 <skill_dir>/scripts/ensure_env.py scout_corpus.py <input_dir> <kb_dir>
 
 **Применение решений (важно для Phase 4).** Разрешив группу, обновите каждый файл в `_scout.json`: проставьте итоговый `extraction_strategy` (`skip` для отказа, либо рабочую стратегию для `proceed`) **и обнулите `action_required` (`null`)**. `extract_corpus.py` (Phase 4) откажется стартовать (exit 2), пока хоть у одного файла остался непустой `action_required` — это и есть гейт, гарантирующий, что Phase 3 пройдена.
 
+### Phase 3.5: Apply overrides (опционально, вместо ручной правки `_scout.json`)
+
+Чтобы прогнать пару файлов через другой extractor (например `mineru`) или
+задать per-file настройки MinerU — **не редактируйте `_scout.json` руками**.
+Опишите правила в `<kb_dir>/_overrides.json` и примените их детерминированно:
+
+```bash
+python3 <skill_dir>/scripts/ensure_env.py apply_overrides.py <kb_dir> [--dry-run]
+```
+
+```jsonc
+{
+  "version": 1,
+  "overrides": [
+    { "match": "papers/*.pdf",          // glob по source_path, ЛИБО точный doc-id, ЛИБО точный source_path
+      "strategy": "mineru",
+      "mineru": { "backend": "vlm-auto-engine", "lang": "cyrillic", "keep_raw": true },
+      "popo": true },                    // per-file Popo opt-in/out (перекрывает env)
+    { "match": "doc-012", "strategy": "skip" }
+  ]
+}
+```
+
+Гарантии: конфиг валидируется (неизвестный ключ / неверная `strategy` /
+`backend` → exit 2, запись не происходит); `_scout.json` валидируется **после**
+применения и пишется **атомарно** (`.tmp` → `os.replace`) — он никогда не
+останется полузаписанным или со сломанной схемой. На runnable-стратегии
+`action_required` обнуляется (override и есть Phase-3 решение). Правило,
+совпавшее с **0 файлов**, — это ошибка (exit 1, типичная опечатка); `--dry-run`
+показывает diff без записи; `--allow-unmatched` понижает 0-match до warning.
+Блок `mineru` хранится структурно на записи файла — `extract_corpus.py` сам
+рендерит из него безопасные CLI-флаги (никаких сырых arg-строк). Лупа после
+этого: **scout → apply_overrides → (решить остаток) → extract_corpus**.
+
 ### Phase 4: Extract
 
 **Запускайте один батч-диспетчер — не парсите файлы вручную.** `extract_corpus.py` читает `_scout.json` и сам прогоняет весь механический Phase-4 цикл: диспатчит каждую `extraction_strategy` на нужный extractor через `ensure_env.py`, пишет `docs/<id>-<slug>.md`, копит `_logs/errors.json`, и печатает **один** JSON-summary последней строкой stdout. Это заменяет ручной цикл «построить команду → запустить → распарсить JSON → залогировать» по каждому файлу.
@@ -188,7 +222,7 @@ python3 <skill_dir>/scripts/ensure_env.py extract_pdf_pymupdf4llm.py \
 python3 <skill_dir>/scripts/ensure_env.py build_manifest.py <kb_dir>
 ```
 
-Собирает `manifest.json` + `INDEX.md` + `llms.txt` + `AGENTS.md`. После этого `<kb_dir>` готов к ingestion во второй сессии: пользователь открывает Claude/Codex в `<kb_dir>` (или передаёт путь), Claude читает `AGENTS.md` → `INDEX.md` → `manifest.json` → `docs/*.md` по необходимости.
+Собирает `manifest.json` + `INDEX.md` + `llms.txt` + `AGENTS.md`. После этого `<kb_dir>` готов к ingestion во второй сессии: пользователь открывает Claude/Codex в `<kb_dir>` (или передаёт путь), Claude читает `AGENTS.md` → `INDEX.md` → `docs/*.md` по необходимости. `INDEX.md` — единственный навигационный каталог (headings + warnings по каждому доку inline); `manifest.json` (машинный: sha256/extraction_method/токены в JSON) и `llms.txt` (llmstxt.org-каталог для внешних тулзов) дублируют ту же навигацию и нужны только для программного доступа / sha-верификации, а не для чтения агентом.
 
 ## Output format
 
@@ -228,7 +262,8 @@ python3 <skill_dir>/scripts/ensure_env.py build_manifest.py <kb_dir>
 |---|---|
 | `ensure_env.py`              | idempotent venv bootstrap (run once or on requirements change). Accepts `--tier mineru` for the opt-in heavy install. |
 | `scout_corpus.py`            | Phase 2 — classify corpus, emit `_scout.json`. `--enable-mineru` opt-in routes `image_only` PDFs through the mineru extractor. |
-| `extract_corpus.py`          | Phase 4 batch dispatcher — runs the whole mechanical extract loop from `_scout.json` (strategy→extractor via `ensure_env.py`, writes `docs/*.md` + `_logs/errors.json`), idempotent by `source_sha256`, and prints one JSON summary with a `needs_attention[]` queue (`needs_install` / `visual_transcription` / `dropped_pictures_residual`). Refuses to start (exit 2) on unresolved `action_required`. The agent runs this instead of looping per-file, then handles `needs_attention[]`. |
+| `apply_overrides.py`         | Phase 3.5 — deterministically patch `_scout.json` from `<kb_dir>/_overrides.json` (per-file `strategy`, structured `mineru` block, `popo` flag; nulls `action_required`). Validates config + post-apply scout, writes atomically, never corrupts scout. `--dry-run` / `--allow-unmatched`. |
+| `extract_corpus.py`          | Phase 4 batch dispatcher — runs the whole mechanical extract loop from `_scout.json` (strategy→extractor via `ensure_env.py`, writes `docs/*.md` + `_logs/errors.json`), idempotent by `source_sha256`, and prints one JSON summary with a `needs_attention[]` queue (`needs_install` / `visual_transcription` / `dropped_pictures_residual`). Renders per-file `mineru` flags from the scout entry; with `DOC2KB_ALWAYS_POPO` (or per-file `popo:true`) routes each mineru doc through Popo as a non-fatal stage 2 (`popo[]` in summary). Refuses to start (exit 2) on unresolved `action_required`. The agent runs this instead of looping per-file, then handles `needs_attention[]`. |
 | `extract_pdf_pymupdf4llm.py` | text-layer PDF → Markdown; auto-extracts embedded images to `<kb_dir>/assets/` and rewires `picture intentionally omitted` placeholders to those files |
 | `extract_pdf_mineru.py`      | **opt-in** VLM-grade PDF → Markdown via the opendatalab/MinerU CLI; mirrors the other extractors' single-file contract, copies images to `<kb_dir>/assets/` via `save_image_safe`, optionally caches raw mineru output under `<kb_dir>/_mineru/<doc_id>/` for follow-up Popo runs. Supports `--pages 2,18-19,35` for page-targeted patching and `--patch-into <target.md>` to splice the result directly into an existing extraction (no temp files, frontmatter records `mineru_patched_pages` + `extraction_method_supplementary`). Requires `ensure_env.py --tier mineru`. |
 | `extract_docx.py`            | DOCX → Markdown via mammoth + markdownify; switches to pandoc when source contains OOXML math so formulas survive as LaTeX |
@@ -239,10 +274,36 @@ python3 <skill_dir>/scripts/ensure_env.py build_manifest.py <kb_dir>
 | `extract_md_txt.py`          | normalize Markdown/text, encoding-aware |
 | `extract_html.py`            | HTML → Markdown via trafilatura (boilerplate removal) |
 | `normalize_md.py`            | structural cleanup pass (idempotent, never summarizes) |
-| `postprocess_popo.py`        | **opt-in stage 2** — runs upstream opendatalab/MinerU-Popo over cached mineru outputs to rebuild document trees (heading hierarchy, cross-page table merging, paragraph truncation repair). Strictly opt-in; requires a user-provided Popo checkout + conda env. |
+| `postprocess_popo.py`        | **opt-in stage 2** — runs upstream opendatalab/MinerU-Popo over cached mineru outputs to rebuild document trees (heading hierarchy, cross-page table merging, paragraph truncation repair). Resolves the Popo repo from `--popo-repo` > `$DOC2KB_POPO_REPO` > the `bootstrap_popo.py` auto-default; PATH-injects the bootstrapped env (sentinel `.doc2kb-popo-python`); `--auto-setup` runs `bootstrap_popo.py` when unconfigured. |
+| `bootstrap_popo.py`          | **opt-in** auto-setup of the Popo stage-2 env — clone repo → create env (uv→conda→venv, py3.10) → install deps (upstream CUDA reqs on Linux, `requirements-popo-mac.txt` MPS set on macOS) → download the ~16 GB model (resumable, completeness-checked) → patch `POPO_MODEL_PATH` default; on macOS also pins `device_map`→MPS (verified ~22 tok/s, else accelerate disk-offloads). Never runs in the default pipeline; invoked directly or via `postprocess_popo.py --auto-setup` (gated by `DOC2KB_POPO_AUTO`). |
 | `token_count.py`             | count tokens in an extracted .md file |
 | `build_manifest.py`          | Phase 5 — assemble manifest, INDEX, llms.txt, AGENTS.md |
+| `update_kb.py`               | **live KB** — incrementally stamp frontmatter on new hand-authored `docs/*.md` + regenerate index; self-installs `update_kb.sh` (see below) |
 | `_common.py`                 | shared helpers — imported by all extract scripts |
+
+## Live / self-growing KB (agent-authored notes, incremental)
+
+The scout→extract→manifest flow targets a fixed corpus. For a KB an agent
+**grows over time** (its own notes, site maps, capability docs — not extracted
+source files), use `update_kb.py` instead:
+
+```bash
+python3 <skill_dir>/scripts/ensure_env.py update_kb.py <kb_dir>
+```
+
+- Stamps minimal frontmatter onto any `<kb_dir>/docs/*.md` lacking it
+  (`collect_docs` silently skips docs with no frontmatter, so a bare note
+  would never be indexed). Auto-assigns the next `doc-NNN` id, derives
+  `headings` from the markdown, defaults `source` / `source_type=note` /
+  `extraction_method`, refreshes `tokens_estimated`. Existing frontmatter is
+  preserved — only missing keys are filled.
+- Regenerates manifest.json / INDEX.md / llms.txt / AGENTS.md.
+- On first run drops a self-contained `update_kb.sh` into `<kb_dir>`. The
+  agent's loop is then just: **edit `docs/*.md` → run `./update_kb.sh`**.
+  Never hand-edit INDEX.md — it is generated.
+
+Idempotent: re-running on an unchanged KB stamps nothing and only rewrites the
+generated index files.
 
 ## Trust boundary
 
@@ -480,6 +541,56 @@ Pass `--doc-id <id>` to process a single doc, `--popo-repo /abs/path`
 instead of the env var, or `--skip-normalization` / `--skip-inference`
 to iterate without redoing earlier steps.
 
+### Auto-route MinerU → Popo (env-gated, default OFF)
+
+Если хочется, чтобы **каждый** mineru-извлечённый документ автоматически
+проходил Popo прямо из Phase 4 — выставьте env. По-умолчанию ничего не
+меняется (heavy-deps-opt-in инвариант сохраняется):
+
+| env | эффект |
+|---|---|
+| `DOC2KB_ALWAYS_POPO=1` | `extract_corpus.py` после каждого mineru-extract'а гоняет doc через Popo (форсит `--keep-raw`, чтобы кэш `_mineru/<id>/` существовал). Non-fatal: падение Popo не роняет файл из `extracted`, а surface'ится в `popo[]`/`needs_attention[]`. |
+| `DOC2KB_POPO_AUTO=1` | разрешает `bootstrap_popo.py` сам поставить Popo (clone + env + **скачать ~16 ГБ модель**) при первом запросе, через `postprocess_popo.py --auto-setup`. |
+| `DOC2KB_POPO_REPO` | (существующий) явный путь к checkout'у Popo; всё ещё работает, но теперь опционален. |
+
+Per-file флаг `popo` в `_overrides.json` перекрывает env (`true`/`false`).
+Два разных env специально: согласие на роутинг (`ALWAYS_POPO`) отделено от
+согласия на multi-GB установку (`POPO_AUTO`) — скачивание модели никогда не
+происходит молча. Оба вместе = полностью автоматический режим.
+
+### Auto-bootstrap Popo (`bootstrap_popo.py`, opt-in)
+
+Вместо ручного clone/conda/hf-download из README выше:
+
+```bash
+python3 <skill_dir>/scripts/ensure_env.py bootstrap_popo.py [--skip-model] [--force-model]
+```
+
+Клонирует Popo (в `$DOC2KB_POPO_REPO` или `<state-dir>/popo/MinerU-Popo`),
+создаёт отдельный env (приоритет **uv → conda → venv**, Python 3.10),
+ставит зависимости платформо-зависимо, скачивает 4B-модель и патчит путь к
+ней. Popo'вские bash-скрипты зовут `python3` из PATH (без `conda activate`),
+поэтому `postprocess_popo.py` подкладывает bin/ этого env в PATH через
+sentinel `.doc2kb-popo-python` — uv-venv работает.
+
+> **macOS / Apple Silicon:** апстрим-`requirements.txt` у Popo — это тяжёлый
+> CUDA/vLLM **серверный** стек (`torch+cu12`, `nvidia-*`, `cupy`, `triton`) и на
+> Mac не встанет. Но doc2kb гоняет Popo через его **transformers**-бэкенд
+> (`run_inference.sh` ставит `POPO_INFERENCE_BACKEND=transformers`), которому
+> ничего из этого не нужно. Реальная import-поверхность Popo — `torch`,
+> `transformers`, `PIL`, `fitz`, `bs4`, `openai`, `requests`, `tqdm` (+
+> `accelerate`/`qwen-vl-utils`), всё это ставится из `requirements-popo-mac.txt`.
+> Модель — Qwen3-VL **4.44B** (~16 ГБ fp32 на диске / ~9 ГБ bf16 в RAM).
+> **Проверено на Apple Silicon:** грузится целиком на **MPS** и держит **~22
+> tok/s** — но только если `device_map` запинен на MPS. Стоковый
+> `device_map="auto"` у Popo на Mac сбрасывает часть весов на **диск** (accelerate
+> ошибается в оценке памяти MPS) → медленно и пустой вывод; поэтому
+> `bootstrap_popo.py` на darwin патчит `"auto"→{"":"mps"}`. Путь к модели
+> прокидывается через `POPO_MODEL_PATH` (его выставляет `postprocess_popo.py`).
+> `PYTORCH_ENABLE_MPS_FALLBACK=1` ставится автоматически — неподдержанные
+> MPS-операции уходят на CPU. Прикидка: один Popo-проход ≈ 1–5 мин/документ. На
+> CUDA-Linux bootstrap ставит полный апстрим-`requirements.txt`.
+
 ## Что доступно out-of-the-box vs follow-up
 
 **MVP lightweight tier (всегда установлен):**
@@ -497,7 +608,10 @@ to iterate without redoing earlier steps.
 - VLM-grade PDF extraction через MinerU 2.5+ (`extract_pdf_mineru.py`).
 - На Apple Silicon — MLX-accelerated backend (`vlm-auto-engine`).
 - Optional stage 2: MinerU-Popo для document-level tree reconstruction
-  (`postprocess_popo.py`, требует пользовательской установки Popo).
+  (`postprocess_popo.py`). Установка Popo — вручную по README, либо
+  авто через `bootstrap_popo.py` (`DOC2KB_POPO_AUTO=1`). Авто-роутинг
+  каждого mineru-дока в Popo прямо из Phase 4 — `DOC2KB_ALWAYS_POPO=1`.
+  Оба env по-умолчанию выключены (heavy-deps-opt-in).
 
 **Follow-up (ещё не в скилле):**
 - XLSX, EPUB, ODT, standalone images.
