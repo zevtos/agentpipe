@@ -1,6 +1,10 @@
 #!/bin/sh
-# agentpipe: block commits that introduce a SKILL.md whose YAML `description:`
-# field exceeds Codex CLI's 1024-byte limit. See scripts/validate-skills.py.
+# agentpipe pre-commit guard. Runs the repo's consistency validators on the
+# staged change set:
+#   * validate-skills.py — blocks a SKILL.md whose YAML `description:` exceeds
+#     Codex CLI's 1024-byte limit (silently skipped at load time otherwise).
+#   * validate-repo.py   — blocks docs-vs-disk count drift and malformed
+#     agent/command/skill frontmatter.
 #
 # Enable per-clone with:
 #     git config core.hooksPath scripts/git-hooks
@@ -9,16 +13,24 @@
 
 set -eu
 
-# Only run when a SKILL.md is staged — keeps unrelated commits instant.
-if ! git diff --cached --name-only --diff-filter=ACMR \
-        | grep -Eq '^skills/[^/]+/SKILL\.md$'; then
-    exit 0
-fi
-
 if ! command -v python3 >/dev/null 2>&1; then
-    echo "pre-commit: python3 not found, skipping skill validation" >&2
+    echo "pre-commit: python3 not found, skipping agentpipe validation" >&2
     exit 0
 fi
 
 repo_root=$(git rev-parse --show-toplevel)
-exec python3 "$repo_root/scripts/validate-skills.py"
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+
+# Codex 1024-byte description cap — only when a SKILL.md changed.
+if printf '%s\n' "$staged" | grep -Eq '^skills/[^/]+/SKILL\.md$'; then
+    python3 "$repo_root/scripts/validate-skills.py"
+fi
+
+# Repo consistency — when a product file, a prose count source, or an installer
+# changed (the inputs validate-repo.py reads).
+if printf '%s\n' "$staged" | grep -Eq \
+        '^(agents|commands|skills|research)/|^(README|CLAUDE)\.md$|^docs/installation\.md$|^install\.(sh|ps1)$'; then
+    python3 "$repo_root/scripts/validate-repo.py"
+fi
+
+exit 0

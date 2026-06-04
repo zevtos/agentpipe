@@ -7,6 +7,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- **`scripts/validate-repo.py` — repo-consistency validator (sibling of `validate-skills.py`).** Catches the dominant docs-as-code failure mode: silent drift between prose and disk. Five checks: **(A)** count claims in `README.md`/`CLAUDE.md`/`docs/installation.md` ("9 agents", "16 commands"/"workflows", "3 skills", "18 research docs"/"reference documents") must match the disk globs — `CHANGELOG.md` and `research/` are excluded (the changelog quotes historical counts on purpose); **(B)** every `agents/*.md` has `name`/`description`/`tools`/`model`, `name`==filename, `model ∈ {opus,sonnet}`, `tools ⊆` the allowed set, description contains `MUST BE USED`; **(C)** every `commands/*.md` has a non-empty `description`, loads `@CLAUDE.md`, and has `$ARGUMENTS` iff `argument-hint`; **(D)** every `skills/*/` has `SKILL.md` + `LICENSE` with frontmatter `name`==folder; **(E)** `install.sh` long-option set == `install.ps1` flag set (PascalCase→kebab, `ShowVersion`→`version`) — WARNING-only, never fails the build (the two installer DSLs are regex-parsed and this check is the most brittle). Stdlib-only (`re`/`sys`/`pathlib`), exit-code contract identical to `validate-skills.py` (0 pass / 1 drift / 2 cannot-run). This is the machine guardrail for the same class of incident the 0.20.x "Corrected stale counts" entry recorded.
+- **Pre-commit hook + release CI now run `validate-repo.py`.** `scripts/git-hooks/pre-commit` runs it whenever a product file (`agents|commands|skills|research/`), a prose count source (`README.md`/`CLAUDE.md`/`docs/installation.md`), or an installer (`install.sh`/`install.ps1`) is staged; `.github/workflows/release.yml` gains a "Validate repo consistency" step (both validators) before any skill zip is built, so drift can't ship in a release.
+
 ## [0.22.0] - 2026-06-03
 
 ### Added

@@ -28,6 +28,7 @@ bash scripts/build-skills.sh          # package every skills/<name>/ into dist/<
 bash scripts/eval.sh --list           # list local agent eval scenarios (no claude calls)
 bash scripts/eval.sh <agent>          # run agent prompt-quality eval (uses claude -p, ~2 msgs/scenario)
 python3 scripts/validate-skills.py    # enforce 1024-byte limit on every skills/*/SKILL.md description
+python3 scripts/validate-repo.py      # check docs-vs-disk count drift + agent/command/skill frontmatter
 git config core.hooksPath scripts/git-hooks  # one-time per clone: enable repo pre-commit hooks
 ```
 
@@ -41,7 +42,8 @@ research/*.md           Reference docs, numbered 01-18. Not auto-imported by age
 docs/                   User-facing documentation (commands.md, agents.md, installation.md, eval.md)
 scripts/build-skills.*  Package skills/* into dist/*.zip for releases
 scripts/validate-skills.py  Enforces the 1024-byte cap on skills/*/SKILL.md descriptions (Codex limit)
-scripts/git-hooks/      Repo-local hooks (pre-commit runs validate-skills.py). Enable with `git config core.hooksPath scripts/git-hooks`
+scripts/validate-repo.py    Checks docs-vs-disk count drift + agent/command/skill frontmatter + installer flag parity
+scripts/git-hooks/      Repo-local hooks (pre-commit runs validate-skills.py + validate-repo.py). Enable with `git config core.hooksPath scripts/git-hooks`
 scripts/eval.sh         Local prompt-quality eval runner (claude -p, no API key, no CI)
 tests/<agent>/<scenario>/  Agent eval scenarios (input.md + rubric.md). Empty by default.
 .github/workflows/      release.yml: on tag push, builds skill zips and attaches to GH release
@@ -153,7 +155,7 @@ Skills are installed as folders to `~/.claude/skills/<name>/` and discovered by 
 4. Choose model: opus only if the role requires deep multi-step reasoning
 5. Include Handoff Protocol section with RECOMMEND: lines to related agents
 6. Update README.md agents table, docs/agents.md, and CHANGELOG.md
-7. Run `./install.sh` to deploy, then test the agent in a real project
+7. Run `python3 scripts/validate-repo.py` (counts + frontmatter must pass), then `./install.sh` to deploy and test the agent in a real project
 
 ## Adding a New Command
 
@@ -163,7 +165,7 @@ Skills are installed as folders to `~/.claude/skills/<name>/` and discovered by 
 4. Pipeline uses `### Step N: Name` structure with agent prompts in quotes
 5. Each step that invokes an agent: "Run the `name` agent:" followed by prompt
 6. Update README.md commands table, docs/commands.md, and CHANGELOG.md
-7. Run `bash install.sh` to deploy, then test the command in a real project
+7. Run `python3 scripts/validate-repo.py` (counts + frontmatter must pass), then `bash install.sh` to deploy and test the command in a real project
 
 ## Adding a New Skill
 
@@ -173,7 +175,7 @@ Skills are installed as folders to `~/.claude/skills/<name>/` and discovered by 
 4. Optional: `skills/<name>/scripts/` for supporting code, `skills/<name>/references/` for long-form docs
 5. Update README.md skills table and CHANGELOG.md
 6. Run `bash install.sh` to deploy locally, then test by invoking the skill in a real project
-7. Run `python3 scripts/validate-skills.py` (description within the 1024-byte cap) and `bash scripts/build-skills.sh` (release archive builds cleanly and includes LICENSE)
+7. Run `python3 scripts/validate-skills.py` (description within the 1024-byte cap), `python3 scripts/validate-repo.py` (skill counts + folder shape), and `bash scripts/build-skills.sh` (release archive builds cleanly and includes LICENSE)
 
 ## Contributing
 
