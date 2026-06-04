@@ -367,6 +367,16 @@ def _apply_env_overrides(cfg: TitleConfig) -> TitleConfig:
     return cfg
 
 
+_TRUTHY_ENV = {"1", "true", "yes", "on", "да"}
+
+
+def _env_flag(name: str) -> bool:
+    """Булев env-флаг из слитого gost-env (config-файлы + os.environ).
+    Префикс GOST_REPORT_ добавляется автоматически. Truthy: 1/true/yes/on/да."""
+    return _load_gost_env().get(
+        f"{_ENV_PREFIX}{name}", "").strip().lower() in _TRUTHY_ENV
+
+
 def _resolve_student_label(cfg: TitleConfig) -> str:
     """Авто-выбор: команда — "Выполнили", иначе — "Выполнил".
     Явно заданное cfg.student_label всегда побеждает."""
@@ -1252,20 +1262,35 @@ class Report:
         r = Report(TitleConfig(...))                    # ITMO_PROFILE по умолчанию
         r = Report(TitleConfig(...), profile=GOST_PROFILE)
         r = Report(TitleConfig(...), profile=UniversityProfile(...))
+        r = Report(title_page=False)                    # без титульника (TitleConfig опционален)
+
+    Без титульного листа: `Report(title_page=False)` (или env
+    `GOST_REPORT_NO_TITLE_PAGE=1`) — документ начинается сразу с основного
+    текста, поля основного текста, нумерация с первой страницы. Поля
+    TitleConfig в этом режиме не обязательны (валидация work_type/topic/ФИО/
+    группы/года пропускается).
 
     Контент: см. методы toc/h1/h2/h3/text/task/code/figure/table/numbered/bullet.
     Сохранение: r.save("report.docx").
     """
 
-    def __init__(self, title: TitleConfig,
+    def __init__(self, title: Optional[TitleConfig] = None,
                  profile: UniversityProfile = DEFAULT_PROFILE,
                  *,
+                 title_page: bool = True,
                  project_root: Optional[Union[str, Path]] = None):
         self._doc = Document()
+        # Титульник можно отключить: параметр title_page=False или env
+        # GOST_REPORT_NO_TITLE_PAGE=1. Env только отключает (не включает),
+        # чтобы автоматизация могла гасить титул, не трогая build.py.
+        self._has_title_page = title_page and not _env_flag("NO_TITLE_PAGE")
         # Env побеждает build.py: накладываем перед валидацией обязательных
         # полей, чтобы можно было опускать FIO/group/year в TitleConfig.
-        self._title = _apply_env_overrides(title)
-        self._check_required(self._title)
+        self._title = _apply_env_overrides(
+            title if title is not None else TitleConfig())
+        # Обязательные поля титула нужны только когда титул строится.
+        if self._has_title_page:
+            self._check_required(self._title)
         self._profile = profile
         self._figure_counter = 0
         self._table_counter = 0
@@ -1294,22 +1319,32 @@ class Report:
                                  profile.heading_size_h3,
                                  profile.heading_align_h3)
 
-        # 2. Секция титульника (первая)
-        section = self._doc.sections[0]
-        _set_section_a4(section)
-        _apply_margins(section,
-                       profile.title_margin_left, profile.title_margin_right,
-                       profile.title_margin_top, profile.title_margin_bottom)
-        _add_page_number_to_footer(section, hide_on_first=True)
-        self._build_title_page()
+        if self._has_title_page:
+            # 2. Секция титульника (первая)
+            section = self._doc.sections[0]
+            _set_section_a4(section)
+            _apply_margins(section,
+                           profile.title_margin_left, profile.title_margin_right,
+                           profile.title_margin_top, profile.title_margin_bottom)
+            _add_page_number_to_footer(section, hide_on_first=True)
+            self._build_title_page()
 
-        # 3. Новая секция для основного текста
-        body_section = self._doc.add_section(WD_SECTION.NEW_PAGE)
-        _set_section_a4(body_section)
-        _apply_margins(body_section,
-                       profile.body_margin_left, profile.body_margin_right,
-                       profile.body_margin_top, profile.body_margin_bottom)
-        _add_page_number_to_footer(body_section, hide_on_first=False)
+            # 3. Новая секция для основного текста
+            body_section = self._doc.add_section(WD_SECTION.NEW_PAGE)
+            _set_section_a4(body_section)
+            _apply_margins(body_section,
+                           profile.body_margin_left, profile.body_margin_right,
+                           profile.body_margin_top, profile.body_margin_bottom)
+            _add_page_number_to_footer(body_section, hide_on_first=False)
+        else:
+            # Без титульника: единственная секция сразу с полями основного
+            # текста; нумерация страниц видна с первой страницы.
+            section = self._doc.sections[0]
+            _set_section_a4(section)
+            _apply_margins(section,
+                           profile.body_margin_left, profile.body_margin_right,
+                           profile.body_margin_top, profile.body_margin_bottom)
+            _add_page_number_to_footer(section, hide_on_first=False)
         self._just_broke_page = True
 
     # --------------------------------------------------------
