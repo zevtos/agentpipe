@@ -49,6 +49,3 @@ re-runs once it exists.
 These rules are deliberately stack-agnostic — no language-specific style
 opinions (typing, linting, formatting). Add those in project-level
 `./.claude/CLAUDE.md` or in a project's own conventions doc.
-
-This file is loaded into every Claude Code session, so keep it short. If
-Claude starts ignoring rules, this file is probably too long.
