@@ -278,8 +278,64 @@ python3 <skill_dir>/scripts/ensure_env.py build_manifest.py <kb_dir>
 | `bootstrap_popo.py`          | **opt-in** auto-setup of the Popo stage-2 env — clone repo → create env (uv→conda→venv, py3.10) → install deps (upstream CUDA reqs on Linux, `requirements-popo-mac.txt` MPS set on macOS) → download the ~16 GB model (resumable, completeness-checked) → patch `POPO_MODEL_PATH` default; on macOS also pins `device_map`→MPS (verified ~22 tok/s, else accelerate disk-offloads). Never runs in the default pipeline; invoked directly or via `postprocess_popo.py --auto-setup` (gated by `DOC2KB_POPO_AUTO`). |
 | `token_count.py`             | count tokens in an extracted .md file |
 | `build_manifest.py`          | Phase 5 — assemble manifest, INDEX, llms.txt, AGENTS.md |
+| `dkb.py`                     | **standalone CLI** — one-shot orchestrator that chains Phase 2→5 with the decision step automated, for human/no-agent use (`dkb <input_dir> <output_kb_dir>`). Pure stdlib; shells out to the other scripts through `ensure_env.py` and reuses `apply_overrides.py` to resolve scout decisions. Self-installs a `dkb` launcher on PATH. See "Standalone CLI" below. |
 | `update_kb.py`               | **live KB** — incrementally stamp frontmatter on new hand-authored `docs/*.md` + regenerate index; self-installs `update_kb.sh` (see below) |
 | `_common.py`                 | shared helpers — imported by all extract scripts |
+
+## Standalone CLI (`dkb`) — one-shot, no-agent
+
+The 5-phase workflow above is the agent-driven path: the agent decides per file,
+batches questions, and hand-tunes overrides. For the **basic flow without custom
+scout editing** there is a single-command runner, `dkb.py`, that automates the
+decision step so a human can build a knowledge base without an LLM in the loop:
+
+```bash
+# canonical (works today, no install):
+python3 <skill_dir>/scripts/dkb.py <input_dir> <output_kb_dir> [options]
+
+# or install a launcher once, then just `dkb …`:
+python3 <skill_dir>/scripts/dkb.py install        # drops ~/.local/bin/dkb
+dkb <input_dir> <output_kb_dir>
+```
+
+`dkb <in> <out>` runs **scout → auto-decide → extract → manifest** end to end and
+prints a final report (counts + any `needs_attention[]`). It is a thin
+orchestrator: it never re-implements extraction or scoring — every phase is the
+existing script run through `ensure_env.py`, and decisions are resolved
+deterministically via `apply_overrides.py` (it never hand-edits `_scout.json`).
+
+**Subcommands** (the full pipeline is the default; run phases individually too):
+
+| command | does |
+|---|---|
+| `dkb <in> <out>` / `dkb run <in> <out>` | full pipeline scout→extract→manifest |
+| `dkb scout <in> <out>`    | Phase 2 only — classify, write `_scout.json` |
+| `dkb extract <out>`       | Phase 4 only — auto-decide + extract from an existing `_scout.json` |
+| `dkb manifest <out>`      | Phase 5 only — (re)assemble manifest/INDEX/llms.txt/AGENTS.md |
+| `dkb install [--bin-dir D] [--force]` | install a `dkb` launcher on PATH (default `~/.local/bin`) |
+
+**Options** (on `run` / `extract`):
+
+- `--decide skip` (default) — every file scout flagged for a decision
+  (scanned/encrypted/corrupt/unsupported/huge) is **skipped**. `--decide proceed`
+  extracts huge files anyway with their normal extractor; everything else still
+  skips (a password or OCR backend is out of scope for the non-interactive flow).
+- `--enable-mineru` — route image-only PDFs through MinerU (needs `--tier mineru`;
+  without the tier they surface as `needs_install` in the report).
+- `--tier mineru` — install the opt-in heavy tier before running.
+- `--always-popo` — run the MinerU→Popo stage 2 on every mineru doc (opt-in, heavy).
+- `--normalize` — run `normalize_md` after each extraction.
+- `--timeout N` — per-file extractor timeout. `-q/--quiet` — terse progress.
+
+The **heavy-deps-opt-in invariant holds**: MinerU/Popo are reached only via these
+explicit flags — `dkb` never installs or routes through them silently. Exit codes:
+`0` clean, `2` setup/usage failure (bad path, a phase refused to start), `3` at
+least one file errored (see `<kb_dir>/_logs/errors.json`).
+
+When the corpus has files needing a real decision an agent should make (a
+password, an OCR strategy choice, partial-page mineru patching, manual visual
+transcription), use the 5-phase agent workflow instead — `dkb`'s automation only
+covers skip/proceed.
 
 ## Live / self-growing KB (agent-authored notes, incremental)
 
