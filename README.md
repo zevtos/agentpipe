@@ -138,7 +138,7 @@ agentpipe/
   research/              18 reference documents
   tests/                 Agent eval scenarios — empty by default, see docs/eval.md
   scripts/               build-skills.sh, eval.sh, validate-skills.py, validate-repo.py
-  .github/workflows/     release.yml — auto-attaches skill zips to GH releases on tag push
+  .github/workflows/     ci.yml — validator-only checks on push/PR; release.yml — auto-attaches skill zips to GH releases on tag push
   docs/                  documentation (commands.md, agents.md, installation.md, eval.md)
   install.sh             bash installer (macOS/Linux/WSL)
   install.ps1            PowerShell installer (Windows)

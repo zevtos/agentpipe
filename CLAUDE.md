@@ -46,7 +46,7 @@ scripts/validate-repo.py    Checks docs-vs-disk count drift + agent/command/skil
 scripts/git-hooks/      Repo-local hooks (pre-commit runs validate-skills.py + validate-repo.py). Enable with `git config core.hooksPath scripts/git-hooks`
 scripts/eval.sh         Local prompt-quality eval runner (claude -p, no API key, no CI)
 tests/<agent>/<scenario>/  Agent eval scenarios (input.md + rubric.md). Empty by default.
-.github/workflows/      release.yml: on tag push, builds skill zips and attaches to GH release
+.github/workflows/      ci.yml: validator-only (skills + repo consistency + install.sh syntax) on push/PR. release.yml: on tag push, builds skill zips and attaches to GH release
 install.sh              Bash installer (macOS, Linux, WSL, Git Bash)
 install.ps1             PowerShell installer (Windows)
 update.sh / update.ps1  Thin wrappers — forward to install with --update
@@ -140,7 +140,7 @@ Skills are installed as folders to `~/.claude/skills/<name>/` and discovered by 
 ## Do Not
 
 - Add test files or test frameworks. Validation is via real usage, not test harnesses.
-- Add CI workflows beyond `.github/workflows/release.yml` (skill packaging) unless the project gains an actual test suite.
+- Add CI workflows beyond `.github/workflows/release.yml` (skill packaging) and `.github/workflows/ci.yml` (validator-only: `validate-skills.py` + `validate-repo.py` + `install.sh` syntax check). Do NOT add a test-framework CI — `ci.yml` runs assertion-based validators, not a test harness. New CI is justified only if it runs another sanctioned validator, never a test suite.
 - Create a `.claude/` directory in the repo. It is gitignored. The repo IS the source for `~/.claude/`.
 - Add new frontmatter fields beyond what is documented above. Claude Code ignores unknown fields silently.
 - Change installer flags without updating both install.sh and install.ps1.

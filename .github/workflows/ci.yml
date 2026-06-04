@@ -1,0 +1,30 @@
+name: ci
+
+# Validator-only CI. This is NOT a test framework — it runs the repo's
+# assertion-based consistency validators (the same ones the pre-commit hook and
+# release.yml run) so docs-vs-disk drift, malformed frontmatter, or an
+# unparseable installer fail fast on every push/PR instead of slipping to a tag.
+# Mirrors what `agent-ci run --workflow .github/workflows/ci.yml` runs locally
+# before a push.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate skill descriptions (Codex 1024-byte cap)
+        run: python3 scripts/validate-skills.py
+
+      - name: Validate repo consistency (docs-vs-disk + frontmatter + installer parity)
+        run: python3 scripts/validate-repo.py
+
+      - name: Shell-syntax check install.sh
+        run: bash -n install.sh
