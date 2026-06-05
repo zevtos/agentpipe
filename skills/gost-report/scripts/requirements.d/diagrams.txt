@@ -1,0 +1,7 @@
+# Тир [diagrams] — mermaid-диаграммы → PNG. Активируется:
+#   GOST_REPORT_EXTRAS=diagrams python3 scripts/ensure_env.py
+# Дефолтный бэкенд — merm (pure-python, без Node/браузера, оффлайн).
+# Опционально точнее: внешний `mmdc` (npm @mermaid-js/mermaid-cli, Node+Chromium)
+# подхватывается автоматически, если есть на PATH — его НЕ ставим pip-ом.
+# Детерминизм diagrams — best-effort (random SVG id, метрики шрифта), см. research/19.
+merm>=0.1

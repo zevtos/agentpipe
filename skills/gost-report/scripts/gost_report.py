@@ -1309,6 +1309,17 @@ class Report:
         self._just_broke_page = False
         self._next_num_id = 100
 
+        # Подключаемые модули (r.plot, r.diagram, …). discover() лёгкий — тянет
+        # лишь классы модулей (core_api), тяжёлые пакеты грузятся при первом
+        # использовании namespace через __getattr__ → attach(). См. registry.py.
+        try:
+            from registry import discover as _discover_modules
+            self._modules = _discover_modules()
+        except Exception:
+            self._modules = {}
+        self._attached = {}
+        self._tmpdir = None
+
         # Авто-резолв путей: если project_root не задан — paths() обходит
         # стек вверх до user-скрипта, оттуда ищет маркер проекта (.git,
         # Makefile, pyproject.toml, .claude). Используется figure() для
@@ -1408,6 +1419,79 @@ class Report:
         return (PAGE_WIDTH_MM
                 - self._profile.body_margin_left
                 - self._profile.body_margin_right) / 10.0
+
+    # --------------------------------------------------------
+    # Подключаемые модули: lazy-attach + CoreServices-фасад
+    # --------------------------------------------------------
+    def __getattr__(self, name: str):
+        """Ленивое присоединение модуля при первом обращении к r.<namespace>.
+        Срабатывает только если обычный lookup не нашёл атрибут. Ошибка
+        зависимостей (ActionableImportError из check_available) пробрасывается
+        наружу как есть, не превращается в AttributeError."""
+        if name.startswith("_"):
+            raise AttributeError(name)
+        modules = self.__dict__.get("_modules") or {}
+        if name in modules:
+            attached = self.__dict__.setdefault("_attached", {})
+            if name not in attached:
+                attached[name] = modules[name].attach(self)
+            return attached[name]
+        raise AttributeError(name)
+
+    def printable_cm(self) -> float:
+        """Публичный фасад _printable_cm() для модулей."""
+        return self._printable_cm()
+
+    def sanitize(self, text: str) -> str:
+        """Санитайз прозы (подписи/контент) — фасад _sanitize_prose."""
+        return _sanitize_prose(text)
+
+    def embed_figure(self, image, caption: str, *,
+                     width_cm: Optional[float] = None) -> int:
+        """Единая точка нумерации+подписи рисунков для модулей. Принимает путь
+        ИЛИ Figure-объект (chart/diagram). Возвращает номер рисунка."""
+        self.figure(image, caption, width_cm=width_cm)
+        return self._figure_counter
+
+    def embed_table(self, rows: Sequence[Sequence[str]], caption: str = "",
+                    *, has_header: bool = True) -> int:
+        """Единая точка нумерации+подписи таблиц для модулей."""
+        self.table(rows, caption=caption, has_header=has_header)
+        return self._table_counter
+
+    @property
+    def tmp_dir(self) -> Path:
+        """Временная директория для PNG, сгенерированных модулями. Чистится в
+        save()/teardown. Путь в .docx не утекает — картинки встраиваются байтами."""
+        if self.__dict__.get("_tmpdir") is None:
+            import tempfile
+            self._tmpdir = Path(tempfile.mkdtemp(prefix="gost-report-"))
+        return self._tmpdir
+
+    @property
+    def paths(self):
+        """ProjectPaths активного проекта (root/docs/figures/...)."""
+        return self._paths
+
+    def _cleanup(self) -> None:
+        """Idempotent teardown подключённых модулей + удаление tmp-директории."""
+        modules = self.__dict__.get("_modules") or {}
+        for ns in list(self.__dict__.get("_attached") or {}):
+            try:
+                modules[ns].teardown()
+            except Exception:
+                pass
+        tmp = self.__dict__.get("_tmpdir")
+        if tmp:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+            self._tmpdir = None
+
+    def __del__(self):
+        try:
+            self._cleanup()
+        except Exception:
+            pass
 
     def _make_paragraph(self, *, align=WD_ALIGN_PARAGRAPH.CENTER,
                         line_spacing=LINE_SPACING_BODY,
@@ -1763,9 +1847,13 @@ class Report:
             )
         return resolved
 
-    def figure(self, image_path: Union[str, Path], caption: str, *,
+    def figure(self, image, caption: str, *,
                width_cm: Optional[float] = None):
         """Вставляет рисунок с автоматической подписью.
+
+        `image` — путь к PNG/JPEG (str/Path) ИЛИ Figure-объект из подключаемого
+        модуля (r.plot.line(...), r.diagram(...)). Все варианты делят ОДИН
+        сквозной счётчик «Рисунок N — …» (ГОСТ 7.32 §6.5).
 
         Ширина картинки **всегда** ограничивается печатной областью страницы
         (A4 минус левое и правое поля активного профиля — обычно ~17 см для
@@ -1781,7 +1869,12 @@ class Report:
           `r.figure("subdir/load.png", ...)` — тоже от `figures/`.
         Если файл не найден — FileNotFoundError с обоими путями (input + resolved).
         """
-        image_path = self._resolve_figure_path(image_path)
+        from core_api import is_figure_like
+        if is_figure_like(image):
+            image_path = Path(image.render(
+                dpi=300, max_width_cm=self._printable_cm()))
+        else:
+            image_path = self._resolve_figure_path(image)
         self._figure_counter += 1
 
         max_width_cm = self._printable_cm()
@@ -2044,6 +2137,9 @@ class Report:
         self._doc.save(str(target))
         _strip_thumbnail_part(target)
         target = target.resolve()
+
+        # Картинки уже встроены байтами в .docx — tmp-PNG модулей больше не нужны.
+        self._cleanup()
 
         try:
             import validate as _validate

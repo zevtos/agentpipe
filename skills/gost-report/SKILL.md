@@ -212,7 +212,9 @@ r.save("draft.docx")
 | `r.text(text, bold=False, italic=False)` | Абзац основного текста (justify, отступ 1.25 см). |
 | `r.task(text)` | Жирный «Задание N. ...». |
 | `r.code(code)` | Блок моноширинного кода (Courier New 11). |
-| `r.figure(image_path, caption, width_cm=None)` | Картинка + «Рисунок N — caption». Ширина клампится по печатной области. Относительный путь → `<project>/docs/figures/`. |
+| `r.figure(image, caption, width_cm=None)` | Картинка + «Рисунок N — caption». `image` — путь ИЛИ Figure из модуля (`r.plot.*`, `r.diagram`). Ширина клампится по печатной области. Относительный путь → `<project>/docs/figures/`. |
+| `r.plot.line/scatter/bar/grouped_bar/histogram(...)` | График matplotlib в ГОСТ-стиле (opt-in тир `[viz]`). С `caption=...` → встраивает и возвращает номер рисунка; без — возвращает Figure для `r.figure(fig, caption)`. См. ниже. |
+| `r.diagram(src, caption=None)` | Mermaid-диаграмма → PNG (opt-in тир `[diagrams]`). С `caption` → номер рисунка; без — Figure. |
 | `r.formula(latex, where=None) → int` | LaTeX-формула как нативное Word-уравнение, авто-номер «(N)» справа. Возвращает номер для ссылок. |
 | `r.table(rows, caption, has_header=True)` | Таблица + «Таблица N — caption». |
 | `r.numbered(items)`, `r.bullet(items)` | Списки. Каждый вызов стартует с 1 заново. |
@@ -232,6 +234,49 @@ r.save("draft.docx")
 
 Обязательные: `work_type`, `topic`, `student_name`, `student_group`, `year`. Полный список (включая `city`, `ministry`, `university_*`, `faculty` для override профиля) — в `references/api.md`.
 
+## Графики и диаграммы (подключаемые модули, opt-in)
+
+Сверх готовых PNG скилл умеет строить графики и диаграммы прямо в сборке. Это
+**подключаемые модули** с тяжёлыми зависимостями — они не входят в lightweight-
+дефолт и активируются тиром через `GOST_REPORT_EXTRAS`:
+
+```bash
+GOST_REPORT_EXTRAS=viz python3 scripts/ensure_env.py            # графики
+GOST_REPORT_EXTRAS=viz,diagrams python3 scripts/ensure_env.py   # + диаграммы
+```
+
+Без тира `r.plot`/`r.diagram` падают с внятной инструкцией — обычный отчёт без
+графиков matplotlib не тянет.
+
+**Ключевая гарантия ГОСТ:** график, mermaid-диаграмма и готовый PNG делят ОДИН
+сквозной счётчик «Рисунок N — …» (§6.5). Заголовок внутри графика не ставится —
+подпись делает `r.figure`/`embed_figure`.
+
+```python
+# Графики (тир [viz]) — Okabe-Ito + второй канал (linestyle/hatch) для Ч/Б печати.
+r.plot.line([0,1,2,3], [[0,1,4,9],[0,2,4,6]], labels=["y=x²","y=2x"],
+            xlabel="x", ylabel="y", caption="Сравнение зависимостей")
+r.plot.bar(["A","B","C"], [3,7,5], ylabel="Значение", caption="Распределение")
+r.plot.histogram(data, bins=20, xlabel="x", caption="Гистограмма выборки")
+
+# Вернуть Figure и встроить вручную (один call-site с готовым PNG):
+fig = r.plot.scatter(xs, ys, xlabel="x", ylabel="y")
+r.figure(fig, "Корреляция величин")
+
+# Диаграммы (тир [diagrams]) — mermaid → PNG. ГОСТ-тема инжектится сама.
+r.diagram("graph LR\n  A[Вход] --> B[Обработка]\n  B --> C[Выход]\n",
+          caption="Схема обработки данных")
+```
+
+Бэкенд диаграмм — каскад: внешний `mmdc` (Node, точно) → `merm` (pure-python,
+дефолт тира) → mermaid.ink (`GOST_REPORT_DIAGRAMS_ONLINE=1`, сеть). `merm` отдаёт
+SVG → нужен растеризатор (`rsvg-convert`/`cairosvg`/`resvg`); если ни одного нет,
+ошибка подскажет, что поставить. Детерминизм диаграмм — best-effort (random SVG
+id, метрики шрифта), в отличие от байт-стабильных PNG графиков.
+
+Новые модули штампуются скриптом `scripts/new_module.py <namespace> [--visual]`.
+Архитектура подробно — `research/19_gost_report_module_architecture.md`.
+
 ## Подробности — see references/
 
 Загружай по необходимости (агент не должен держать это в контексте каждый раз):
@@ -243,9 +288,15 @@ r.save("draft.docx")
 
 ## Dependencies
 
-Управляются автоматически через `scripts/ensure_env.py`. Список (см. `scripts/requirements.txt`):
+Управляются автоматически через `scripts/ensure_env.py`. Lightweight-дефолт (см. `scripts/requirements.txt`):
 - `python-docx>=1.1.0`
 - `latex2mathml>=3.77.0`
+
+Opt-in тиры (`requirements.d/<extra>.txt`, активируются `GOST_REPORT_EXTRAS=...`):
+- `[viz]` — `numpy`, `matplotlib` (~66 МБ). Графики `r.plot.*`. scipy/pandas НЕ тянем.
+- `[diagrams]` — `merm` (pure-python mermaid). Диаграммы `r.diagram`. Для PNG нужен растеризатор (`rsvg-convert`/`cairosvg`) или внешний `mmdc`.
+
+Переключение тира меняет хэш окружения → доустановка в тот же venv; тёплый запуск без тиров остаётся ~30 мс.
 
 При первом запуске bootstrap пишет `gost_report.pth` в site-packages venv'а — поэтому в твоём скрипте достаточно `from gost_report import Report, TitleConfig`. **Никаких `sys.path.insert(...)` не нужно.** Если IDE настроен на venv скилла — импорт тоже работает напрямую.
 

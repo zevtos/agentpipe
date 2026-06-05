@@ -44,7 +44,28 @@ SKILL_HOME_VAR = "GOST_REPORT_HOME"
 SKILL_DIR = Path(__file__).resolve().parent.parent   # installed code dir (volatile)
 SCRIPTS_DIR = Path(__file__).resolve().parent
 REQ_FILE = SCRIPTS_DIR / "requirements.txt"
+REQ_EXTRAS_DIR = SCRIPTS_DIR / "requirements.d"
 PTH_NAME = "gost_report.pth"
+
+
+def active_extras() -> list:
+    """Опциональные тиры зависимостей из $GOST_REPORT_EXTRAS ("viz,diagrams").
+    Каждому тиру соответствует requirements.d/<extra>.txt. Несуществующие
+    игнорируются. Дефолт (пусто) — lightweight: только requirements.txt."""
+    raw = os.environ.get("GOST_REPORT_EXTRAS", "")
+    out = []
+    for e in raw.replace(";", ",").split(","):
+        e = e.strip()
+        if e and (REQ_EXTRAS_DIR / f"{e}.txt").exists() and e not in out:
+            out.append(e)
+    return out
+
+
+def req_files() -> list:
+    """requirements.txt + активные тиры. Отсортировано для стабильного хэша."""
+    files = [REQ_FILE]
+    files += sorted(REQ_EXTRAS_DIR / f"{e}.txt" for e in active_extras())
+    return files
 
 
 def _skill_state_dir() -> Path:
@@ -98,7 +119,14 @@ def have(cmd: str) -> bool:
 
 
 def req_hash() -> str:
-    return hashlib.sha256(REQ_FILE.read_bytes()).hexdigest()
+    """Хэш по requirements.txt + всем активным тирам. Включение нового тира
+    (GOST_REPORT_EXTRAS=viz) меняет хэш → триггерит доустановку в тот же venv."""
+    h = hashlib.sha256()
+    for f in req_files():
+        h.update(f.name.encode("utf-8"))
+        h.update(b"\0")
+        h.update(f.read_bytes())
+    return h.hexdigest()
 
 
 def needs_update() -> bool:
@@ -176,18 +204,22 @@ def pth_exists() -> bool:
 
 def install_deps() -> None:
     py = str(venv_python())
-    log(f"Installing/updating dependencies from {REQ_FILE.name}")
+    files = req_files()
+    extras = active_extras()
+    label = REQ_FILE.name + (f" + тиры [{', '.join(extras)}]" if extras else "")
+    log(f"Installing/updating dependencies from {label}")
+    req_args = []
+    for f in files:
+        req_args += ["-r", str(f)]
     if have("uv"):
         subprocess.run(
-            ["uv", "pip", "install", "--python", py,
-             "-r", str(REQ_FILE), "--upgrade"],
+            ["uv", "pip", "install", "--python", py, *req_args, "--upgrade"],
             check=True,
         )
     else:
         subprocess.run(
-            [py, "-m", "pip", "install",
-             "-r", str(REQ_FILE), "--upgrade", "--quiet",
-             "--disable-pip-version-check"],
+            [py, "-m", "pip", "install", *req_args,
+             "--upgrade", "--quiet", "--disable-pip-version-check"],
             check=True,
         )
 

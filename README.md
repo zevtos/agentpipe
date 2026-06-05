@@ -98,7 +98,7 @@ Vanilla Claude Code already ships agents, commands, and skills — but they're *
 
 | Skill | Purpose | Triggers on |
 |-------|---------|-------------|
-| `gost-report` | Russian academic reports (`.docx`) to GOST 7.32 — лабораторные, отчёты по практике, курсовые, ВКР. Built-in `ITMO_PROFILE` / `GOST_PROFILE` plus `UniversityProfile` for any other vuz. | «лабораторную», «отчёт по ГОСТ», «курсовую», «ИТМО», etc. |
+| `gost-report` | Russian academic reports (`.docx`) to GOST 7.32 — лабораторные, отчёты по практике, курсовые, ВКР. Built-in `ITMO_PROFILE` / `GOST_PROFILE` plus `UniversityProfile` for any other vuz. Opt-in plugin modules: `r.plot.*` (matplotlib charts, GOST style) and `r.diagram` (mermaid → PNG), sharing one figure counter. | «лабораторную», «отчёт по ГОСТ», «курсовую», «ИТМО», etc. |
 | `doc2kb` | A folder of mixed documents (PDF, DOCX, DOC, PPTX, IPYNB, RTF, MD, TXT, HTML) → LLM-optimized knowledge base: per-source Markdown + `manifest.json` + `INDEX.md` + `AGENTS.md`. Local-first, no paid APIs; the heavy MinerU VLM tier is strictly opt-in (`ensure_env.py --tier mineru`). Legacy `.doc` uses a system converter (LibreOffice/`textutil`/`antiword`). Ships a **standalone `dkb` CLI** (`scripts/dkb.py`) that runs the whole pipeline in one command — `dkb <input_dir> <output_kb_dir>` — for no-agent use. | «обработай папку с документами», «сделай базу знаний», "build a knowledge base", "RAG prep". |
 | `ultrasearch` | Thesis-level literature research: queries OpenAlex + Semantic Scholar + arXiv, downloads OA PDFs, embeds into a persistent `sqlite-vec` corpus, synthesizes a markdown report with grounded `[Sn]` → DOI citations. Stage-1 MVP. | "literature review", "related work", «систематический обзор», «ВКР», «найди все статьи про X». |
 
@@ -135,7 +135,7 @@ agentpipe/
   agents/                9 specialist agent definitions
   commands/              16 orchestration commands
   skills/                Domain-specific skills (folders with SKILL.md + assets)
-  research/              18 reference documents
+  research/              19 reference documents
   tests/                 Agent eval scenarios — empty by default, see docs/eval.md
   scripts/               build-skills.sh, eval.sh, validate-skills.py, validate-repo.py
   .github/workflows/     ci.yml — validator-only checks on push/PR; release.yml — auto-attaches skill zips to GH releases on tag push
