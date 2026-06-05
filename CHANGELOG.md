@@ -5,7 +5,18 @@ All notable changes to this project will be documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0] - 2026-06-06
+
+First stable release. Gated multi-agent pipeline orchestration for Claude Code and Codex CLI — 9 specialist agents, 16 workflows, and a multi-vendor skill suite, installed globally in ~30 seconds.
+
+### Highlights
+
+- **`gost-report` grows a plugin ecosystem.** A small core + opt-in modules you compose right in `build.py`, all sharing one continuous «Рисунок N» counter: matplotlib charts (`r.plot.*`, GOST/grayscale-safe palette), Graphviz diagrams (`r.diagram` — structural schemes, algorithm flowcharts per ГОСТ 19.701), bibliography (`r.bib`, ГОСТ Р 7.0.5), GOST cross-references (`r.ref` — «на рисунке N», not bare numbers), and inline math (`$...$` LaTeX inside any prose). The LaTeX→OMML subsystem was extracted as the reference module; new modules scaffold with `scripts/new_module.py` (design in `research/19`).
+- **`doc2kb` ships a built-in retrieval layer.** Every knowledge base is self-searchable via a portable BM25 index (`query.sh` — SQLite FTS5, pure-stdlib fallback, no embeddings/API, Cyrillic + Latin), plus a one-shot `dkb` CLI for no-agent use.
+- **CLI launchers `gr` / `us` / `dkb`** installed on PATH with the skills (conflict-safe), so agents and humans skip the long `ensure_env.py` invocation. `gr` auto-discovers `.claude/gost-report/build.py`.
+- **Byte-deterministic `.docx`** across processes (pinned `docProps/core.xml` timestamps); GOST normocontrol fixes (comma before «где», units in table headers, references by word).
+
+Full detail below.
 
 ### Changed
 - **`gost-report`: extracted the LaTeX→OMML formula subsystem into the first vendored plugin module `gost_report_math/` — behavior-preserving, the reference example for cloning future modules.** The ~640-line OMML pipeline (constants + `_walk_mathml`/`_handle_*`/`_build_nary`/`_try_fenced_mtable`/… + `latex_to_omath`) moved verbatim from the `gost_report.py` monolith into `gost_report_math/_omml.py` (pure functions, no `Report` state); the GOST formula layout (centered formula + right-aligned «(N)» number) moved into `gost_report_math/module.py` (`MathModule` → `r.math.formula`, namespace `math`, auto-discovered via `registry._BUILTIN`). `Report.formula(...)` is now a one-line BC-shim delegating to `self.math.formula(...)` — identical signature and output. `gost_report.py` shrank **2182 → 1525 lines (−30%)**. New CoreServices facades back the module without it touching `Report` privates: `next_formula_number()`, `make_paragraph()`, `add_text_paragraph()`, `set_run_font()`, `space_block`. Math attaches lazily (latex2mathml is in the default tier but a document without formulas never imports it). **Verified byte-for-byte behavior-preserving** by a golden-master characterization harness: 86 LaTeX cases (fractions, sup/sub/subsup, roots, n-ary sum/prod/int with limits + body terminators, all 10 accents, lim/max/min, fenced brackets, pmatrix/bmatrix/cases, relations, nested) serialized to OMML XML + the full `document.xml` + a stable docx sha (excluding the volatile `docProps/core.xml` wall-clock timestamp) — all identical between the pre-extraction monolith and the extracted module; an in-process part-by-part diff confirmed every zip part matches. The harness is a throwaway (kept in `/tmp`, not committed — repo rule: validation via real usage, no test files). Removed two now-dead imports (`xml.etree.ElementTree as _ET`, `WD_TAB_ALIGNMENT`). No user-facing change; `r.formula` and existing scripts work unchanged. (Latent, pre-existing and out of scope: `docProps/core.xml` carries a wall-clock timestamp, so a `.docx` is byte-identical only within a process, not across processes — flagged for a separate fix.)
