@@ -80,6 +80,18 @@ SENTINEL_SUFFIX = ".gost-meta.json"
 MAX_VIOLATIONS_IN_REPORT = 10
 HOOK_GLOB_MAX_DEPTH = 6
 
+# Каталоги, в которые Stop-хук не спускается при сканировании sentinel'ов:
+# тяжёлые/чужие деревья, где gost-report-артефактов заведомо нет.
+HOOK_SCAN_SKIP_DIRS = frozenset({
+    ".git", "node_modules", ".venv", "venv", "env", "__pycache__",
+    ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox",
+    "site-packages", "dist", "build", ".next", ".cache",
+    ".idea", ".vscode", "Library", "Applications",
+})
+# Маркеры корня проекта (тот же набор, что у gost_report.paths()). Хук
+# сканирует только если cwd или предок (но не сам $HOME) — это корень проекта.
+HOOK_ROOT_MARKERS = (".git", "Makefile", "pyproject.toml", ".claude")
+
 TIER_FAIL = "a"
 TIER_WARN = "b"
 
@@ -440,21 +452,65 @@ def format_error(docx_path: Path, violations: List[Violation]) -> str:
 
 # ---- CLI -------------------------------------------------------------------
 
+def _under_project_root(cwd: Path) -> bool:
+    """True, если cwd или один из предков (но НЕ сам $HOME) содержит маркер
+    корня проекта. Гейт нужен, чтобы хук не сканировал $HOME / `/` / случайные
+    каталоги: в $HOME всегда есть ~/.claude, поэтому его исключаем явно."""
+    try:
+        home = Path.home()
+    except Exception:
+        home = None
+    for d in (cwd, *cwd.parents):
+        if home is not None and d == home:
+            break
+        for marker in HOOK_ROOT_MARKERS:
+            if (d / marker).exists():
+                return True
+    return False
+
+
+def _scan_sentinels(cwd: Path, max_depth: int = HOOK_GLOB_MAX_DEPTH) -> List[Path]:
+    """Ограниченный обход вниз от cwd. В отличие от `cwd.rglob(...)` (который
+    спускается во ВСЁ дерево, а depth-cap лишь фильтрует результат), здесь обход
+    обрезается на глубине и пропускает шумные каталоги — из большого корня хук
+    не обходит весь поддерев.
+
+    Семантика глубины совпадает с прежним `len(rel.parts) <= max_depth`:
+    sentinel в каталоге глубины d имеет rel.parts == d + 1, поэтому в дерево
+    спускаемся только пока (d + 1) дочернего каталога <= max_depth."""
+    out: List[Path] = []
+    max_dir_depth = max_depth - 1            # каталог сентинела: depth <= max-1
+    stack: List[Tuple[Path, int]] = [(cwd, 0)]
+    while stack:
+        directory, depth = stack.pop()
+        try:
+            entries = list(directory.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir():
+                    if (depth < max_dir_depth
+                            and entry.name not in HOOK_SCAN_SKIP_DIRS
+                            and not entry.is_symlink()):
+                        stack.append((entry, depth + 1))
+                elif entry.name.endswith(SENTINEL_SUFFIX):
+                    out.append(entry)
+            except OSError:
+                continue
+    return out
+
+
 def _hook_main(cwd: Path) -> int:
     """Stop-хук: сканирует cwd на sentinel'ы, валидирует docx, печатает
     decision-block JSON если есть FAIL'ы. Hook всегда exit 0 — лучше тихо
     промолчать, чем уронить Stop-pipeline."""
     if not HAS_DOCX:
         return 0
+    if not _under_project_root(cwd):
+        return 0
     try:
-        sentinels = []
-        for s in cwd.rglob("*" + SENTINEL_SUFFIX):
-            try:
-                rel = s.relative_to(cwd)
-                if len(rel.parts) <= HOOK_GLOB_MAX_DEPTH:
-                    sentinels.append(s)
-            except ValueError:
-                continue
+        sentinels = _scan_sentinels(cwd)
     except Exception:
         return 0
 

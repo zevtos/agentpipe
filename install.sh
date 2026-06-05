@@ -769,9 +769,11 @@ do_thinking_summaries_dry() {
 # its own crash — so it can never break the Stop pipeline.
 #
 # Sentinel scoping: only .docx files with a sibling .gost-meta.json get
-# validated. Hooks fire in every project's Claude Code session, but in
-# projects that don't use gost-report there are no sentinels and the hook
-# is a ~5ms no-op.
+# validated. Hooks fire in every project's Claude Code session. validate.py
+# first checks cwd is under a project root (skips $HOME / "/" outright), then
+# walks DOWN with a depth cap (HOOK_GLOB_MAX_DEPTH) skipping node_modules/.git/
+# etc — so it never traverses a whole filesystem subtree. In projects without
+# gost-report there are no sentinels and the hook is a fast no-op.
 #
 # Codex target skips this validation layer. The validate.py script
 # still ships in the codex skill .zip and works in CLI mode (--check) for
