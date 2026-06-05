@@ -348,9 +348,20 @@ def _load_gost_env() -> Dict[str, str]:
     return merged
 
 
+# Маркер заглушек из install-template config.env.example. Значение, содержащее
+# этот токен, трактуется как НЕзаполненное везде — чтобы первый отчёт не ушёл с
+# «ЗАПОЛНИ ФИО» на титуле, а валидатор указал, где править.
+_PLACEHOLDER_TOKEN = "ЗАПОЛНИ"
+
+
+def _is_placeholder(value: str) -> bool:
+    return _PLACEHOLDER_TOKEN in (value or "").upper()
+
+
 def _apply_env_overrides(cfg: TitleConfig) -> TitleConfig:
     """Накладывает env поверх TitleConfig. Env побеждает build.py, если
-    непустое. Пустое/отсутствующее env — оставляет значение из build.py.
+    непустое и не заглушка. Пустое/отсутствующее/заглушка-env — оставляет
+    значение из build.py.
 
     Особый случай: GOST_REPORT_STUDENT_NAMES — список через запятую,
     перекрывает только cfg.student_names (не student_name).
@@ -359,10 +370,10 @@ def _apply_env_overrides(cfg: TitleConfig) -> TitleConfig:
     for field_name in _ENV_STR_FIELDS:
         env_key = f"{_ENV_PREFIX}{field_name.upper()}"
         env_val = env.get(env_key, "")
-        if env_val:
+        if env_val and not _is_placeholder(env_val):
             setattr(cfg, field_name, env_val)
     names_raw = env.get(f"{_ENV_PREFIX}STUDENT_NAMES", "")
-    if names_raw:
+    if names_raw and not _is_placeholder(names_raw):
         cfg.student_names = [n.strip() for n in names_raw.split(",") if n.strip()]
     return cfg
 
@@ -1356,27 +1367,31 @@ class Report:
         """После применения env-override проверяет, что обязательные по
         смыслу поля заданы. Сообщение указывает на оба источника — build.py
         и env, чтобы пользователь сразу понимал где править."""
+        def _missing(value: str) -> bool:
+            return not value or _is_placeholder(value)
+
         problems = []
-        if not cfg.work_type:
+        if _missing(cfg.work_type):
             problems.append("work_type (GOST_REPORT_WORK_TYPE)")
-        if not cfg.topic:
+        if _missing(cfg.topic):
             problems.append("topic (GOST_REPORT_TOPIC)")
-        if not cfg.student_name and not cfg.student_names:
+        if _missing(cfg.student_name) and not cfg.student_names:
             problems.append(
                 "student_name или student_names "
                 "(GOST_REPORT_STUDENT_NAME / GOST_REPORT_STUDENT_NAMES)"
             )
-        if not cfg.student_group:
+        if _missing(cfg.student_group):
             problems.append("student_group (GOST_REPORT_STUDENT_GROUP)")
-        if not cfg.year:
+        if _missing(cfg.year):
             problems.append("year (GOST_REPORT_YEAR)")
         if problems:
             raise ValueError(
                 "TitleConfig: не заданы обязательные поля: "
                 + ", ".join(problems)
-                + ". Укажи их в TitleConfig(...) либо в "
-                  "~/.config/gost-report/config (env-формат) "
-                  "или через переменные окружения."
+                + f". Заполни их в {_config_file_path()} (env-формат), "
+                  "в <курс>/.gost-report.env, через переменные окружения "
+                  "или прямо в TitleConfig(...). "
+                  "Значения-заглушки «ЗАПОЛНИ…» считаются незаполненными."
             )
 
     def _resolve(self, attr: str) -> str:
