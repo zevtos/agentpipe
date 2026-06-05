@@ -53,13 +53,22 @@ description: Generate Russian academic reports (.docx) formatted to GOST 7.32 �
 
 ## Quickstart
 
-**Запуск всегда через bootstrap.** Скилл сам управляет своим venv в глобальном state-dir вне кода (ADR-008 — `$GOST_REPORT_HOME` или `${XDG_DATA_HOME:-~/.local/share}/agentpipe/gost-report/venv`) — не запускай `pip install` глобально:
+**Запускай билд командой `gr`** (ставится на PATH установщиком вместе со скиллом):
+
+```bash
+gr твой_скрипт.py     # запустить конкретный билд
+gr                    # без аргумента: найти .claude/gost-report/build.py и запустить
+```
+
+`gr` сам поднимает venv скилла (бутстрап + изоляция зависимостей) и выполняет билд. Без аргумента ищет дефолтный билд `.claude/gost-report/build.py` (обходя дерево вверх от текущей папки) — именно туда рекомендуется класть build-скрипт.
+
+Если `gr` не на PATH (установщик пропустил из-за конфликта имён, либо ручная установка) — fallback на длинную форму:
 
 ```bash
 python3 <skill_dir>/scripts/ensure_env.py твой_скрипт.py
 ```
 
-(`<skill_dir>` это папка где лежит `SKILL.md`. Bootstrap пробует `uv` → `conda --prefix` → `python -m venv`. Тёплые запуски ~30 мс, deps обновляются автоматически при апдейте скилла.)
+(Скилл управляет своим venv в глобальном state-dir вне кода: ADR-008 — `$GOST_REPORT_HOME` или `${XDG_DATA_HOME:-~/.local/share}/agentpipe/gost-report/venv`. Не запускай `pip install` глобально. Тёплые запуски ~30 мс.)
 
 ## Персональный конфиг (ФИО, группа, преподаватель)
 
@@ -243,8 +252,8 @@ r.save("draft.docx")
 дефолт и активируются тиром через `GOST_REPORT_EXTRAS`:
 
 ```bash
-GOST_REPORT_EXTRAS=viz python3 scripts/ensure_env.py   # графики (numpy+matplotlib)
-brew install graphviz   # или: sudo apt install graphviz — для диаграмм (бинарь dot)
+GOST_REPORT_EXTRAS=viz gr build.py   # тир viz (numpy+matplotlib) ставится и билд запускается
+brew install graphviz                # или: sudo apt install graphviz — для диаграмм (бинарь dot)
 ```
 
 Графики (`r.plot`) — opt-in тир `[viz]`; без него падают с внятной инструкцией

@@ -63,13 +63,21 @@ NOT for:
 
 ## Canonical invocation
 
-The skill is invoked through `ensure_env.py` so dependencies install into a local venv on first call (~3-5 min cold, <30 ms warm).
+Run it with **`us`** (installed on PATH with the skill). It bootstraps the skill's
+venv on first call (~3-5 min cold, <30 ms warm) and forwards all flags.
+
+```bash
+us "SSVEP-based BCIs neural prosthetics" \
+    --max-papers 30 \
+    --out /tmp/ssvep-review.md
+```
+
+Fallback if `us` isn't on PATH (installer skipped it on a name conflict, or manual
+install):
 
 ```bash
 python3 ~/.claude/skills/ultrasearch/scripts/ensure_env.py ultrasearch.py \
-    "SSVEP-based BCIs neural prosthetics" \
-    --max-papers 30 \
-    --out /tmp/ssvep-review.md
+    "SSVEP-based BCIs neural prosthetics" --max-papers 30 --out /tmp/ssvep-review.md
 ```
 
 ### CLI flags
@@ -133,17 +141,15 @@ So reach for `dev` when the question is **"which library/tool for X"**. For how-
 
 ```bash
 # dev profile (force, skip classifier)
-python3 ~/.claude/skills/ultrasearch/scripts/ensure_env.py ultrasearch.py \
-    "best Python web framework 2026" \
+us "best Python web framework 2026" \
     --profile=dev --max-papers 25 --top-k 8 \
     --out /tmp/web-frameworks.md
 
 # auto-classify, pure-academic query routes to v1 pipeline unchanged
-python3 ~/.claude/skills/ultrasearch/scripts/ensure_env.py ultrasearch.py \
-    "literature review on SSVEP BCI" \
-    --profile=auto --max-papers 30
+us "literature review on SSVEP BCI" --profile=auto --max-papers 30
 
-# docs profile with explicit root URLs (avoid query-only URL extraction)
+# docs profile with explicit root URLs — uses the orchestrate.py entry, so call it
+# through ensure_env.py directly (us maps to ultrasearch.py only)
 python3 ~/.claude/skills/ultrasearch/scripts/ensure_env.py orchestrate.py \
     "API reference" --profile=docs \
     --max-items 50 --top-k 20 --out /tmp/docs.md

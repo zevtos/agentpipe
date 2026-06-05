@@ -88,6 +88,7 @@ The skill becomes globally available across all your conversations on that accou
 | No CLAUDE.md | `--no-claude-md` | `-NoClaudeMd` | Skip neutral CLAUDE.md baseline (default: install-if-missing) |
 | No gost-validation | `--no-gost-validation` | `-NoGostValidation` | Skip gost-report Stop-hook validator (default-on for claude target) |
 | Skills only | `--skills-only` | `-SkillsOnly` | Copy only `skills/*` — skip agents, commands, and every `settings.json`/hook layer. Composes with both targets and with `--dry`/`--diff`/`--pull`/`--uninstall` |
+| No launchers | `--no-launchers` | `-NoLaunchers` | Skip the `gr`/`us`/`dkb` CLI launchers (installed with the skills onto `~/.local/bin`, `$AGENTPIPE_BIN_DIR` to override; skipped, never clobbered, if a same-named command already exists on PATH) |
 | With sound hooks | `--with-sound-hooks` | `-WithSoundHooks` | Opt-in: Stop sound hook only (one beep when Claude or Codex finishes) |
 | With notification sound | `--with-notification-sound` | `-WithNotificationSound` | Opt-in: Claude-only Notification sound hook (permission/wait-for-input) |
 | Clean sound hooks | `--clean-sound-hooks` | `-CleanSoundHooks` | Strip every sound hook (Stop+Notification) from the target hook config |
@@ -104,6 +105,22 @@ bash install.sh --diff                      # diff Claude install (default targe
 bash install.sh --skills-only                # update only skills/* under ~/.claude/
 bash install.sh --target codex --skills-only # update only skills/* under ~/.codex/
 ```
+
+## CLI Launchers (`gr` / `us` / `dkb`)
+
+Installed onto PATH **with the skills** (no opt-in) so you call a skill with a short
+command instead of the long `python3 …/ensure_env.py …` form:
+
+| Command | Skill | Usage |
+|---------|-------|-------|
+| `gr`  | gost-report | `gr build.py` — run a build; `gr` (no arg) — find & run `.claude/gost-report/build.py` walking up from the cwd |
+| `us`  | ultrasearch | `us "query" --max-papers 30 --out review.md` |
+| `dkb` | doc2kb | `dkb input_dir/ output_kb/` (plus `dkb index`/`dkb query` subcommands) |
+
+- **Location:** `~/.local/bin` by default; override with `$AGENTPIPE_BIN_DIR`. On Windows the installer writes `.cmd` shims. Add the dir to PATH if it isn't already (the installer warns when it isn't).
+- **Conflict-safe:** if a same-named command already exists on PATH and isn't agentpipe's (marker-detected), the launcher is skipped with a warning — never clobbered. Reinstall updates agentpipe's own shim in place.
+- **Relocation:** each shim honors a per-skill env override (`GOST_REPORT_SKILL` / `ULTRASEARCH_SKILL` / `DOC2KB_SKILL`) if you move the install.
+- **Opt out:** `--no-launchers` (Bash) / `-NoLaunchers` (PowerShell). Removed on `--uninstall`, previewed in `--dry`.
 
 ## Safe Defaults Layer
 

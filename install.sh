@@ -103,6 +103,7 @@ NOTIFICATION_SOUND=0
 THINKING_SUMMARIES=0
 GOST_VALIDATION=1
 SKILLS_ONLY=0
+LAUNCHERS=1
 MODEL_PROFILE_FLAG=""  # empty = no CLI flag; resolved later from settings.json or default
 
 while [[ $# -gt 0 ]]; do
@@ -120,6 +121,7 @@ while [[ $# -gt 0 ]]; do
         --no-claude-md) CLAUDE_MD=0; shift ;;
         --no-gost-validation) GOST_VALIDATION=0; shift ;;
         --skills-only) SKILLS_ONLY=1; shift ;;
+        --no-launchers) LAUNCHERS=0; shift ;;
         --with-sound-hooks) SOUND_HOOKS=1; shift ;;
         --with-notification-sound) NOTIFICATION_SOUND=1; shift ;;
         --with-thinking-summaries) THINKING_SUMMARIES=1; shift ;;
@@ -176,6 +178,10 @@ Options:
                             gost-validation). Works with both --target claude and
                             --target codex. Composes with --dry / --diff / --pull /
                             --uninstall, scoping each action to skills only.
+  --no-launchers            Skip installing the gr/us/dkb CLI launchers onto PATH
+                            (~/.local/bin by default; \$AGENTPIPE_BIN_DIR to override).
+                            Launchers install with the skills unless a same-named
+                            command already exists on PATH (then skipped, never clobbered).
   --with-sound-hooks        Add a Stop sound hook (one beep when Claude/Codex finishes a turn).
                             OS auto-detected: afplay/paplay/powershell beep. Off by default —
                             personal preference.
@@ -935,6 +941,120 @@ do_config_defaults_dry() {
     echo ""
 }
 
+# --- CLI launchers (gr/us/dkb on PATH) ---
+#
+# Short commands so agents (and humans) call `gr build.py` instead of the long
+# `python3 ~/.claude/skills/gost-report/scripts/ensure_env.py build.py`. Each shim
+# bakes in the installed skill path (env-overridable) and execs the skill entry.
+# Installed with the skills unless a same-named command already exists on PATH —
+# then skipped, never clobbered (marker-detected so reinstall still updates ours).
+
+LAUNCHER_MARK="# agentpipe-launcher"
+
+launchers_active() { [[ "$LAUNCHERS" -eq 1 && -n "$SKILLS_DST" ]]; }
+
+launcher_bin_dir() { echo "${AGENTPIPE_BIN_DIR:-$HOME/.local/bin}"; }
+
+_gr_shim() {
+    cat <<SHIM
+#!/usr/bin/env bash
+$LAUNCHER_MARK
+set -euo pipefail
+SKILL="\${GOST_REPORT_SKILL:-$SKILLS_DST/gost-report}"
+exec python3 "\$SKILL/scripts/cli.py" "\$@"
+SHIM
+}
+
+_us_shim() {
+    cat <<SHIM
+#!/usr/bin/env bash
+$LAUNCHER_MARK
+set -euo pipefail
+SKILL="\${ULTRASEARCH_SKILL:-$SKILLS_DST/ultrasearch}"
+exec python3 "\$SKILL/scripts/ensure_env.py" ultrasearch.py "\$@"
+SHIM
+}
+
+_dkb_shim() {
+    cat <<SHIM
+#!/usr/bin/env bash
+$LAUNCHER_MARK
+set -euo pipefail
+SKILL="\${DOC2KB_SKILL:-$SKILLS_DST/doc2kb}"
+exec python3 "\$SKILL/scripts/dkb.py" "\$@"
+SHIM
+}
+
+write_launcher() {
+    local cmd="$1" content="$2"
+    local bindir target found
+    bindir="$(launcher_bin_dir)"
+    target="$bindir/$cmd"
+    if found="$(command -v "$cmd" 2>/dev/null)"; then
+        if [[ "$found" != "$target" ]] && ! grep -q "$LAUNCHER_MARK" "$found" 2>/dev/null; then
+            warn "launcher '$cmd' skipped — '$found' already on PATH (not agentpipe's)"
+            return 0
+        fi
+    fi
+    mkdir -p "$bindir"
+    printf '%s\n' "$content" > "$target"
+    chmod +x "$target" 2>/dev/null || true
+    log "launcher $cmd → $target"
+    LAUNCHER_INSTALLED=1
+}
+
+launcher_path_notice() {
+    local bindir; bindir="$(launcher_bin_dir)"
+    case ":$PATH:" in
+        *":$bindir:"*) ;;
+        *) warn "add $bindir to PATH to use gr/us/dkb: echo 'export PATH=\"$bindir:\$PATH\"' >> ~/.zshrc" ;;
+    esac
+}
+
+do_launchers() {
+    launchers_active || return 0
+    echo ""
+    info "CLI launchers → $(launcher_bin_dir)"
+    [[ -d "$SKILLS_DST/gost-report" ]] && write_launcher gr  "$(_gr_shim)"
+    [[ -d "$SKILLS_DST/ultrasearch" ]] && write_launcher us  "$(_us_shim)"
+    [[ -d "$SKILLS_DST/doc2kb" ]]      && write_launcher dkb "$(_dkb_shim)"
+    [[ "${LAUNCHER_INSTALLED:-0}" -eq 1 ]] && launcher_path_notice
+    return 0
+}
+
+do_launchers_remove() {
+    launchers_active || return 0
+    local bindir cmd target
+    bindir="$(launcher_bin_dir)"
+    for cmd in gr us dkb; do
+        target="$bindir/$cmd"
+        if [[ -f "$target" ]] && grep -q "$LAUNCHER_MARK" "$target" 2>/dev/null; then
+            rm -f "$target"
+            log "removed launcher $cmd"
+        fi
+    done
+}
+
+do_launchers_dry() {
+    launchers_active || return 0
+    local bindir cmd target found
+    bindir="$(launcher_bin_dir)"
+    echo "CLI launchers ($bindir):"
+    for cmd in gr us dkb; do
+        target="$bindir/$cmd"
+        if found="$(command -v "$cmd" 2>/dev/null)"; then
+            if [[ "$found" != "$target" ]] && ! grep -q "$LAUNCHER_MARK" "$found" 2>/dev/null; then
+                warn "  ! $cmd (conflict: $found — would skip)"
+            else
+                echo "  = $cmd (update)"
+            fi
+        else
+            info "  + $cmd (NEW)"
+        fi
+    done
+    echo ""
+}
+
 # --- Actions ---
 
 do_install() {
@@ -1053,6 +1173,8 @@ do_install() {
         persist_profile "$MODEL_PROFILE"
     fi
 
+    do_launchers
+
     echo ""
     info "Installed $count items to $BASE"
     codex_skip_notice
@@ -1136,6 +1258,8 @@ do_uninstall() {
         do_config_defaults_unfix
     fi
 
+    do_launchers_remove
+
     echo ""
     info "Removed $count items from $BASE"
 }
@@ -1207,6 +1331,7 @@ do_dry() {
 
     dry_legacy_codex_cleanup
 
+    do_launchers_dry
     do_attribution_dry
     do_config_defaults_dry
     do_claude_md_dry

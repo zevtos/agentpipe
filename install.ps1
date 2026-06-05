@@ -20,6 +20,7 @@
     .\install.ps1 -NoClaudeMd              # skip neutral CLAUDE.md baseline (install-if-missing)
     .\install.ps1 -NoGostValidation        # skip gost-report Stop-hook validator (default: on)
     .\install.ps1 -SkillsOnly              # copy only skills/* (skip agents, commands, hooks)
+    .\install.ps1 -NoLaunchers             # skip installing gr/us/dkb CLI launchers onto PATH
     .\install.ps1 -WithSoundHooks          # opt-in: Stop sound hook only (one beep per turn)
     .\install.ps1 -WithNotificationSound   # opt-in: Claude Notification sound hook only
     .\install.ps1 -WithThinkingSummaries   # opt-in: showThinkingSummaries=true
@@ -40,6 +41,7 @@ param(
     [switch]$NoClaudeMd,
     [switch]$NoGostValidation,
     [switch]$SkillsOnly,
+    [switch]$NoLaunchers,
     [switch]$WithSoundHooks,
     [switch]$WithNotificationSound,
     [switch]$WithThinkingSummaries,
@@ -885,6 +887,118 @@ if ($ModelProfile -notin @("opus", "sonnet", "mixed")) {
     exit 1
 }
 
+# --- CLI launchers (gr/us/dkb on PATH) — mirror of install.sh ---
+# Short commands so agents and humans call `gr build.py` instead of the long
+# ensure_env.py invocation. Each shim bakes the installed skill path (env-
+# overridable) and execs the skill entry. Installed with the skills unless a
+# same-named command already exists on PATH (then skipped, never clobbered).
+
+function Test-LaunchersActive { return ((-not $NoLaunchers) -and $SkillsDst) }
+
+function Get-LauncherBinDir {
+    if ($env:AGENTPIPE_BIN_DIR) { return $env:AGENTPIPE_BIN_DIR }
+    return (Join-Path $HOME ".local\bin")
+}
+
+function Get-GrShim {
+    $skill = Join-Path $SkillsDst "gost-report"
+    return @"
+@echo off
+REM agentpipe-launcher
+set "SKILL=%GOST_REPORT_SKILL%"
+if "%SKILL%"=="" set "SKILL=$skill"
+python "%SKILL%\scripts\cli.py" %*
+"@
+}
+
+function Get-UsShim {
+    $skill = Join-Path $SkillsDst "ultrasearch"
+    return @"
+@echo off
+REM agentpipe-launcher
+set "SKILL=%ULTRASEARCH_SKILL%"
+if "%SKILL%"=="" set "SKILL=$skill"
+python "%SKILL%\scripts\ensure_env.py" ultrasearch.py %*
+"@
+}
+
+function Get-DkbShim {
+    $skill = Join-Path $SkillsDst "doc2kb"
+    return @"
+@echo off
+REM agentpipe-launcher
+set "SKILL=%DOC2KB_SKILL%"
+if "%SKILL%"=="" set "SKILL=$skill"
+python "%SKILL%\scripts\dkb.py" %*
+"@
+}
+
+function Write-Launcher($cmd, $content) {
+    $bindir = Get-LauncherBinDir
+    $target = Join-Path $bindir "$cmd.cmd"
+    $existing = Get-Command $cmd -ErrorAction SilentlyContinue
+    if ($existing -and $existing.Source -and ($existing.Source -ne $target)) {
+        if (-not (Select-String -Quiet -Path $existing.Source -Pattern 'agentpipe-launcher' -ErrorAction SilentlyContinue)) {
+            Write-Warn "launcher '$cmd' skipped - '$($existing.Source)' already on PATH (not agentpipe's)"
+            return
+        }
+    }
+    New-Item -ItemType Directory -Force -Path $bindir | Out-Null
+    Set-Content -Path $target -Value $content -Encoding ASCII
+    Write-Ok "launcher $cmd -> $target"
+    $Script:LauncherInstalled = $true
+}
+
+function Show-LauncherPathNotice {
+    $bindir = Get-LauncherBinDir
+    $onPath = ($env:PATH -split ';') -contains $bindir
+    if (-not $onPath) {
+        Write-Warn "add $bindir to PATH to use gr/us/dkb"
+    }
+}
+
+function Do-Launchers {
+    if (-not (Test-LaunchersActive)) { return }
+    Write-Host ""
+    Write-Info "CLI launchers -> $(Get-LauncherBinDir)"
+    if (Test-Path (Join-Path $SkillsDst "gost-report")) { Write-Launcher "gr"  (Get-GrShim) }
+    if (Test-Path (Join-Path $SkillsDst "ultrasearch")) { Write-Launcher "us"  (Get-UsShim) }
+    if (Test-Path (Join-Path $SkillsDst "doc2kb"))      { Write-Launcher "dkb" (Get-DkbShim) }
+    if ($Script:LauncherInstalled) { Show-LauncherPathNotice }
+}
+
+function Do-LaunchersRemove {
+    if (-not (Test-LaunchersActive)) { return }
+    $bindir = Get-LauncherBinDir
+    foreach ($cmd in @("gr", "us", "dkb")) {
+        $target = Join-Path $bindir "$cmd.cmd"
+        if ((Test-Path $target) -and (Select-String -Quiet -Path $target -Pattern 'agentpipe-launcher' -ErrorAction SilentlyContinue)) {
+            Remove-Item $target -Force
+            Write-Ok "removed launcher $cmd"
+        }
+    }
+}
+
+function Do-LaunchersDry {
+    if (-not (Test-LaunchersActive)) { return }
+    $bindir = Get-LauncherBinDir
+    Write-Host "CLI launchers ($bindir):"
+    foreach ($cmd in @("gr", "us", "dkb")) {
+        $target = Join-Path $bindir "$cmd.cmd"
+        $existing = Get-Command $cmd -ErrorAction SilentlyContinue
+        if ($existing -and $existing.Source) {
+            if (($existing.Source -ne $target) -and -not (Select-String -Quiet -Path $existing.Source -Pattern 'agentpipe-launcher' -ErrorAction SilentlyContinue)) {
+                Write-Warn "  ! $cmd (conflict: $($existing.Source) - would skip)"
+            } else {
+                Write-Host "  = $cmd (update)"
+            }
+        } else {
+            Write-Info "  + $cmd (NEW)"
+        }
+    }
+    Write-Host ""
+}
+
 function Do-Install {
     if ($AgentsDst) {
         Write-Info "Installing agentpipe v$($Script:Version) (target: $Target, model-profile: $ModelProfile) to: $Base"
@@ -995,6 +1109,8 @@ function Do-Install {
         Persist-Profile $ModelProfile
     }
 
+    Do-Launchers
+
     Write-Host ""
     Write-Info "Installed $count items to $Base"
     Show-CodexSkipNotice
@@ -1072,6 +1188,8 @@ function Do-Uninstall {
         Do-ConfigDefaultsUnfix
     }
 
+    Do-LaunchersRemove
+
     Write-Host ""
     Write-Info "Removed $count items from $Base"
 }
@@ -1148,6 +1266,7 @@ function Do-Dry {
 
     Show-LegacyCodexCleanupDry
 
+    Do-LaunchersDry
     Do-AttributionDry
     Do-ConfigDefaultsDry
     Do-ClaudeMdDry
