@@ -24,6 +24,8 @@ from typing import Dict
 # namespace → "module_path:ClassName"
 _BUILTIN: Dict[str, str] = {
     "math": "gost_report_math.module:MathModule",
+    "bib": "gost_report_bib.module:BibModule",
+    "ref": "gost_report_xref.module:XrefModule",
     "plot": "gost_report_viz.module:VizModule",
     "diagram": "gost_report_diagrams.module:DiagramModule",
 }

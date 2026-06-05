@@ -153,6 +153,23 @@ def _para_is_caption(text: str) -> bool:
                 or _TABLE_CAPTION_RE.match(text))
 
 
+# Заголовок структурного элемента «Список использованных источников» /
+# «Список литературы» / «Библиографический список» — после него идут записи по
+# ГОСТ Р 7.0.5, где « — » обязательный разделитель областей описания.
+_BIB_TITLE_RE = re.compile(
+    r"^(СПИСОК\s+(ИСПОЛЬЗОВАННЫХ\s+)?(ИСТОЧНИКОВ|ЛИТЕРАТУРЫ)"
+    r"|БИБЛИОГРАФИЧЕСКИЙ\s+СПИСОК|БИБЛИОГРАФИЯ)", re.IGNORECASE)
+_BIB_ENTRY_RE = re.compile(r"^\s*\d+\.\s")
+
+
+def _para_is_heading(paragraph) -> bool:
+    try:
+        name = (paragraph.style.name or "")
+    except Exception:
+        return False
+    return name.startswith("Heading") or name.startswith("Заголовок")
+
+
 def _para_is_code(paragraph) -> bool:
     for run in paragraph.runs:
         if run.font.name == "Courier New":
@@ -185,13 +202,25 @@ _PROHIBITED_DASH_RE = re.compile(r"[—–]")
 
 def _check_dashes(doc) -> List[Violation]:
     violations: List[Violation] = []
+    in_bibliography = False
     for i, p in enumerate(doc.paragraphs):
         text = p.text
         if not text:
             continue
+        stripped = text.strip()
+        # Вход/выход из секции списка литературы (там « — » обязателен по ГОСТ
+        # Р 7.0.5). Заголовок-список → вход; следующий структурный заголовок → выход.
+        if _BIB_TITLE_RE.match(stripped):
+            in_bibliography = True
+            continue
+        if in_bibliography and _para_is_heading(p) and not _BIB_TITLE_RE.match(stripped):
+            in_bibliography = False
         if _para_is_caption(text):
             continue
         if _para_is_code(p):
+            continue
+        # Записи библиографии («N. Автор. — …») — em-dash легален по стандарту.
+        if in_bibliography and _BIB_ENTRY_RE.match(stripped):
             continue
         m = _PROHIBITED_DASH_RE.search(text)
         if m:

@@ -53,6 +53,12 @@ class _MathAPI:
         # Сама формула
         p._p.append(omath)
 
+        # ГОСТ: если за формулой идёт расшифровка «где …», формула
+        # заканчивается запятой (запятая вплотную к формуле, перед номером).
+        if where:
+            comma_run = p.add_run(",")
+            core.set_run_font(comma_run)
+
         # Tab → правый край → "(N)"
         num_run = p.add_run()
         num_run._element.append(OxmlElement("w:tab"))

@@ -216,7 +216,9 @@ r.save("draft.docx")
 | `r.plot.line/scatter/bar/grouped_bar/histogram(...)` | График matplotlib в ГОСТ-стиле (opt-in тир `[viz]`). С `caption=...` → встраивает и возвращает номер рисунка; без — возвращает Figure для `r.figure(fig, caption)`. См. ниже. |
 | `r.diagram(src, caption=None)` | Mermaid-диаграмма → PNG (opt-in тир `[diagrams]`). С `caption` → номер рисунка; без — Figure. |
 | `r.formula(latex, where=None) → int` | LaTeX-формула как нативное Word-уравнение, авто-номер «(N)» справа. Возвращает номер для ссылок. Реализация вынесена в модуль `gost_report_math` (доступно и как `r.math.formula`); поведение идентично. |
-| `r.table(rows, caption, has_header=True)` | Таблица + «Таблица N — caption». |
+| `r.table(rows, caption, has_header=True)` | Таблица + «Таблица N — caption». В заголовках столбцов указывай единицы измерения (см. ниже). |
+| `r.bib.add(key, type=, ...)` / `r.bib.cite(key)→"[N]"` / `r.bib.references()` | Список литературы по ГОСТ Р 7.0.5: регистрация источника, ссылка `[N]` (номер по порядку цитирования), структурный элемент «Список использованных источников». |
+| `r.ref.on_figure(n)` / `r.ref.in_table(n)` / `r.ref.by_formula(n)` / `r.ref.figure(n)` … | ГОСТ-фразы для ссылок: «на рисунке 3», «в таблице 2», «по формуле (4)». `cap=True` для начала предложения. |
 | `r.numbered(items)`, `r.bullet(items)` | Списки. Каждый вызов стартует с 1 заново. |
 | `r.page_break()` | Принудительный разрыв (редко нужен — h1 сам ставит). |
 | `r.save(path=None)` | Сохранить .docx. Без аргумента → `<project>/docs/report.docx`. Относительный путь → от `<project>/docs/`. Возвращает абсолютный `Path`. |
@@ -277,6 +279,60 @@ id, метрики шрифта), в отличие от байт-стабиль
 Новые модули штампуются скриптом `scripts/new_module.py <namespace> [--visual]`.
 Эталонный пример модуля — `gost_report_math/` (формулы вынесены из ядра без
 изменения поведения). Архитектура подробно — `research/19_gost_report_module_architecture.md`.
+
+## Список литературы и ссылки (модули bib, ref)
+
+Pure-python, в default-тире (без доп. зависимостей). Источники нумеруются по
+порядку первого цитирования (vancouver-стиль), номера в `[N]` совпадают со
+списком.
+
+```python
+r.bib.add("vasiliev2020", type="book", authors=["Васильев А.А."],
+          title="Машинное обучение", city="М.", publisher="ДМК Пресс",
+          year=2020, pages=420)
+r.bib.add("smith2021", type="article", authors=["Smith J."], title="Deep nets",
+          journal="Nature", year=2021, volume=5, issue=3, pages="12-18",
+          doi="10.1000/xyz")
+r.bib.add("docs", type="web", authors=["Иванов И.И."], title="Руководство",
+          url="https://example.org", accessed="01.06.2026")
+
+r.text(f"Метод описан в источнике {r.bib.cite('vasiliev2020')}.")   # «… [1].»
+r.text(f"Сравнение приведено в работах {r.bib.cite('smith2021','docs')}.")  # «[2, 3]»
+...
+r.bib.references()   # структурный элемент в конце (заголовок + нумерованный список)
+```
+
+Типы: `book` / `article` / `web` / `conference` / `standard` / `thesis`. Поля:
+`authors` (список или строка), `title`, `city`, `publisher`, `year`, `pages`,
+`journal`, `volume`, `issue`, `url`, `accessed`, `doi`, `edition`. Тире « — » в
+описаниях — обязательный разделитель ГОСТ Р 7.0.5 (валидатор его не трогает в
+секции списка литературы).
+
+**Ссылки в тексте — словом, не цифрой** (ГОСТ 7.32: сокращения «рис.»/«табл.»
+запрещены):
+
+```python
+n = r.figure(img, "Схема системы")
+t = r.table(rows, caption="Параметры модели")
+f = r.formula(r"y = kx + b", where="k — наклон")
+r.text(f"{r.ref.on_figure(n, cap=True)} показана схема.")   # «На рисунке 3 …»
+r.text(f"Параметры сведены {r.ref.in_table(t)}.")            # «… в таблице 2.»
+r.text(f"Значение считается {r.ref.by_formula(f)}.")         # «… по формуле (4).»
+```
+
+Методы `ref`: `figure/table/formula` (именительный), `on_figure/in_table/by_formula`
+(предложные обороты), `per_figure/per_table` («в соответствии с …»), `see_figure/
+see_table` (скобочные). Все принимают номер или зарегистрированную метку
+(`r.ref.set("arch", n)`); `cap=True` — заглавная для начала предложения.
+
+## Правила оформления (по замечаниям нормоконтроля)
+
+- **Запятая перед «где»** после формулы ставится автоматически, если задан
+  `where=`. Просто передавай расшифровку: `r.formula(expr, where="…")`.
+- **Единицы измерения в заголовках таблиц.** Не «Образцов», а «Количество
+  образцов»; не «Доля», а «Доля, %». Если величина имеет единицу — указывай её
+  в заголовке столбца: «Масса, г», «Время, с», «Точность, %».
+- **Ссылки — словом + номер** через `r.ref.*` (см. выше), не голой цифрой `(N)`.
 
 ## Подробности — see references/
 
