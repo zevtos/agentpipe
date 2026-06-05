@@ -1,9 +1,9 @@
-"""gost_report_diagrams — mermaid-диаграммы → PNG как подключаемый модуль.
+"""gost_report_diagrams — диаграммы через Graphviz (DOT) → PNG.
 
-Namespace `r.diagram` (callable): r.diagram(src, caption=...).
-Рендер в PNG через каскад бэкендов: внешний `mmdc` (Node, точно) → `merm`
-(pure-python, оффлайн) → mermaid.ink (сеть, opt-in). ГОСТ-тема (neutral +
-grayscale + serif) инжектится автоматически.
+Namespace r.diagram (callable): r.diagram(dot_source, caption=...).
+Покрывает структурные схемы, блок-схемы алгоритмов (ГОСТ 19.701), деревья, ER,
+графы зависимостей. Красивое ГОСТ-оформление инжектится из коробки.
 
-Детерминизм — best-effort (random SVG id, метрики шрифта), см. research/19.
+Зависимость — только системный бинарь `dot` (brew/apt install graphviz):
+без pip, без Node, PNG напрямую. Детерминизм — best-effort (версия dot).
 """

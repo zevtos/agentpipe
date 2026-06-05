@@ -142,7 +142,7 @@ TitleConfig(topic='Численные методы', ...)
 - **`r.figure(image, caption)`** теперь принимает путь ИЛИ `Figure` (chart/diagram) — один call-site для всего.
 - **Детерминизм:** PNG графиков байт-стабильны (`savefig(metadata={'Software':None})`, имя по хэшу содержимого) при фиксированных версиях matplotlib/freetype. Диаграммы — best-effort (random SVG id, метрики шрифта).
 - **Палитра:** Okabe-Ito + второй канал (linestyle/marker для линий, hatch для столбцов) → график читается в Ч/Б. Заголовок внутри графика не ставится (его роль — ГОСТ-подпись).
-- **Бэкенд диаграмм:** каскад `mmdc` (Node, точно) → `merm` (pure-python) → `mermaid.ink` (`GOST_REPORT_DIAGRAMS_ONLINE=1`). `merm` отдаёт SVG → растеризатор `rsvg-convert`/`cairosvg`/`resvg`.
+- **Диаграммы:** движок Graphviz (системный `dot`, без pip/Node, PNG напрямую). DOT-исходник; ГОСТ-оформление (серые скруглённые блоки, serif) инжектится из коробки, атрибуты в DOT его переопределяют. Опции `engine=`/`font=`/`rankdir=`. Покрывает структурные схемы, блок-схемы алгоритмов (ГОСТ 19.701), деревья, ER, графы зависимостей.
 - **Новый модуль:** `python3 scripts/new_module.py <namespace> [--visual]`. Архитектура и контракты — `research/19_gost_report_module_architecture.md`, `scripts/core_api.py`.
 
 ## Полная таблица методов

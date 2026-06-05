@@ -214,7 +214,7 @@ r.save("draft.docx")
 | `r.code(code)` | Блок моноширинного кода (Courier New 11). |
 | `r.figure(image, caption, width_cm=None)` | Картинка + «Рисунок N — caption». `image` — путь ИЛИ Figure из модуля (`r.plot.*`, `r.diagram`). Ширина клампится по печатной области. Относительный путь → `<project>/docs/figures/`. |
 | `r.plot.line/scatter/bar/grouped_bar/histogram(...)` | График matplotlib в ГОСТ-стиле (opt-in тир `[viz]`). С `caption=...` → встраивает и возвращает номер рисунка; без — возвращает Figure для `r.figure(fig, caption)`. См. ниже. |
-| `r.diagram(src, caption=None)` | Mermaid-диаграмма → PNG (opt-in тир `[diagrams]`). С `caption` → номер рисунка; без — Figure. |
+| `r.diagram(dot, caption=None)` | Диаграмма Graphviz (DOT) → PNG. Нужен системный `dot` (brew/apt install graphviz). С `caption` → номер рисунка; без — Figure. |
 | `r.formula(latex, where=None) → int` | LaTeX-формула как нативное Word-уравнение, авто-номер «(N)» справа. Возвращает номер для ссылок. Реализация вынесена в модуль `gost_report_math` (доступно и как `r.math.formula`); поведение идентично. |
 | `r.table(rows, caption, has_header=True)` | Таблица + «Таблица N — caption». В заголовках столбцов указывай единицы измерения (см. ниже). |
 | `r.bib.add(key, type=, ...)` / `r.bib.cite(key)→"[N]"` / `r.bib.references()` | Список литературы по ГОСТ Р 7.0.5: регистрация источника, ссылка `[N]` (номер по порядку цитирования), структурный элемент «Список использованных источников». |
@@ -243,16 +243,17 @@ r.save("draft.docx")
 дефолт и активируются тиром через `GOST_REPORT_EXTRAS`:
 
 ```bash
-GOST_REPORT_EXTRAS=viz python3 scripts/ensure_env.py            # графики
-GOST_REPORT_EXTRAS=viz,diagrams python3 scripts/ensure_env.py   # + диаграммы
+GOST_REPORT_EXTRAS=viz python3 scripts/ensure_env.py   # графики (numpy+matplotlib)
+brew install graphviz   # или: sudo apt install graphviz — для диаграмм (бинарь dot)
 ```
 
-Без тира `r.plot`/`r.diagram` падают с внятной инструкцией — обычный отчёт без
-графиков matplotlib не тянет.
+Графики (`r.plot`) — opt-in тир `[viz]`; без него падают с внятной инструкцией
+(обычный отчёт matplotlib не тянет). Диаграммы (`r.diagram`) — нужен только
+системный `dot`; pip-зависимостей нет.
 
-**Ключевая гарантия ГОСТ:** график, mermaid-диаграмма и готовый PNG делят ОДИН
-сквозной счётчик «Рисунок N — …» (§6.5). Заголовок внутри графика не ставится —
-подпись делает `r.figure`/`embed_figure`.
+**Ключевая гарантия ГОСТ:** график, диаграмма и готовый PNG делят ОДИН сквозной
+счётчик «Рисунок N — …» (§6.5). Заголовок внутри графика не ставится — подпись
+делает `r.figure`/`embed_figure`.
 
 ```python
 # Графики (тир [viz]) — Okabe-Ito + второй канал (linestyle/hatch) для Ч/Б печати.
@@ -265,16 +266,24 @@ r.plot.histogram(data, bins=20, xlabel="x", caption="Гистограмма вы
 fig = r.plot.scatter(xs, ys, xlabel="x", ylabel="y")
 r.figure(fig, "Корреляция величин")
 
-# Диаграммы (тир [diagrams]) — mermaid → PNG. ГОСТ-тема инжектится сама.
-r.diagram("graph LR\n  A[Вход] --> B[Обработка]\n  B --> C[Выход]\n",
-          caption="Схема обработки данных")
+# Диаграммы (Graphviz/DOT) — ГОСТ-стиль инжектится из коробки.
+r.diagram("digraph { Пользователь -> Сервис -> БД }",
+          caption="Структурная схема системы")
+# Блок-схема алгоритма (ГОСТ 19.701 — фигуры через DOT):
+r.diagram('''digraph { rankdir=TB
+  s [shape=ellipse label="Начало"]; d [shape=diamond label="x > 0?"]
+  a [label="y = x"]; b [label="y = -x"]; e [shape=ellipse label="Конец"]
+  s -> d; d -> a [label="да"]; d -> b [label="нет"]; a -> e; b -> e }''',
+          caption="Блок-схема алгоритма")
 ```
 
-Бэкенд диаграмм — каскад: внешний `mmdc` (Node, точно) → `merm` (pure-python,
-дефолт тира) → mermaid.ink (`GOST_REPORT_DIAGRAMS_ONLINE=1`, сеть). `merm` отдаёт
-SVG → нужен растеризатор (`rsvg-convert`/`cairosvg`/`resvg`); если ни одного нет,
-ошибка подскажет, что поставить. Детерминизм диаграмм — best-effort (random SVG
-id, метрики шрифта), в отличие от байт-стабильных PNG графиков.
+Диаграммы рендерит системный Graphviz (`dot`) — PNG напрямую, без Node и без
+растеризатора; покрывает структурные схемы, блок-схемы алгоритмов, деревья, ER,
+графы зависимостей. Из коробки инжектится ГОСТ-оформление: светло-серые
+скруглённые блоки, тёмная рамка, чёрный текст, serif-шрифт под Times New Roman
+(читается в Ч/Б). Пользовательские атрибуты в DOT (shape, rankdir, …)
+переопределяют дефолты. Опции: `engine=` (dot/neato/fdp/circo/twopi), `font=`,
+`rankdir=`. Детерминизм — best-effort (зависит от версии dot).
 
 Новые модули штампуются скриптом `scripts/new_module.py <namespace> [--visual]`.
 Эталонный пример модуля — `gost_report_math/` (формулы вынесены из ядра без
@@ -349,9 +358,11 @@ see_table` (скобочные). Все принимают номер или з�
 - `python-docx>=1.1.0`
 - `latex2mathml>=3.77.0`
 
-Opt-in тиры (`requirements.d/<extra>.txt`, активируются `GOST_REPORT_EXTRAS=...`):
+Opt-in тир (`requirements.d/<extra>.txt`, активируется `GOST_REPORT_EXTRAS=...`):
 - `[viz]` — `numpy`, `matplotlib` (~66 МБ). Графики `r.plot.*`. scipy/pandas НЕ тянем.
-- `[diagrams]` — `merm` (pure-python mermaid). Диаграммы `r.diagram`. Для PNG нужен растеризатор (`rsvg-convert`/`cairosvg`) или внешний `mmdc`.
+
+Диаграммы `r.diagram` (Graphviz) — это не pip-тир, а системный бинарь `dot`
+(`brew install graphviz` / `sudo apt install graphviz`). Pip-зависимостей нет.
 
 Переключение тира меняет хэш окружения → доустановка в тот же venv; тёплый запуск без тиров остаётся ~30 мс.
 

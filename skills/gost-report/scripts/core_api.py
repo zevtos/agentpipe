@@ -4,7 +4,7 @@
 которые вешаются на Report через namespaced lazy-attach (`r.plot.line(...)`,
 `r.diagram(...)`). Модуль НИКОГДА не пишет подпись/нумерацию сам — он производит
 PNG и зовёт shared core service `core.embed_figure(png, caption)`. Благодаря
-этому matplotlib-график, mermaid-диаграмма и готовый PNG делят ОДИН сквозной
+этому matplotlib-график, graphviz-диаграмма и готовый PNG делят ОДИН сквозной
 счётчик «Рисунок N — …» (требование ГОСТ 7.32 §6.5).
 
 Контракты ниже — `typing.Protocol` (структурная типизация): сторонний pip-модуль
