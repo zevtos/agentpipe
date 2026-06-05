@@ -23,12 +23,14 @@ from typing import Dict
 
 # namespace → "module_path:ClassName"
 _BUILTIN: Dict[str, str] = {
+    "math": "gost_report_math.module:MathModule",
     "plot": "gost_report_viz.module:VizModule",
     "diagram": "gost_report_diagrams.module:DiagramModule",
 }
 
-# Модули, которые присоединяются сразу при создании Report (их deps в default-тире).
-# Пусто: viz/diagrams тянут тяжёлые deps → только lazy on first use.
+# Модули, присоединяемые сразу при создании Report (deps в default-тире).
+# math не auto-attach: lazy через r.formula-shim / r.math — чтобы документ без
+# формул не импортировал latex2mathml. viz/diagrams тоже только lazy (тяжёлые deps).
 _AUTO_ATTACH: frozenset = frozenset()
 
 

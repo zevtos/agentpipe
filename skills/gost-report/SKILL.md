@@ -215,7 +215,7 @@ r.save("draft.docx")
 | `r.figure(image, caption, width_cm=None)` | Картинка + «Рисунок N — caption». `image` — путь ИЛИ Figure из модуля (`r.plot.*`, `r.diagram`). Ширина клампится по печатной области. Относительный путь → `<project>/docs/figures/`. |
 | `r.plot.line/scatter/bar/grouped_bar/histogram(...)` | График matplotlib в ГОСТ-стиле (opt-in тир `[viz]`). С `caption=...` → встраивает и возвращает номер рисунка; без — возвращает Figure для `r.figure(fig, caption)`. См. ниже. |
 | `r.diagram(src, caption=None)` | Mermaid-диаграмма → PNG (opt-in тир `[diagrams]`). С `caption` → номер рисунка; без — Figure. |
-| `r.formula(latex, where=None) → int` | LaTeX-формула как нативное Word-уравнение, авто-номер «(N)» справа. Возвращает номер для ссылок. |
+| `r.formula(latex, where=None) → int` | LaTeX-формула как нативное Word-уравнение, авто-номер «(N)» справа. Возвращает номер для ссылок. Реализация вынесена в модуль `gost_report_math` (доступно и как `r.math.formula`); поведение идентично. |
 | `r.table(rows, caption, has_header=True)` | Таблица + «Таблица N — caption». |
 | `r.numbered(items)`, `r.bullet(items)` | Списки. Каждый вызов стартует с 1 заново. |
 | `r.page_break()` | Принудительный разрыв (редко нужен — h1 сам ставит). |
@@ -275,7 +275,8 @@ SVG → нужен растеризатор (`rsvg-convert`/`cairosvg`/`resvg`);
 id, метрики шрифта), в отличие от байт-стабильных PNG графиков.
 
 Новые модули штампуются скриптом `scripts/new_module.py <namespace> [--visual]`.
-Архитектура подробно — `research/19_gost_report_module_architecture.md`.
+Эталонный пример модуля — `gost_report_math/` (формулы вынесены из ядра без
+изменения поведения). Архитектура подробно — `research/19_gost_report_module_architecture.md`.
 
 ## Подробности — see references/
 
