@@ -68,8 +68,9 @@ class _MathAPI:
         core.set_run_font(num_run)
 
         if where:
-            core.add_text_paragraph(
-                f"где {core.sanitize(where)}",
+            # where поддерживает инлайн-математику $...$ (напр. "$x_i$ — выборка").
+            core.add_inline_paragraph(
+                "где " + where,
                 align=WD_ALIGN_PARAGRAPH.JUSTIFY,
                 first_line_indent=Pt(0),
                 left_indent=Cm(0),

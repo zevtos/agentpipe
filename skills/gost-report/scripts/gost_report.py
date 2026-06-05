@@ -953,6 +953,72 @@ class Report:
                           underline=underline)
         return p
 
+    # Инлайновая математика: $...$ внутри прозы → нативное Word-уравнение.
+    # \$ — литеральный знак доллара. (?<!\\) — не считать экранированный $.
+    _INLINE_MATH_RE = re.compile(r"(?<!\\)\$(.+?)(?<!\\)\$", re.DOTALL)
+
+    def _append_inline(self, p, raw, *, size=FONT_SIZE_BODY, bold=False,
+                       italic=False, underline=False):
+        """Заполняет параграф p: проза + инлайновая математика из $...$.
+
+        Без '$' — ровно один run (байт-в-байт как раньше). LaTeX внутри $...$
+        не санируется (синтаксис не искажается) и рендерится в инлайновый
+        <m:oMath>; прозовые сегменты проходят _sanitize_prose. \\$ → '$'."""
+        if not raw:
+            return
+
+        def _prose(s):
+            if not s:
+                return
+            run = p.add_run(_sanitize_prose(s).replace("\\$", "$"))
+            _set_run_font(run, size=size, bold=bold, italic=italic,
+                          underline=underline)
+
+        if "$" not in raw:
+            _prose(raw)
+            return
+        from gost_report_math._omml import latex_to_omath
+        pos = 0
+        for m in self._INLINE_MATH_RE.finditer(raw):
+            _prose(raw[pos:m.start()])
+            p._p.append(latex_to_omath(m.group(1)))
+            pos = m.end()
+        _prose(raw[pos:])
+
+    def add_inline_paragraph(self, raw="", *, align=WD_ALIGN_PARAGRAPH.CENTER,
+                             size=FONT_SIZE_BODY, bold=False, italic=False,
+                             underline=False, left_indent=None,
+                             first_line_indent=None,
+                             line_spacing=LINE_SPACING_BODY,
+                             space_before=Pt(0), space_after=Pt(0)):
+        """Как _add_paragraph, но текст поддерживает инлайновую математику $...$.
+        Публичный core-сервис (используется text/task и math-модулем для where)."""
+        p = self._make_paragraph(align=align, line_spacing=line_spacing,
+                                 space_before=space_before,
+                                 space_after=space_after,
+                                 left_indent=left_indent,
+                                 first_line_indent=first_line_indent)
+        self._append_inline(p, raw, size=size, bold=bold, italic=italic,
+                            underline=underline)
+        return p
+
+    def _add_caption(self, prefix, caption, *, align,
+                     space_before=Pt(0), space_after=Pt(0)):
+        """Подпись «Рисунок/Таблица N — …»: префикс с обязательным тире (литерал,
+        не санируется) + тело подписи с поддержкой инлайн-математики $...$.
+        Без '$' — один run (байты как раньше)."""
+        if "$" not in caption:
+            return self._add_paragraph(
+                prefix + _sanitize_prose(caption), align=align,
+                first_line_indent=Pt(0),
+                space_before=space_before, space_after=space_after)
+        p = self._make_paragraph(align=align, first_line_indent=Pt(0),
+                                 space_before=space_before, space_after=space_after)
+        pre = p.add_run(prefix)
+        _set_run_font(pre)
+        self._append_inline(p, caption)
+        return p
+
     def _add_runs_paragraph(self, runs, *, align=WD_ALIGN_PARAGRAPH.CENTER,
                             left_indent=None):
         p = self._make_paragraph(align=align, left_indent=left_indent)
@@ -1208,16 +1274,17 @@ class Report:
         _set_run_font(run, size=Pt(self._profile.heading_size_h3), bold=True)
 
     def text(self, text: str, *, bold=False, italic=False):
-        self._add_paragraph(
-            _sanitize_prose(text),
+        # Поддерживает инлайновую математику $...$ (LaTeX → нативное уравнение).
+        self.add_inline_paragraph(
+            text,
             align=WD_ALIGN_PARAGRAPH.JUSTIFY,
             first_line_indent=FIRST_LINE_INDENT,
             bold=bold, italic=italic,
         )
 
     def task(self, text: str):
-        self._add_paragraph(
-            _sanitize_prose(text),
+        self.add_inline_paragraph(
+            text,
             align=WD_ALIGN_PARAGRAPH.JUSTIFY,
             first_line_indent=FIRST_LINE_INDENT,
             bold=True,
@@ -1313,10 +1380,9 @@ class Report:
         else:
             run.add_picture(image_path_str)
 
-        self._add_paragraph(
-            f"Рисунок {self._figure_counter} — {_sanitize_prose(caption)}",
+        self._add_caption(
+            f"Рисунок {self._figure_counter} — ", caption,
             align=WD_ALIGN_PARAGRAPH.CENTER,
-            first_line_indent=Pt(0),
             space_after=SPACE_BLOCK,
         )
         return self._figure_counter
@@ -1355,10 +1421,9 @@ class Report:
         self._table_counter += 1
 
         if caption:
-            self._add_paragraph(
-                f"Таблица {self._table_counter} — {_sanitize_prose(caption)}",
+            self._add_caption(
+                f"Таблица {self._table_counter} — ", caption,
                 align=WD_ALIGN_PARAGRAPH.LEFT,
-                first_line_indent=Pt(0),
                 space_before=SPACE_BLOCK,
             )
 
@@ -1373,8 +1438,7 @@ class Report:
                 p.paragraph_format.line_spacing = LINE_SPACING_TABLE
                 p.paragraph_format.first_line_indent = Pt(0)
                 value = row_data[j] if j < len(row_data) else ""
-                run = p.add_run(_sanitize_prose(value))
-                _set_run_font(run, bold=(has_header and i == 0))
+                self._append_inline(p, value, bold=(has_header and i == 0))
         return self._table_counter
 
     def _create_independent_num(self, abstract_num_id: str) -> int:
@@ -1440,8 +1504,7 @@ class Report:
         numPr.append(numId_el)
         pPr.append(numPr)
 
-        run = p.add_run(_sanitize_prose(text))
-        _set_run_font(run)
+        self._append_inline(p, text)
 
     def _ensure_numbering_part(self, style_name: str) -> None:
         """Триггерит создание numbering.xml части документа, если её ещё нет.
