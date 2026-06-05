@@ -205,6 +205,28 @@ def _extract(kb_root: Path, tier: Optional[str], *, timeout: Optional[int],
     return rc, summary
 
 
+def _index(kb_root: Path, tier: Optional[str], *,
+           force: bool = False) -> tuple[int, Optional[dict]]:
+    """Phase 5.5 — build the BM25 search index (_index.db + portable query.sh).
+    Pure stdlib + tiktoken; never pulls a heavy tier."""
+    args = [str(kb_root)]
+    if force:
+        args.append("--force")
+    rc, out = _run_phase(_ensure_env_cmd(tier, "index_kb.py", *args), capture=True)
+    return rc, _last_json_line(out)
+
+
+def _query(kb_root: Path, query_args: list[str]) -> int:
+    """Search the KB. Prefer the self-contained `_query.py` copy (no venv
+    needed); fall back to the skill's query_kb.py through ensure_env."""
+    local = kb_root / "_query.py"
+    if local.is_file():
+        rc, _ = _run_phase([sys.executable, str(local), str(kb_root), *query_args])
+        return rc
+    rc, _ = _run_phase(_ensure_env_cmd(None, "query_kb.py", str(kb_root), *query_args))
+    return rc
+
+
 def _manifest(kb_root: Path, tier: Optional[str]) -> int:
     rc, _ = _run_phase(_ensure_env_cmd(tier, "build_manifest.py", str(kb_root)))
     return rc
@@ -338,6 +360,15 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     if rc == 2:
         return _fail((summary or {}).get("reason", "extract refused to start"))
 
+    if not args.no_index:
+        irc, isum = _index(kb_root, tier)
+        if irc != 0:
+            _info("WARNING: index_kb failed — KB is extracted but not searchable "
+                  "(run `dkb index <out>` to retry)")
+        elif isum:
+            _info(f"index {isum.get('status')}: {isum.get('chunks')} passages "
+                  f"({isum.get('backend', 'bm25')})")
+
     if _manifest(kb_root, tier) != 0:
         _info("WARNING: build_manifest failed — KB docs/ are extracted but the "
               "index may be stale")
@@ -358,6 +389,8 @@ def _add_pipeline_flags(p: argparse.ArgumentParser) -> None:
                    help="run MinerU→Popo stage 2 on every mineru doc (opt-in, heavy)")
     p.add_argument("--normalize", action="store_true",
                    help="run normalize_md after each extraction")
+    p.add_argument("--no-index", action="store_true",
+                   help="skip the Phase 5.5 BM25 search index (default: build it)")
     p.add_argument("--timeout", type=int, default=None,
                    help="per-file extractor timeout in seconds")
     p.add_argument("-q", "--quiet", action="store_true",
@@ -396,6 +429,17 @@ def main() -> int:
     p_man.add_argument("output_dir", help="kb directory")
     p_man.add_argument("--tier", choices=["mineru"], default=None)
 
+    p_idx = sub.add_parser("index", help="Phase 5.5 only — (re)build the BM25 search index")
+    p_idx.add_argument("output_dir", help="kb directory with docs/")
+    p_idx.add_argument("--force", action="store_true",
+                       help="rebuild even if the corpus signature is unchanged")
+    p_idx.add_argument("--tier", choices=["mineru"], default=None)
+
+    p_qry = sub.add_parser("query", help="search the KB index (forwards to query_kb.py)")
+    p_qry.add_argument("output_dir", help="kb directory with _index.db")
+    p_qry.add_argument("query_args", nargs=argparse.REMAINDER,
+                       help='the query and flags, e.g. "your question" -k 5 --show')
+
     p_inst = sub.add_parser("install", help="install a `dkb` launcher on your PATH")
     p_inst.add_argument("--bin-dir", default=None,
                         help="target directory (default ~/.local/bin)")
@@ -405,7 +449,7 @@ def main() -> int:
     # Shorthand: `dkb <in> <out> [flags]` == `dkb run <in> <out> [flags]`.
     # Detected when the first token is neither a known subcommand nor a flag.
     argv = sys.argv[1:]
-    known = {"run", "scout", "extract", "manifest", "install"}
+    known = {"run", "scout", "extract", "manifest", "index", "query", "install"}
     if argv and argv[0] not in known and not argv[0].startswith("-"):
         argv = ["run", *argv]
 
@@ -438,6 +482,15 @@ def main() -> int:
     if args.command == "manifest":
         kb_root = Path(args.output_dir).expanduser().resolve()
         return _manifest(kb_root, tier)
+    if args.command == "index":
+        kb_root = Path(args.output_dir).expanduser().resolve()
+        rc, summary = _index(kb_root, tier, force=args.force)
+        if summary:
+            print(json.dumps(summary, ensure_ascii=False))
+        return rc
+    if args.command == "query":
+        kb_root = Path(args.output_dir).expanduser().resolve()
+        return _query(kb_root, args.query_args)
     return 2
 
 

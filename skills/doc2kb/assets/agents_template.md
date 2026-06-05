@@ -16,11 +16,32 @@ estimates in JSON) and `llms.txt` (an llmstxt.org catalog for external tools)
 duplicate INDEX.md's navigation info — read them only if you need structured
 JSON for programmatic filtering or sha256 provenance, not for navigation.
 
+## Searching the corpus (do this FIRST)
+
+If this directory contains `query.sh` and `_index.db`, the KB ships a built-in
+BM25 search index. **To answer a question, search before you grep or bulk-read** —
+it returns the top ranked passages with a citation, instead of flooding you with
+unranked grep hits:
+
+```bash
+./query.sh "<the question you are answering>"        # ranked passages + citations
+./query.sh "<question>" --show                       # full passage text, not snippets
+./query.sh "<question>" --json -k 5                  # machine-readable, top 5
+./query.sh "<question>" --type pdf --doc doc-002     # filter by source type / doc-id
+```
+
+`query.sh` is pure-stdlib and self-contained (`_query.py`) — it needs only
+`python3`, no venv, no network. Each result cites `source › heading › page N`;
+use that to open the exact `docs/*.md` section (or the original `source` file)
+for full context. Search is iterative: refine the query and re-run rather than
+loading whole documents speculatively. If `_index.db` is absent, fall back to
+the INDEX.md headings + `Grep`/`Read` flow below.
+
 ## Reading discipline
 
-- **Do NOT bulk-load** every file in `docs/` — that defeats the point of
-  having an index. Use `Grep` and `Read` targeted at the filenames listed in
-  `INDEX.md`.
+- **Search first** (above), then **do NOT bulk-load** every file in `docs/` —
+  that defeats the point of having an index. Use `Grep` and `Read` targeted at
+  the filenames the search (or `INDEX.md`) points you to.
 - The headings listed under each document in `INDEX.md` (and in each doc's
   frontmatter `headings` array) are the fastest way to decide whether a doc
   is relevant before reading its body.

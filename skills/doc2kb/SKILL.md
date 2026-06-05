@@ -1,6 +1,6 @@
 ---
 name: doc2kb
-description: Converts a heterogeneous corpus of raw documents (PDF, DOCX, DOC, PPTX, IPYNB, RTF, MD, TXT, HTML, etc.) into a structured, LLM-optimized knowledge base — per-source Markdown + manifest.json + INDEX.md + AGENTS.md, ready for ingestion in a separate Claude / Codex session. USE WHEN the user asks to ingest, index, preprocess, or build a knowledge base from a folder of mixed documents; "feed files to Claude", "prepare a corpus", "build a doc index", "RAG prep", "convert documents to markdown", "ingest Jupyter notebooks". RU triggers: "обработай папку с документами", "сделай базу знаний из папки", "подготовь корпус для LLM", "извлеки markdown из файлов". Output is for AI agents, not human reading. For single-file PDF use Anthropic's `pdf` skill.
+description: Converts a heterogeneous corpus of raw documents (PDF, DOCX, DOC, PPTX, IPYNB, RTF, MD, TXT, HTML, etc.) into a structured, LLM-optimized knowledge base — per-source Markdown + manifest.json + INDEX.md + AGENTS.md + a built-in BM25 search index (`query.sh`, citation-first), ready for ingestion in a separate Claude / Codex session. USE WHEN the user asks to ingest, index, preprocess, search, or build a knowledge base from a folder of mixed documents; "feed files to Claude", "prepare a corpus", "make my documents searchable", "build a doc index", "RAG prep", "convert documents to markdown", "ingest Jupyter notebooks". RU triggers: "обработай папку с документами", "сделай базу знаний из папки", "подготовь корпус для LLM", "найди в моих документах", "извлеки markdown из файлов". Output is for AI agents, not human reading. For single-file PDF use Anthropic's `pdf` skill.
 ---
 
 # doc2kb — Document Corpus → LLM Knowledge Base
@@ -216,22 +216,59 @@ python3 <skill_dir>/scripts/ensure_env.py extract_pdf_pymupdf4llm.py \
 
 При желании сразу прогоните `normalize_md.py --write` на каждом извлечённом файле — он уберёт повторяющиеся headers/footers и стандартный boilerplate. Безопасно: idempotent, никогда не суммаризирует.
 
+### Phase 4.5: Index (retrieval layer — build the search engine)
+
+```bash
+python3 <skill_dir>/scripts/ensure_env.py index_kb.py <kb_dir>
+# опции: --target 400 (chunk token target), --cap 512 (hard cap),
+#        --no-keywords, --force (rebuild despite unchanged signature), -q
+```
+
+Слайсит каждый `docs/*.md` на structure-aware пассажи (split по `[page N]`
+anchors → по заголовкам → по абзацам, token-bounded, overlap-free) с
+**детерминированным contextual-заголовком** на каждом чанке
+(`Doc title › heading path › page N`) и строит `<kb_dir>/_index.db` —
+**SQLite FTS5/BM25**, токенайзер `porter unicode61 remove_diacritics 2`
+(латиница со стеммингом + кириллица + diacritic folding). Наличие FTS5
+проверяется на этапе сборки и пишется в `meta.fts`; если этого CPython'а
+FTS5 нет — `query_kb.py` прозрачно падает на pure-Python BM25 над той же
+таблицей `chunks`. Кладёт в `<kb_dir>` self-contained pure-stdlib копию
+поисковика (`_query.py`) + лаунчеры `query.sh` / `query.cmd` — KB становится
+**портативной и searchable где угодно с одним лишь `python3`** (без venv, без
+скилла). Идемпотентно по corpus-signature (sorted doc-id+sha256 + chunk
+params): повторный прогон — no-op, пока корпус не изменился.
+
+> Эта фаза — детерминированная (никаких LLM, никакой суммаризации: чанки —
+> verbatim). Запускайте её **до** Phase 5 — `build_manifest.py` подхватывает
+> `_index.db` и дорисовывает в `INDEX.md` секцию «Search» + per-doc keywords.
+> Поиск по готовой KB — см. «Querying the knowledge base» ниже.
+
 ### Phase 5: Assemble
 
 ```bash
 python3 <skill_dir>/scripts/ensure_env.py build_manifest.py <kb_dir>
 ```
 
-Собирает `manifest.json` + `INDEX.md` + `llms.txt` + `AGENTS.md`. После этого `<kb_dir>` готов к ingestion во второй сессии: пользователь открывает Claude/Codex в `<kb_dir>` (или передаёт путь), Claude читает `AGENTS.md` → `INDEX.md` → `docs/*.md` по необходимости. `INDEX.md` — единственный навигационный каталог (headings + warnings по каждому доку inline); `manifest.json` (машинный: sha256/extraction_method/токены в JSON) и `llms.txt` (llmstxt.org-каталог для внешних тулзов) дублируют ту же навигацию и нужны только для программного доступа / sha-верификации, а не для чтения агентом.
+Собирает `manifest.json` + `INDEX.md` + `llms.txt` + `AGENTS.md`. Если рядом
+есть `_index.db` (Phase 4.5), в `INDEX.md` добавляется секция «Search
+(recommended first step)» с командами `query.sh` и per-doc distinctive terms —
+иначе INDEX деградирует к навигации по заголовкам + grep. После этого
+`<kb_dir>` готов к ingestion во второй сессии: пользователь открывает
+Claude/Codex в `<kb_dir>` (или передаёт путь), Claude читает `AGENTS.md` →
+(`query.sh` для поиска) → `INDEX.md` → `docs/*.md` по необходимости. `INDEX.md` — единственный навигационный каталог (headings + warnings по каждому доку inline); `manifest.json` (машинный: sha256/extraction_method/токены в JSON) и `llms.txt` (llmstxt.org-каталог для внешних тулзов) дублируют ту же навигацию и нужны только для программного доступа / sha-верификации, а не для чтения агентом.
 
 ## Output format
 
 ```
 <kb_dir>/
 ├── manifest.json     # machine-readable corpus index
-├── INDEX.md          # human + agent readable overview
+├── INDEX.md          # human + agent readable overview (+ Search section)
 ├── llms.txt          # llmstxt.org-compatible catalog
 ├── AGENTS.md         # navigation instructions for second-session agent
+├── _index.db         # BM25 search index (Phase 4.5; FTS5 or python fallback)
+├── _query.py         # self-contained pure-stdlib search script (portable)
+├── query.sh          # search launcher → ./query.sh "<question>"
+├── query.cmd         # Windows search launcher
 ├── docs/
 │   ├── doc-001-<slug>.md
 │   └── ...
@@ -256,6 +293,57 @@ python3 <skill_dir>/scripts/ensure_env.py build_manifest.py <kb_dir>
 
 Проверьте SHA256 источников после перемещения (`sha256sum <kb_dir>/raw/*`) — они должны совпасть с `source_sha256` в frontmatter.
 
+## Querying the knowledge base (retrieval layer)
+
+The whole point of doc2kb is that a **second** agent ingests the KB. Before this
+layer that agent had only `INDEX.md` headings + `Grep` — which floods it with
+unranked hits and burns tokens on a large corpus. Phase 4.5 ships a real search
+engine inside the KB so the agent (or a human) finds the right passage with one
+command, **citation-first**:
+
+```bash
+# from inside <kb_dir> — pure stdlib, no venv, no API, works anywhere with python3:
+./query.sh "<your question>"                 # top-k ranked passages + citations
+./query.sh "<question>" --show               # full passage text, not snippets
+./query.sh "<question>" --json -k 5          # machine-readable, top 5
+./query.sh "<question>" --type pdf --doc doc-002   # filter by source type / doc
+./query.sh "<question>" --and                # require ALL terms (default: OR + BM25)
+./query.sh --info                            # index stats + which backend is live
+
+# equivalent through the agent's canonical wrapper, or the dkb CLI:
+python3 <skill_dir>/scripts/ensure_env.py query_kb.py <kb_dir> "<question>"
+dkb query <kb_dir> "<question>" -k 5
+```
+
+Each hit prints a citation the agent can drop straight into an answer —
+`source_path › heading path › page N  [doc-id]  score` — plus a highlighted
+snippet (or the full passage with `--show`) and the `docs/*.md` to open for
+context. **The second agent should search first, then Read** — `AGENTS.md`
+(generated into every KB) tells it exactly this.
+
+Why this design (validated against 2025-2026 evidence — Amazon "Keyword search
+is all you need" AAAI 2026, Anthropic dropping RAG from Claude Code, Contextual
+Retrieval):
+
+- **No embeddings, no vector DB, no API key, no torch.** Agentic BM25 reaches
+  ~90 %+ of vector-RAG answer quality for a grep+Read agent, at a fraction of
+  the infra — and stays inside doc2kb's lightweight-tier invariant. The index is
+  one SQLite file built by stdlib `sqlite3`.
+- **Structure-aware + contextual headers.** Chunks respect `[page N]` anchors
+  and headings; each is indexed with a deterministic `Doc title › heading ›
+  page N` header weighted 2× in BM25 (the no-LLM, no-hallucination slice of
+  Anthropic's Contextual Retrieval). This is what lets a passage about "results"
+  match "transformer results" even when its body never repeats the title.
+- **Verbatim & deterministic.** Chunks are the source bytes — no summary, no
+  rewrite — so the `source_sha256` provenance guarantee is untouched.
+- **Cyrillic + Latin.** The `porter unicode61 remove_diacritics 2` tokenizer
+  stems English, passes Cyrillic through, and folds diacritics — so a Russian
+  corpus is as searchable as an English one.
+
+When to skip it: `--no-index` on `dkb`, or just don't run Phase 4.5 — INDEX.md
+then degrades gracefully to heading + grep navigation. For a tiny corpus the
+heading catalog alone is fine; the index earns its keep from dozens of docs up.
+
 ## Scripts inventory
 
 | script | purpose |
@@ -277,7 +365,9 @@ python3 <skill_dir>/scripts/ensure_env.py build_manifest.py <kb_dir>
 | `postprocess_popo.py`        | **opt-in stage 2** — runs upstream opendatalab/MinerU-Popo over cached mineru outputs to rebuild document trees (heading hierarchy, cross-page table merging, paragraph truncation repair). Resolves the Popo repo from `--popo-repo` > `$DOC2KB_POPO_REPO` > the `bootstrap_popo.py` auto-default; PATH-injects the bootstrapped env (sentinel `.doc2kb-popo-python`); `--auto-setup` runs `bootstrap_popo.py` when unconfigured. |
 | `bootstrap_popo.py`          | **opt-in** auto-setup of the Popo stage-2 env — clone repo → create env (uv→conda→venv, py3.10) → install deps (upstream CUDA reqs on Linux, `requirements-popo-mac.txt` MPS set on macOS) → download the ~16 GB model (resumable, completeness-checked) → patch `POPO_MODEL_PATH` default; on macOS also pins `device_map`→MPS (verified ~22 tok/s, else accelerate disk-offloads). Never runs in the default pipeline; invoked directly or via `postprocess_popo.py --auto-setup` (gated by `DOC2KB_POPO_AUTO`). |
 | `token_count.py`             | count tokens in an extracted .md file |
-| `build_manifest.py`          | Phase 5 — assemble manifest, INDEX, llms.txt, AGENTS.md |
+| `index_kb.py`                | Phase 4.5 — build `_index.db` (SQLite FTS5/BM25) over structure-aware, heading-path-headed, token-bounded chunks of `docs/*.md`; extracts per-doc distinctive terms; drops the portable `_query.py` + `query.sh`/`query.cmd` launchers. Idempotent by corpus signature. Importable `build_index()`. Pure stdlib + tiktoken — **never** a heavy tier. |
+| `query_kb.py`                | citation-first BM25 search over `_index.db`: `query_kb.py <kb_dir> "<question>" [-k N --doc ID --type pdf --page N --and --raw --show --json]`. FTS5 with a transparent pure-Python BM25 fallback. Pure stdlib — copied verbatim into each KB as `_query.py` so the KB searches anywhere with just `python3`. |
+| `build_manifest.py`          | Phase 5 — assemble manifest, INDEX, llms.txt, AGENTS.md; folds in the `_index.db` Search section + per-doc keywords when present |
 | `dkb.py`                     | **standalone CLI** — one-shot orchestrator that chains Phase 2→5 with the decision step automated, for human/no-agent use (`dkb <input_dir> <output_kb_dir>`). Pure stdlib; shells out to the other scripts through `ensure_env.py` and reuses `apply_overrides.py` to resolve scout decisions. Self-installs a `dkb` launcher on PATH. See "Standalone CLI" below. |
 | `update_kb.py`               | **live KB** — incrementally stamp frontmatter on new hand-authored `docs/*.md` + regenerate index; self-installs `update_kb.sh` (see below) |
 | `_common.py`                 | shared helpers — imported by all extract scripts |
@@ -308,9 +398,11 @@ deterministically via `apply_overrides.py` (it never hand-edits `_scout.json`).
 
 | command | does |
 |---|---|
-| `dkb <in> <out>` / `dkb run <in> <out>` | full pipeline scout→extract→manifest |
+| `dkb <in> <out>` / `dkb run <in> <out>` | full pipeline scout→extract→**index**→manifest |
 | `dkb scout <in> <out>`    | Phase 2 only — classify, write `_scout.json` |
 | `dkb extract <out>`       | Phase 4 only — auto-decide + extract from an existing `_scout.json` |
+| `dkb index <out> [--force]` | Phase 4.5 only — (re)build the BM25 search index (`_index.db` + `query.sh`) |
+| `dkb query <out> "<q>" [flags]` | search the KB — forwards to `query_kb.py` (uses the portable `_query.py`, no venv) |
 | `dkb manifest <out>`      | Phase 5 only — (re)assemble manifest/INDEX/llms.txt/AGENTS.md |
 | `dkb install [--bin-dir D] [--force]` | install a `dkb` launcher on PATH (default `~/.local/bin`) |
 
@@ -325,12 +417,15 @@ deterministically via `apply_overrides.py` (it never hand-edits `_scout.json`).
 - `--tier mineru` — install the opt-in heavy tier before running.
 - `--always-popo` — run the MinerU→Popo stage 2 on every mineru doc (opt-in, heavy).
 - `--normalize` — run `normalize_md` after each extraction.
+- `--no-index` — skip the Phase 4.5 BM25 search index (default: build it; pure
+  stdlib + tiktoken, so it never pulls a heavy tier).
 - `--timeout N` — per-file extractor timeout. `-q/--quiet` — terse progress.
 
 The **heavy-deps-opt-in invariant holds**: MinerU/Popo are reached only via these
-explicit flags — `dkb` never installs or routes through them silently. Exit codes:
-`0` clean, `2` setup/usage failure (bad path, a phase refused to start), `3` at
-least one file errored (see `<kb_dir>/_logs/errors.json`).
+explicit flags — `dkb` never installs or routes through them silently (the search
+index is lightweight-tier, not a heavy dep). Exit codes: `0` clean, `2`
+setup/usage failure (bad path, a phase refused to start), `3` at least one file
+errored (see `<kb_dir>/_logs/errors.json`).
 
 When the corpus has files needing a real decision an agent should make (a
 password, an OCR strategy choice, partial-page mineru patching, manual visual
@@ -354,6 +449,10 @@ python3 <skill_dir>/scripts/ensure_env.py update_kb.py <kb_dir>
   `extraction_method`, refreshes `tokens_estimated`. Existing frontmatter is
   preserved — only missing keys are filled.
 - Regenerates manifest.json / INDEX.md / llms.txt / AGENTS.md.
+- **Keeps the search index current** — if `<kb_dir>/_index.db` already exists
+  (you opted in once with `dkb index` / `index_kb.py`), every refresh rebuilds
+  it so newly hand-authored notes are immediately searchable. A note-KB without
+  an index stays lean; search is never forced on it.
 - On first run drops a self-contained `update_kb.sh` into `<kb_dir>`. The
   agent's loop is then just: **edit `docs/*.md` → run `./update_kb.sh`**.
   Never hand-edit INDEX.md — it is generated.

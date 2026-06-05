@@ -38,6 +38,7 @@ from _common import (  # noqa: E402
     today_iso,
 )
 import build_manifest  # noqa: E402
+import index_kb  # noqa: E402
 
 
 # Canonical key order written at the top of every stamped doc.
@@ -152,6 +153,21 @@ def regenerate(kb_dir: Path) -> dict[str, Any]:
     return manifest
 
 
+def refresh_index_if_present(kb_dir: Path) -> bool:
+    """Rebuild the BM25 search index — but only if this KB already has one.
+    A live note-KB stays lean by default; once an agent opts in by building an
+    index (`dkb index` / index_kb.py), every refresh keeps it current. Idempotent
+    by corpus signature, so unchanged docs cost nothing."""
+    if not (kb_dir / "_index.db").is_file():
+        return False
+    try:
+        index_kb.build_index(kb_dir)
+        return True
+    except Exception as e:  # never let indexing break a notes refresh
+        print(f"  index refresh skipped: {e}", file=sys.stderr)
+        return False
+
+
 def install_updater(kb_dir: Path) -> bool:
     sh = kb_dir / "update_kb.sh"
     if sh.exists():
@@ -177,6 +193,7 @@ def main() -> int:
 
     stamped = stamp_docs(kb_dir)
     installed = install_updater(kb_dir)
+    index_refreshed = refresh_index_if_present(kb_dir)
     manifest = regenerate(kb_dir)
 
     summary = {
@@ -184,6 +201,7 @@ def main() -> int:
         "kb_dir": str(kb_dir),
         "stamped": stamped,
         "updater_installed": installed,
+        "index_refreshed": index_refreshed,
         "documents": manifest["total_documents"],
         "tokens_estimated": manifest["total_tokens_estimated"],
     }

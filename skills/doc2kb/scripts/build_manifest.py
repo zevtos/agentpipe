@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -147,11 +148,43 @@ def build_manifest(kb_dir: Path) -> dict[str, Any]:
     return manifest
 
 
+def load_index_summary(kb_dir: Path) -> dict[str, Any] | None:
+    """Read `<kb_dir>/_index.db` (built by index_kb.py, Phase 5.5) if present.
+    Returns {backend, chunks, keywords: {doc_id: str}} or None when there is no
+    index — INDEX.md degrades gracefully to heading/grep navigation."""
+    db_path = kb_dir / "_index.db"
+    if not db_path.is_file():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        meta = {k: v for k, v in conn.execute("SELECT key, value FROM meta")}
+        n_chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        keywords = {
+            r[0]: r[1]
+            for r in conn.execute("SELECT doc_id, keywords FROM docs")
+            if r[1]
+        }
+        return {
+            "backend": "FTS5/BM25" if meta.get("fts") == "1"
+            else "BM25 (pure-Python fallback)",
+            "chunks": n_chunks,
+            "keywords": keywords,
+        }
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
 def write_index_md(kb_dir: Path, manifest: dict[str, Any]) -> None:
     docs = manifest["documents"]
     n = len(docs)
     total = manifest["total_tokens_estimated"]
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    index = load_index_summary(kb_dir)
     lines: list[str] = [
         "# Knowledge Base Index",
         "",
@@ -170,6 +203,25 @@ def write_index_md(kb_dir: Path, manifest: dict[str, Any]) -> None:
         "> programmatic filtering or sha256 provenance, not for normal navigation.",
         "",
     ]
+    if index:
+        lines += [
+            "## Search (recommended first step)",
+            "",
+            f"This KB ships a built-in search index (`_index.db`, {index['backend']}, "
+            f"{index['chunks']} passages). **Prefer it over grep** — it returns "
+            "ranked passages with citations:",
+            "",
+            "```bash",
+            './query.sh "<your question>"          # ranked passages + citation',
+            './query.sh "<question>" --show        # full passage text, not snippets',
+            './query.sh "<question>" --json -k 5   # machine-readable, top 5',
+            "```",
+            "",
+            "`query.sh` is pure-stdlib and self-contained (`_query.py`) — it needs "
+            "only `python3`, no venv. Each hit cites `source › heading › page N` so "
+            "you can open the right `docs/*.md` (or original `source`) for full context.",
+            "",
+        ]
 
     # By source type.
     by_type: dict[str, list[dict[str, Any]]] = {}
@@ -206,6 +258,9 @@ def write_index_md(kb_dir: Path, manifest: dict[str, Any]) -> None:
                 headings = d.get("headings") or []
                 if headings:
                     lines.append("  - " + " · ".join(str(h) for h in headings))
+                kw = index["keywords"].get(d.get("id")) if index else None
+                if kw:
+                    lines.append(f"  - keywords: {kw}")
                 warnings = d.get("warnings") or []
                 if warnings:
                     lines.append("  - ⚠ " + "; ".join(str(w) for w in warnings))
