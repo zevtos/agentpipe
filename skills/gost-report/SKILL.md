@@ -212,11 +212,11 @@ r.save("draft.docx")
 | `r.text(text, bold=False, italic=False)` | Абзац основного текста (justify, отступ 1.25 см). |
 | `r.task(text)` | Жирный «Задание N. ...». |
 | `r.code(code)` | Блок моноширинного кода (Courier New 11). |
-| `r.figure(image, caption, width_cm=None)` | Картинка + «Рисунок N — caption». `image` — путь ИЛИ Figure из модуля (`r.plot.*`, `r.diagram`). Ширина клампится по печатной области. Относительный путь → `<project>/docs/figures/`. |
+| `r.figure(image, caption, width_cm=None) → int` | Картинка + «Рисунок N — caption». Возвращает номер (для `r.ref.on_figure`). `image` — путь ИЛИ Figure из модуля (`r.plot.*`, `r.diagram`). Ширина клампится по печатной области. Относительный путь → `<project>/docs/figures/`. |
 | `r.plot.line/scatter/bar/grouped_bar/histogram(...)` | График matplotlib в ГОСТ-стиле (opt-in тир `[viz]`). С `caption=...` → встраивает и возвращает номер рисунка; без — возвращает Figure для `r.figure(fig, caption)`. См. ниже. |
 | `r.diagram(dot, caption=None)` | Диаграмма Graphviz (DOT) → PNG. Нужен системный `dot` (brew/apt install graphviz). С `caption` → номер рисунка; без — Figure. |
 | `r.formula(latex, where=None) → int` | LaTeX-формула как нативное Word-уравнение, авто-номер «(N)» справа. Возвращает номер для ссылок. Реализация вынесена в модуль `gost_report_math` (доступно и как `r.math.formula`); поведение идентично. |
-| `r.table(rows, caption, has_header=True)` | Таблица + «Таблица N — caption». В заголовках столбцов указывай единицы измерения (см. ниже). |
+| `r.table(rows, caption, has_header=True) → int` | Таблица + «Таблица N — caption». Возвращает номер (для `r.ref.in_table`). В заголовках столбцов указывай единицы измерения (см. ниже). |
 | `r.bib.add(key, type=, ...)` / `r.bib.cite(key)→"[N]"` / `r.bib.references()` | Список литературы по ГОСТ Р 7.0.5: регистрация источника, ссылка `[N]` (номер по порядку цитирования), структурный элемент «Список использованных источников». |
 | `r.ref.on_figure(n)` / `r.ref.in_table(n)` / `r.ref.by_formula(n)` / `r.ref.figure(n)` … | ГОСТ-фразы для ссылок: «на рисунке 3», «в таблице 2», «по формуле (4)». `cap=True` для начала предложения. |
 | `r.numbered(items)`, `r.bullet(items)` | Списки. Каждый вызов стартует с 1 заново. |

@@ -1319,6 +1319,7 @@ class Report:
             first_line_indent=Pt(0),
             space_after=SPACE_BLOCK,
         )
+        return self._figure_counter
 
     def formula(self, latex: str, *, where: Optional[str] = None) -> int:
         """Вставляет формулу из LaTeX как нативное Word-уравнение (OMML).
@@ -1374,6 +1375,7 @@ class Report:
                 value = row_data[j] if j < len(row_data) else ""
                 run = p.add_run(_sanitize_prose(value))
                 _set_run_font(run, bold=(has_header and i == 0))
+        return self._table_counter
 
     def _create_independent_num(self, abstract_num_id: str) -> int:
         numbering = self._doc.part.numbering_part.element
