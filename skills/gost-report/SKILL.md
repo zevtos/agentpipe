@@ -143,6 +143,16 @@ r.save("draft.docx")
 
 ## API
 
+**Палитра для build.py — что можно вставлять в отчёт:**
+- **Структура:** `r.toc()`, `r.h1/h2/h3`, `r.text`, `r.task`, `r.numbered/bullet`, `r.code`, `r.page_break`
+- **Формулы:** `r.formula(latex, where=)` (блочные, с номером) + инлайн `$...$` в любом тексте
+- **Графики** (тир `[viz]`): `r.plot.line/scatter/bar/grouped_bar/histogram` → ГОСТ-стиль, Ч/Б-safe
+- **Диаграммы** (Graphviz): `r.diagram(dot)` → структурные схемы, блок-схемы алгоритмов, деревья, ER
+- **Картинки/таблицы:** `r.figure(path|fig, caption)`, `r.table(rows, caption)`
+- **Литература/ссылки:** `r.bib.add/cite/references` (ГОСТ Р 7.0.5), `r.ref.on_figure/in_table/by_formula`
+
+Графики, диаграммы и картинки делят единый счётчик «Рисунок N». Детали каждого — в таблице ниже и секциях после неё.
+
 | Method | What it does |
 |---|---|
 | `r.toc()` | Поле Word TOC + флаг `updateFields=true` в settings.xml. Word/Pages при первом открытии файла спросит «Update fields?» — нажми «Yes», и оглавление с нумерацией обновится автоматически. |
