@@ -238,7 +238,7 @@ class LineChart(_Chart):
 
     def _content_key(self) -> str:
         return self._base_key() + "|" + repr((
-            list(self.x), self.series, self.labels,
+            [float(v) for v in self.x], self.series, self.labels,
             self.colors, self.linestyles, self.markers,
         ))
 
@@ -256,6 +256,7 @@ class LineChart(_Chart):
                 me = None
             elif isinstance(self.markers, (list, tuple)) and self.markers:
                 kw["marker"] = self.markers[i % len(self.markers)]
+            # markers is None или True → детерминированный маркер серии (вкл. по умолчанию)
             ax.plot(x, ys, markevery=me, label=self.labels[i], **kw)
 
 
@@ -269,7 +270,8 @@ class ScatterChart(_Chart):
 
     def _content_key(self) -> str:
         return self._base_key() + "|" + repr((
-            list(self.x), self.series, self.labels, self.colors, self.markers,
+            [float(v) for v in self.x], self.series, self.labels,
+            self.colors, self.markers,
         ))
 
     def _draw(self, ax) -> None:
@@ -418,7 +420,8 @@ class AreaChart(_Chart):
 
     def _content_key(self) -> str:
         return self._base_key() + "|" + repr((
-            list(self.x), self.series, self.labels, self.stacked, self.colors,
+            [float(v) for v in self.x], self.series, self.labels,
+            self.stacked, self.colors,
         ))
 
     def _draw(self, ax) -> None:
@@ -443,7 +446,8 @@ class Histogram(_Chart):
     bins: int = 20
 
     def _content_key(self) -> str:
-        return self._base_key() + "|" + repr((list(self.data), self.bins))
+        return self._base_key() + "|" + repr((
+            [float(v) for v in self.data], self.bins))
 
     def _draw(self, ax) -> None:
         ax.hist([float(v) for v in self.data], bins=self.bins,

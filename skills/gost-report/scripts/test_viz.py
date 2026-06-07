@@ -495,6 +495,28 @@ def test_unlabeled_refline_not_in_legend():
 
 
 # ----------------------------------------------------------------------------
+# 5. NUMPY-EQUIVALENCE — numpy x/data must hash the same as a Python list,
+#    so a chart fed a numpy array reuses the content-addressed PNG (no dup render)
+# ----------------------------------------------------------------------------
+def test_numpy_x_equals_list_x():
+    import numpy as np
+    api = _api()
+    pairs = [
+        api.line([0, 1, 2], [1.0, 2.0, 3.0]),
+        api.line(np.array([0, 1, 2]), [1.0, 2.0, 3.0]),
+    ]
+    assert_eq(pairs[0]._content_key(), pairs[1]._content_key(),
+              "numpy x must hash identically to list x (line)")
+    h = [api.histogram([1, 2, 3]), api.histogram(np.array([1, 2, 3]))]
+    assert_eq(h[0]._content_key(), h[1]._content_key(),
+              "numpy data must hash identically to list data (histogram)")
+    a = [api.area([0, 1, 2], [[1, 2, 3]]),
+         api.area(np.array([0, 1, 2]), [[1, 2, 3]])]
+    assert_eq(a[0]._content_key(), a[1]._content_key(),
+              "numpy x must hash identically to list x (area)")
+
+
+# ----------------------------------------------------------------------------
 # runner
 # ----------------------------------------------------------------------------
 def main() -> int:
@@ -520,6 +542,8 @@ def main() -> int:
     check("bc: grouped_bar (no new params)", test_bc_grouped_no_new_params)
     check("bc: histogram (no new params)", test_bc_histogram_no_new_params)
     check("bc: list-of-lists y -> multi-series", test_bc_multiseries_y_still_splits)
+    check("bc: numpy x/data hashes same as list (no dup render)",
+          test_numpy_x_equals_list_x)
     check("api: new stacked_bar/area methods render", test_new_api_methods_exist)
     check("api: yscale allowlist validation", test_yscale_validation)
 
