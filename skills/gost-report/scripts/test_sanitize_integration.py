@@ -23,6 +23,12 @@ What it covers:
           an em-dash and an en-dash into table cells, and assert _check_dashes
           returns TIER_FAIL `dashes` violations located at the right cell.
           Also assert a clean table (and a clean prose-only doc) yields zero.
+  GAP 4 — table() must NOT mangle dashes inside inline $...$ math in a cell.
+          Cell sanitizing is delegated to _append_inline._prose(), which skips
+          $...$ spans, so an em-dash inside `$a — b$` survives in the math
+          <m:t> verbatim (identical to prose text()), while the prose segments
+          of the same cell are still sanitized. Regression guard for an
+          owner-level whole-string sanitize that corrupted in-cell math.
 
 Exit codes:
     0  all tests passed
@@ -62,6 +68,7 @@ import gost_report as G  # noqa: E402
 import validate as V  # noqa: E402
 
 _PROHIBITED = re.compile(r"[—–]")
+_MATH_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
 
 
 # ----------------------------------------------------------------------------
@@ -97,6 +104,12 @@ def _cell_texts(doc) -> list[str]:
             for c in row.cells:
                 out.append(c.text)
     return out
+
+
+def _math_text_nodes(doc) -> list[str]:
+    # Inline-math glyphs land in <m:t> nodes, NOT in cell.text. Sanitize must
+    # never touch these (they carry LaTeX/math content verbatim).
+    return [mt.text for mt in doc.element.body.iter(f"{{{_MATH_NS}}}t")]
 
 
 # ----------------------------------------------------------------------------
@@ -145,6 +158,72 @@ def test_gap2_validator_clean_on_saved_docx():
     viols = V._check_dashes(doc)
     dash_fails = [v for v in viols if v.code == "dashes"]
     assert not dash_fails, f"_check_dashes flagged sanitized cells: {dash_fails!r}"
+
+
+# ----------------------------------------------------------------------------
+# GAP 4 — table() must NOT mangle dashes inside inline $...$ math in a cell.
+# Regression for a sanitize bug: an owner-level `value = _sanitize_prose(value)`
+# ran on the WHOLE cell string BEFORE _append_inline split on the $...$ math
+# delimiters, so an em-dash inside `$a — b$` was rewritten to a comma in the
+# math (<m:t> ['a',',','b']) — breaking the "LaTeX/math untouched" contract and
+# diverging from prose text(), where the same `$a — b$` keeps the dash. The fix
+# defers all sanitizing to _append_inline._prose(), which skips $...$ spans.
+# ----------------------------------------------------------------------------
+def test_gap4_inline_math_dash_preserved_in_table_cell():
+    out = _TMP / "gap4.docx"
+    r = G.Report(title_page=False)
+    r.table(
+        [
+            # prose with em-dash + trailing inline-math span carrying an em-dash
+            ["Параметр — обозн.", r"Формула $a — b$"],
+            # cell that is pure inline-math with an em-dash
+            ["U — напряжение", r"$c — d$"],
+        ],
+        caption="Math-in-cell",
+    )
+    saved = r.save(out)  # auto-validates; would raise if a prose dash leaked
+    assert saved.exists(), "save() did not write the .docx"
+
+    doc = Document(str(saved))
+
+    # 1) Prose segments are still sanitized (the regression must not over-correct
+    #    by skipping prose). Including the prose PREFIX before an inline-math span.
+    cells = _cell_texts(doc)
+    leaks = [c for c in cells if _PROHIBITED.search(c)]
+    assert not leaks, f"prose dash leaked into a cell: {leaks!r}"
+    assert "Параметр, обозн." in cells, f"prose cell not sanitized: {cells!r}"
+    assert "U, напряжение" in cells, f"prose cell not sanitized: {cells!r}"
+    assert "Формула " in cells, f"prose prefix before math not sanitized: {cells!r}"
+
+    # 2) The em-dash INSIDE $...$ survives verbatim in the math <m:t> nodes —
+    #    identical to prose text() behavior, NOT mangled to a comma.
+    math_nodes = _math_text_nodes(doc)
+    assert "—" in math_nodes, (
+        f"em-dash inside inline math was mangled (expected a verbatim '—' in "
+        f"<m:t>); got {math_nodes!r}"
+    )
+    assert "," not in math_nodes, (
+        f"sanitize leaked into inline math (comma found in <m:t>); "
+        f"got {math_nodes!r}"
+    )
+
+
+def test_gap4_table_math_matches_prose_text_math():
+    # Same inline-math span via table() vs via text(): the math <m:t> stream must
+    # be byte-identical (proves the cell path no longer diverges from prose).
+    expr = r"$x — y$"
+
+    r_tbl = G.Report(title_page=False)
+    r_tbl.table([[expr]], caption="Inline math", has_header=False)
+    tbl_math = _math_text_nodes(Document(str(r_tbl.save(_TMP / "gap4_tbl.docx"))))
+
+    r_txt = G.Report(title_page=False)
+    r_txt.text(expr)
+    txt_math = _math_text_nodes(Document(str(r_txt.save(_TMP / "gap4_txt.docx"))))
+
+    assert_eq(tbl_math, txt_math,
+              "table() inline-math <m:t> stream must equal text() inline-math")
+    assert "—" in tbl_math, f"em-dash must survive in both paths; got {tbl_math!r}"
 
 
 # ----------------------------------------------------------------------------
@@ -216,6 +295,12 @@ def main() -> int:
           test_gap2_table_cells_sanitized_in_saved_docx)
     check("gap2: _check_dashes clean on sanitized saved .docx",
           test_gap2_validator_clean_on_saved_docx)
+
+    # GAP 4 — inline math in a cell is NOT mangled by sanitize
+    check("gap4: inline $...$ dash preserved in a table cell",
+          test_gap4_inline_math_dash_preserved_in_table_cell)
+    check("gap4: table() inline-math == text() inline-math",
+          test_gap4_table_math_matches_prose_text_math)
 
     # GAP 3
     check("gap3: backstop flags raw dash injected into a cell",
