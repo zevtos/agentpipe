@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.0] - 2026-06-07
 
 ### Added
 - **Installer presets — `--preset <name>` (`-Preset` on PowerShell): one named bundle instead of stacking a dozen toggles.** An escalating ladder `minimum < default < senior < god`, plus a `codex-full` combo for the Codex target. A preset sets per-layer **defaults**; any explicit flag overrides the preset for that layer, and `--skills-only` still wins over everything — precedence is `target < preset < explicit flags < --skills-only`. Resolution is a two-pass model: parse records which layer flags the user passed explicitly (a `*_SET` bit per flag in bash; `$PSBoundParameters` in PowerShell), then the preset fills only the layers the user left at default. A no-`--preset` install is **byte-for-byte unchanged** (the resolver is skipped entirely). The resolved manifest (every layer on/off + model profile + sound + MinerU/caveman) prints before the first write and under `--dry`, which doubles as the cure for "I don't remember what the default install does" — `--preset default --dry`.
