@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`god` preset grows three more gated power-user layers, each with a `--with-*`/`--no-*` flag pair (mirrored as PowerShell switches), all skipped in non-interactive shells and "don't-intrude" when already present:**
+  - `--with-gh` — install GitHub CLI (`gh`) via the system package manager (brew/apt/dnf/pacman/zypper; winget/choco/scoop on Windows) **only if it's missing**. Official GitHub tool, not `curl|bash`. Interactive y/N.
+  - `--with-claude-skip` — add a `claude-skip` shell alias (zsh/bash rc; PowerShell `$PROFILE` function) for `claude --dangerously-skip-permissions`, behind a loud security warning. Deliberately **not** named `claude`, so the permission-bypass is an explicit per-invocation opt-in; never duplicates an existing alias.
+  - `--with-playwright` — install Microsoft's official `@playwright/cli` (terminal browser automation with persistent + parallel sessions — what the Playwright MCP can't do) and its bundled agent skill via `npm i -g @playwright/cli@latest && playwright-cli install --skills`, **only if no playwright cli/mcp is already set up**. agentpipe installs the tool; the skill ships with it — never vendored into this repo.
+- The resolved-preset manifest and `--dry` output now print the gh / claude-skip / playwright lines; installer flag parity (validate-repo Check E) preserved across `install.sh` and `install.ps1`.
+
 ## [1.1.0] - 2026-06-07
 
 ### Added

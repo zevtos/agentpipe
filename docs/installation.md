@@ -98,6 +98,9 @@ The skill becomes globally available across all your conversations on that accou
 | With ccstatusline | `--with-ccstatusline` | `-WithCcstatusline` | Add a ccstatusline `statusLine` (install-if-missing; runs `npx -y ccstatusline@latest`). `--no-ccstatusline` to skip |
 | With caveman | `--with-caveman` | `-WithCaveman` | Install caveman (third-party `curl\|bash`, gated by interactive y/N, needs node≥18). `--no-caveman` to skip |
 | With MinerU | `--with-mineru` | `-WithMineru` | Pre-warm doc2kb's MinerU tier (~3 GB, gated by interactive y/N, skipped non-interactively). `--no-mineru` to skip |
+| With gh | `--with-gh` | `-WithGh` | Install GitHub CLI (`gh`) via the system package manager IF missing (gated; never intrudes when present). `--no-gh` to skip |
+| With claude-skip | `--with-claude-skip` | `-WithClaudeSkip` | Add a `claude-skip` shell alias for `claude --dangerously-skip-permissions` (DANGEROUS — gated by y/N + security warning, never named `claude`). `--no-claude-skip` to skip |
+| With playwright | `--with-playwright` | `-WithPlaywright` | Install Microsoft's `@playwright/cli` + its bundled agent skill (`npm i -g @playwright/cli@latest && playwright-cli install --skills`) IF no playwright cli/mcp present (gated). `--no-playwright` to skip |
 | Model profile | `--model-profile <preset>` | `-ModelProfile <preset>` | Per-agent model assignment: `opus`, `sonnet`, `mixed` (default) |
 | Help | `--help` | `-Help` | Show usage information |
 
@@ -135,18 +138,24 @@ So `--preset god --no-caveman --no-mineru` gives you the full god bundle minus t
 | ccstatusline (`statusLine`, install-if-missing) | — | — | — | ✅ | — |
 | caveman (third-party `curl\|bash`, gated) | — | — | — | ✅ | — |
 | MinerU pre-warm (~3 GB, gated) | — | — | — | ✅ | — |
+| GitHub CLI `gh` (install if missing, gated) | — | — | — | ✅ | — |
+| `claude-skip` shell alias (dangerous, gated) | — | — | — | ✅ | — |
+| `@playwright/cli` + its skill (if missing, gated) | — | — | — | ✅ | — |
 | model-profile | mixed | mixed | mixed | **opus** | mixed |
 
 - **`minimum`** — tools + safety only. Installs the agents/commands/skills, the launchers, the security deny-list, and the gost-report persona template, and nothing that mutates your global git config or installs a session hook. Good first install if you want to keep your environment untouched.
 - **`default`** — exactly the no-flag `bash install.sh` behavior, named so `--preset default --dry` documents the baseline.
 - **`senior`** — `default` plus Stop sound, thinking summaries, and a maxed non-secret env block merged into `settings.json` `"env"` (`CLAUDE_CODE_EFFORT_LEVEL=xhigh` raises per-turn reasoning **and** quota use). No API keys are ever shipped — ultrasearch's OpenAlex/Unpaywall/S2 keys stay manual (see [Optional: Shell Environment Variables](#optional-shell-environment-variables)).
-- **`god`** — everything, on the opus model profile (~5× the per-session cost). Notification sound is deliberately left **off** (it duplicates the Stop beep). The three external installs are **gated**:
-  - **caveman** and **MinerU** require an interactive `y/N` (default **N**) and are skipped in non-interactive shells (CI, piped installs) with a pointer to run them later. Heavy/third-party code is never auto-installed.
+- **`god`** — everything, on the opus model profile (~5× the per-session cost). Notification sound is deliberately left **off** (it duplicates the Stop beep). The external/dangerous steps are each **gated** — interactive `y/N` (default **N**), skipped in non-interactive shells (CI, piped installs) with a pointer to run them later:
+  - **caveman** pipes `https://raw.githubusercontent.com/JuliusBrussee/caveman/main/install.sh` to bash (third-party, unpinned `main`, needs node≥18). The confirm prompt shows the URL.
+  - **MinerU** pre-warms doc2kb's ~3 GB tier. Heavy/third-party code is never auto-installed.
+  - **gh** is installed via the system package manager (brew/apt/dnf/pacman/zypper/winget) **only if it's missing** — never intrudes when `gh` is already on PATH.
+  - **claude-skip** adds a `claude-skip` shell alias for `claude --dangerously-skip-permissions`, behind a loud security warning. It's named `claude-skip` (not `claude`) on purpose, so the permission-bypass is an explicit per-invocation opt-in; plain `claude` stays safe.
+  - **playwright** installs Microsoft's official `@playwright/cli` and its bundled agent skill (`npm i -g @playwright/cli@latest && playwright-cli install --skills`) **only if no playwright cli/mcp is already set up**. agentpipe installs the tool; the skill ships with it (never vendored here).
   - **ccstatusline** only writes a `statusLine` block if you don't already have one (never clobbers) and renders via `npx` at runtime, so it's a no-op until Node.js is on PATH.
-  - caveman pipes `https://raw.githubusercontent.com/JuliusBrussee/caveman/main/install.sh` to bash (third-party, unpinned `main`, needs node≥18). The confirm prompt shows the URL.
 - **`codex-full`** — the Codex-native bundle: skills + gost-report persona config + Stop sound + launchers. It implies `--target codex` (unless you pass `--target` yourself). Use this instead of `--preset god --target codex`, which would silently drop every Claude-only layer; the installer warns and recommends `codex-full` if you do that.
 
-Per-layer override flags pair a `--with-*` and a `--no-*` for each gated/opt-in layer: `--with-mineru`/`--no-mineru`, `--with-env-defaults`/`--no-env-defaults`, `--with-ccstatusline`/`--no-ccstatusline`, `--with-caveman`/`--no-caveman`. All are mirrored as PowerShell switches.
+Per-layer override flags pair a `--with-*` and a `--no-*` for each gated/opt-in layer: `--with-mineru`/`--no-mineru`, `--with-env-defaults`/`--no-env-defaults`, `--with-ccstatusline`/`--no-ccstatusline`, `--with-caveman`/`--no-caveman`, `--with-gh`/`--no-gh`, `--with-claude-skip`/`--no-claude-skip`, `--with-playwright`/`--no-playwright`. All are mirrored as PowerShell switches.
 
 The preset is **not** persisted (re-running without `--preset` falls back to per-layer defaults). The one thing that does persist is the model profile: `god` sets it to opus, which is remembered the same way `--model-profile opus` is.
 

@@ -34,9 +34,11 @@ set -euo pipefail
 #   senior     — default + Stop sound + thinking summaries + maxed env defaults
 #                (CLAUDE_CODE_EFFORT_LEVEL=xhigh, disable adaptive thinking + non-
 #                essential traffic, merged into settings.json "env"). Still sonnet/mixed.
-#   god        — senior + ccstatusline + caveman + --model-profile opus + MinerU
-#                pre-warm. The three external installs (caveman, MinerU; ccstatusline
-#                via runtime npx) are gated — caveman/MinerU need an interactive y/N.
+#   god        — senior + ccstatusline + caveman + gh (if missing) + claude-skip
+#                alias + playwright-cli + --model-profile opus + MinerU pre-warm.
+#                External/dangerous steps (caveman, gh, playwright, MinerU, the
+#                alias) are each gated by an interactive y/N (default N) and skipped
+#                in non-interactive shells.
 #   codex-full — Codex-native bundle: skills + gost-config + Stop sound + launchers
 #                (implies --target codex unless --target is given).
 #
@@ -127,6 +129,9 @@ MINERU_PREWARM=0
 ENV_DEFAULTS=0         # merge maxed perf/privacy env into settings.json "env"
 CCSTATUSLINE=0         # add ccstatusline statusLine block to settings.json (install-if-missing)
 CAVEMAN=0             # install caveman (third-party curl|bash, gated like MinerU)
+GH_INSTALL=0           # install GitHub CLI via system pkg manager if missing (gated)
+CLAUDE_SKIP_ALIAS=0    # add a `claude-skip` shell alias (--dangerously-skip-permissions, gated)
+PLAYWRIGHT=0           # install @playwright/cli + its bundled skill if missing (gated)
 MODEL_PROFILE_FLAG=""  # empty = no CLI flag; resolved later from settings.json or default
 PRESET=""              # empty = no preset; resolved after parse, before target resolution
 
@@ -147,6 +152,9 @@ MINERU_PREWARM_SET=0
 ENV_DEFAULTS_SET=0
 CCSTATUSLINE_SET=0
 CAVEMAN_SET=0
+GH_INSTALL_SET=0
+CLAUDE_SKIP_ALIAS_SET=0
+PLAYWRIGHT_SET=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -177,6 +185,12 @@ while [[ $# -gt 0 ]]; do
         --no-ccstatusline)   CCSTATUSLINE=0; CCSTATUSLINE_SET=1; shift ;;
         --with-caveman) CAVEMAN=1; CAVEMAN_SET=1; shift ;;
         --no-caveman)   CAVEMAN=0; CAVEMAN_SET=1; shift ;;
+        --with-gh) GH_INSTALL=1; GH_INSTALL_SET=1; shift ;;
+        --no-gh)   GH_INSTALL=0; GH_INSTALL_SET=1; shift ;;
+        --with-claude-skip) CLAUDE_SKIP_ALIAS=1; CLAUDE_SKIP_ALIAS_SET=1; shift ;;
+        --no-claude-skip)   CLAUDE_SKIP_ALIAS=0; CLAUDE_SKIP_ALIAS_SET=1; shift ;;
+        --with-playwright) PLAYWRIGHT=1; PLAYWRIGHT_SET=1; shift ;;
+        --no-playwright)   PLAYWRIGHT=0; PLAYWRIGHT_SET=1; shift ;;
         --model-profile=*) MODEL_PROFILE_FLAG="${1#--model-profile=}"; shift ;;
         --model-profile)   MODEL_PROFILE_FLAG="${2:-}"; shift 2 ;;
         --version|-v)
@@ -221,8 +235,10 @@ Presets (--preset <name>): one bundle instead of stacking flags. A preset sets
   senior      default + Stop sound + thinking summaries + maxed env defaults
               (CLAUDE_CODE_EFFORT_LEVEL=xhigh + disable adaptive thinking + disable
               non-essential traffic, merged into settings.json "env"). Stays mixed.
-  god         senior + ccstatusline + caveman + --model-profile opus + MinerU
-              pre-warm. caveman and MinerU are gated by an interactive y/N confirm.
+  god         senior + ccstatusline + caveman + gh (if missing) + claude-skip
+              alias + playwright-cli + --model-profile opus + MinerU pre-warm.
+              caveman, gh, playwright, MinerU and the alias are each gated by an
+              interactive y/N confirm.
   codex-full  Codex-native bundle (implies --target codex unless --target is set):
               skills + gost-config + Stop sound + launchers.
 
@@ -243,6 +259,23 @@ Options:
                             interactive y/N confirm (default N), skipped non-interactively.
                             god implies it.
   --no-caveman              Never install caveman (overrides a preset).
+  --with-gh                 Install GitHub CLI (gh) via the system package manager
+                            (brew/apt/dnf/pacman/zypper) IF it is not already on PATH.
+                            Gated by an interactive y/N; never intrudes when present.
+                            god implies it. --no-gh to skip.
+  --no-gh                   Never install gh (overrides a preset).
+  --with-claude-skip        Add a 'claude-skip' shell alias for 'claude
+                            --dangerously-skip-permissions' to your shell rc. DANGEROUS:
+                            bypasses all permission prompts. Named claude-skip (not
+                            claude) so it's an explicit per-invocation opt-in. Gated by
+                            an interactive y/N + security warning. god implies it.
+  --no-claude-skip          Never add the claude-skip alias (overrides a preset).
+  --with-playwright         Install Microsoft's @playwright/cli (terminal browser
+                            automation, persistent + parallel sessions) plus its
+                            bundled agent skill (npm install -g @playwright/cli@latest
+                            && playwright-cli install --skills) IF no playwright cli/mcp
+                            is already present. Gated by y/N; needs npm. god implies it.
+  --no-playwright           Never install playwright-cli (overrides a preset).
   --with-mineru             Pre-warm doc2kb's MinerU tier (~3 GB+, several minutes,
                             MLX/CUDA wheels). HEAVY deps are never auto-installed:
                             requires an interactive y/N confirm (default N) and is
@@ -342,6 +375,9 @@ apply_preset() {
             _preset_set CCSTATUSLINE 1 CCSTATUSLINE_SET
             _preset_set CAVEMAN 1 CAVEMAN_SET
             _preset_set MINERU_PREWARM 1 MINERU_PREWARM_SET
+            _preset_set GH_INSTALL 1 GH_INSTALL_SET
+            _preset_set CLAUDE_SKIP_ALIAS 1 CLAUDE_SKIP_ALIAS_SET
+            _preset_set PLAYWRIGHT 1 PLAYWRIGHT_SET
             # Notification sound intentionally left off: it duplicates the Stop beep.
             # Model profile → opus unless the user passed --model-profile.
             # (if/fi, not `&&`: a false test as the branch's last command would
@@ -409,6 +445,9 @@ if [[ "$SKILLS_ONLY" -eq 1 ]]; then
     ENV_DEFAULTS=0
     CCSTATUSLINE=0
     CAVEMAN=0
+    GH_INSTALL=0
+    CLAUDE_SKIP_ALIAS=0
+    PLAYWRIGHT=0
 fi
 
 skills_only_notice() {
@@ -1408,6 +1447,218 @@ do_caveman_dry() {
     echo ""
 }
 
+# --- GitHub CLI (opt-in, gated; god) ---
+#
+# Installs `gh` via the system package manager IF it's not already on PATH (never
+# intrudes when present). Official GitHub tool, installed from the OS package
+# manager — not curl|bash. Gated by an interactive y/N (default N); non-interactive
+# shells skip. No target gate: gh helps both claude and codex users.
+
+gh_install_active() {
+    [[ "$GH_INSTALL" -eq 1 ]]
+}
+
+# Echo the OS-appropriate install command, or empty if no known package manager.
+_gh_install_cmd() {
+    if command -v brew >/dev/null 2>&1; then echo "brew install gh"; return; fi
+    if command -v apt-get >/dev/null 2>&1; then echo "sudo apt-get update && sudo apt-get install -y gh"; return; fi
+    if command -v dnf >/dev/null 2>&1; then echo "sudo dnf install -y gh"; return; fi
+    if command -v pacman >/dev/null 2>&1; then echo "sudo pacman -S --noconfirm github-cli"; return; fi
+    if command -v zypper >/dev/null 2>&1; then echo "sudo zypper install -y gh"; return; fi
+    echo ""
+}
+
+do_gh() {
+    gh_install_active || return 0
+    if command -v gh >/dev/null 2>&1; then
+        log "gh already installed ($(gh --version 2>/dev/null | head -1)) — not intruding"
+        return 0
+    fi
+    local cmd
+    cmd="$(_gh_install_cmd)"
+    if [[ -z "$cmd" ]]; then
+        warn "gh not installed and no known package manager found."
+        info "  install manually: https://github.com/cli/cli#installation"
+        return 0
+    fi
+    if [[ ! -t 0 ]]; then
+        warn "gh install skipped (non-interactive shell)."
+        info "  run later: $cmd"
+        return 0
+    fi
+    echo ""
+    warn "GitHub CLI (gh) is not installed. Install it now via:"
+    warn "  $cmd"
+    printf "  Install gh? [y/N] "
+    local reply=""
+    read -r reply || true
+    case "$reply" in
+        y|Y|yes|YES)
+            info "Installing gh..."
+            if bash -c "$cmd"; then
+                log "gh installed"
+            else
+                warn "gh install failed — run later: $cmd"
+            fi
+            ;;
+        *)
+            info "gh install declined — run later: $cmd"
+            ;;
+    esac
+}
+
+do_gh_dry() {
+    gh_install_active || return 0
+    echo "GitHub CLI (gh):"
+    if command -v gh >/dev/null 2>&1; then
+        echo "  = gh already installed (will not intrude)"
+    else
+        info "  + would offer to install gh via $(_gh_install_cmd) — interactive y/N at real install"
+    fi
+    echo ""
+}
+
+# --- claude-skip alias (claude target only, opt-in, gated; god) ---
+#
+# Adds a `claude-skip` shell alias for `claude --dangerously-skip-permissions` to
+# the user's shell rc. Deliberately NOT named `claude` so the dangerous flag is an
+# explicit, per-invocation opt-in. Gated by an interactive y/N (default N) with a
+# loud security warning; non-interactive shells skip; never duplicates an existing
+# alias line. settings/rc is the user's territory — only touched on explicit yes.
+
+CLAUDE_SKIP_ALIAS_LINE="alias claude-skip='claude --dangerously-skip-permissions'"
+
+claude_skip_active() {
+    [[ "$TARGET" == "claude" && "$CLAUDE_SKIP_ALIAS" -eq 1 ]]
+}
+
+# Echo the shell rc path appropriate for the user's login shell.
+_claude_skip_rc() {
+    case "${SHELL:-}" in
+        */zsh)  echo "${ZDOTDIR:-$HOME}/.zshrc" ;;
+        */bash) echo "$HOME/.bashrc" ;;
+        *)      echo "$HOME/.zshrc" ;;
+    esac
+}
+
+do_claude_skip() {
+    claude_skip_active || return 0
+    local rc
+    rc="$(_claude_skip_rc)"
+    if [[ -f "$rc" ]] && grep -qF "alias claude-skip=" "$rc" 2>/dev/null; then
+        log "claude-skip alias already in $rc — not duplicating"
+        return 0
+    fi
+    if [[ ! -t 0 ]]; then
+        warn "claude-skip alias skipped (non-interactive shell)."
+        info "  add manually to $rc:  $CLAUDE_SKIP_ALIAS_LINE"
+        return 0
+    fi
+    echo ""
+    warn "SECURITY: 'claude-skip' runs Claude Code with --dangerously-skip-permissions,"
+    warn "  which bypasses ALL permission prompts — Claude can run any command without"
+    warn "  asking. Use it only in trusted, sandboxed, or throwaway dirs. The alias is"
+    warn "  named 'claude-skip' (not 'claude') so plain 'claude' stays safe."
+    printf "  Add 'claude-skip' alias to %s? [y/N] " "$rc"
+    local reply=""
+    read -r reply || true
+    case "$reply" in
+        y|Y|yes|YES)
+            printf '\n# agentpipe: opt-in dangerous skip-permissions alias\n%s\n' "$CLAUDE_SKIP_ALIAS_LINE" >> "$rc"
+            log "claude-skip alias added to $rc (reload: source $rc)"
+            ;;
+        *)
+            info "claude-skip alias declined."
+            info "  add manually to $rc:  $CLAUDE_SKIP_ALIAS_LINE"
+            ;;
+    esac
+}
+
+do_claude_skip_dry() {
+    claude_skip_active || return 0
+    echo "claude-skip alias:"
+    local rc
+    rc="$(_claude_skip_rc)"
+    if [[ -f "$rc" ]] && grep -qF "alias claude-skip=" "$rc" 2>/dev/null; then
+        echo "  = claude-skip alias already in $rc (will not duplicate)"
+    else
+        info "  + would offer to add 'claude-skip' alias to $rc — interactive y/N + security warning"
+    fi
+    echo ""
+}
+
+# --- Playwright CLI (opt-in, gated; god) ---
+#
+# Installs Microsoft's `@playwright/cli` (the npm tool) + its bundled agent skill
+# via `playwright-cli install --skills`. agentpipe never vendors the skill — it
+# ships with the tool. "Don't intrude": skip entirely if a playwright CLI is on
+# PATH or a playwright MCP server is already registered in settings.json. Gated by
+# an interactive y/N; non-interactive shells skip; needs npm. No target gate (the
+# skill serves Claude Code, Codex, Copilot, …).
+
+playwright_active() {
+    [[ "$PLAYWRIGHT" -eq 1 ]]
+}
+
+# True if any playwright browser-automation path is already set up (cli or mcp).
+_playwright_present() {
+    command -v playwright-cli >/dev/null 2>&1 && return 0
+    npx --no-install playwright-cli --version >/dev/null 2>&1 && return 0
+    local settings="$BASE/settings.json"
+    [[ -f "$settings" ]] && grep -q '"playwright"' "$settings" 2>/dev/null && return 0
+    return 1
+}
+
+do_playwright() {
+    playwright_active || return 0
+    if _playwright_present; then
+        log "playwright (cli or mcp) already present — not intruding"
+        return 0
+    fi
+    if ! command -v npm >/dev/null 2>&1; then
+        warn "playwright-cli skipped — npm not found (install Node.js first)"
+        info "  then run: npm install -g @playwright/cli@latest && playwright-cli install --skills"
+        return 0
+    fi
+    if [[ ! -t 0 ]]; then
+        warn "playwright-cli install skipped (non-interactive shell)."
+        info "  run later: npm install -g @playwright/cli@latest && playwright-cli install --skills"
+        return 0
+    fi
+    echo ""
+    warn "Playwright CLI (@playwright/cli) gives terminal browser automation with"
+    warn "  persistent + parallel sessions, and ships its own agent skill. Installs via:"
+    warn "  npm install -g @playwright/cli@latest  &&  playwright-cli install --skills"
+    printf "  Install @playwright/cli + skill now? [y/N] "
+    local reply=""
+    read -r reply || true
+    case "$reply" in
+        y|Y|yes|YES)
+            info "Installing @playwright/cli..."
+            if npm install -g @playwright/cli@latest && playwright-cli install --skills; then
+                log "playwright-cli + skill installed"
+            else
+                warn "playwright-cli install failed — run later: npm install -g @playwright/cli@latest && playwright-cli install --skills"
+            fi
+            ;;
+        *)
+            info "playwright-cli declined."
+            info "  install later: npm install -g @playwright/cli@latest && playwright-cli install --skills"
+            ;;
+    esac
+}
+
+do_playwright_dry() {
+    playwright_active || return 0
+    echo "Playwright CLI:"
+    if _playwright_present; then
+        echo "  = playwright already present (cli or mcp) — will not intrude"
+    else
+        info "  + would offer: npm install -g @playwright/cli@latest && playwright-cli install --skills — interactive y/N"
+    fi
+    echo ""
+}
+
 # --- Preset manifest + codex-downgrade notice ---
 # Surfaces the resolved per-layer state so the bundle is obvious (cures the
 # "I don't remember what's default" problem). Each line reflects the *active*
@@ -1433,6 +1684,9 @@ print_preset_manifest() {
     echo "    ccstatusline:        $(_mstate ccstatusline_active)"
     echo "    caveman (3rd-party): $(_mstate caveman_active)"
     echo "    MinerU pre-warm:     $(_mstate mineru_prewarm_active)"
+    echo "    gh CLI (if missing): $(_mstate gh_install_active)"
+    echo "    claude-skip alias:   $(_mstate claude_skip_active)"
+    echo "    playwright-cli:      $(_mstate playwright_active)"
 }
 
 preset_codex_downgrade_notice() {
@@ -1579,6 +1833,9 @@ do_install() {
 
     do_mineru_prewarm
     do_caveman
+    do_gh
+    do_claude_skip
+    do_playwright
 
     echo ""
     info "Installed $count items to $BASE"
@@ -1751,6 +2008,9 @@ do_dry() {
     do_gost_validation_dry
     do_mineru_prewarm_dry
     do_caveman_dry
+    do_gh_dry
+    do_claude_skip_dry
+    do_playwright_dry
     codex_skip_notice
     skills_only_notice
     preset_codex_downgrade_notice

@@ -176,15 +176,18 @@ Each gate must pass before proceeding. Agents have bounded tool access (reviewer
 | ccstatusline (`statusLine`, install-if-missing) | — | — | — | ✅ | — |
 | caveman (third-party `curl\|bash`, gated) | — | — | — | ✅ | — |
 | MinerU pre-warm (~3 GB, gated) | — | — | — | ✅ | — |
+| GitHub CLI `gh` (install if missing, gated) | — | — | — | ✅ | — |
+| `claude-skip` shell alias (dangerous, gated) | — | — | — | ✅ | — |
+| `@playwright/cli` + its skill (if missing, gated) | — | — | — | ✅ | — |
 | model-profile | mixed | mixed | mixed | **opus** | mixed |
 
 - **`minimum`** — tools + safety only; never mutates global git config or installs session hooks.
 - **`default`** — the no-flag baseline, named so its manifest is visible.
 - **`senior`** — `default` plus the power-user comforts: Stop sound, thinking summaries, and maxed perf/privacy env vars merged into `settings.json` `"env"` (no secrets shipped).
-- **`god`** — everything, on opus. The three external installs are **gated**: caveman and MinerU need an interactive `y/N` (default N) and are skipped in non-interactive shells; ccstatusline only renders if `npx` is on PATH and never clobbers an existing `statusLine`.
+- **`god`** — everything, on opus. The external/dangerous steps are each **gated** (interactive `y/N`, default N, skipped in non-interactive shells): caveman (`curl\|bash`), MinerU pre-warm, `gh` install (only if missing — never intrudes when present), the `claude-skip` alias (with a security warning), and `@playwright/cli` + its bundled agent skill (only if no playwright cli/mcp is already set up — agentpipe installs the official tool, it carries its own skill). ccstatusline only renders if `npx` is on PATH and never clobbers an existing `statusLine`.
 - **`codex-full`** — the Codex-native bundle (implies `--target codex`): skills + gost-config + Stop sound + launchers. Use this instead of `--preset god --target codex`, which would silently drop every Claude-only layer.
 
-Per-layer override flags: `--with-mineru` / `--no-mineru`, `--with-env-defaults` / `--no-env-defaults`, `--with-ccstatusline` / `--no-ccstatusline`, `--with-caveman` / `--no-caveman` (all mirrored as PowerShell switches). Example: `bash install.sh --preset god --no-caveman --no-mineru`.
+Per-layer override flags: `--with-mineru` / `--no-mineru`, `--with-env-defaults` / `--no-env-defaults`, `--with-ccstatusline` / `--no-ccstatusline`, `--with-caveman` / `--no-caveman`, `--with-gh` / `--no-gh`, `--with-claude-skip` / `--no-claude-skip`, `--with-playwright` / `--no-playwright` (all mirrored as PowerShell switches). Example: `bash install.sh --preset god --no-caveman --no-mineru --no-claude-skip`.
 
 - **Project-level overrides**:
   - Claude: `.claude/agents/`, `.claude/commands/`, `.claude/skills/` in your project

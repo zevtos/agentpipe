@@ -40,7 +40,9 @@
       minimum     tools + safety only (no attribution-fix / claude-md / gost-validation)
       default     the no-flag baseline
       senior      default + Stop sound + thinking + maxed env defaults (xhigh)
-      god         senior + ccstatusline + caveman + opus + MinerU (caveman/MinerU gated)
+      god         senior + ccstatusline + caveman + gh + claude-skip alias +
+                  playwright-cli + opus + MinerU (caveman/gh/playwright/MinerU/alias
+                  each gated by an interactive y/N)
       codex-full  Codex-native bundle (implies -Target codex): skills + gost-config +
                   Stop sound + launchers
 #>
@@ -72,6 +74,12 @@ param(
     [switch]$NoCcstatusline,
     [switch]$WithCaveman,
     [switch]$NoCaveman,
+    [switch]$WithGh,
+    [switch]$NoGh,
+    [switch]$WithClaudeSkip,
+    [switch]$NoClaudeSkip,
+    [switch]$WithPlaywright,
+    [switch]$NoPlaywright,
     # Validated manually below — ValidateSet rejects the empty default.
     [string]$ModelProfile = "",
     [switch]$ShowVersion,
@@ -140,6 +148,9 @@ switch ($Preset) {
         if (-not ($Bound.ContainsKey("WithCcstatusline") -or $Bound.ContainsKey("NoCcstatusline"))) { $WithCcstatusline = $true }
         if (-not ($Bound.ContainsKey("WithCaveman") -or $Bound.ContainsKey("NoCaveman")))           { $WithCaveman = $true }
         if (-not ($Bound.ContainsKey("WithMineru") -or $Bound.ContainsKey("NoMineru")))             { $WithMineru = $true }
+        if (-not ($Bound.ContainsKey("WithGh") -or $Bound.ContainsKey("NoGh")))                     { $WithGh = $true }
+        if (-not ($Bound.ContainsKey("WithClaudeSkip") -or $Bound.ContainsKey("NoClaudeSkip")))     { $WithClaudeSkip = $true }
+        if (-not ($Bound.ContainsKey("WithPlaywright") -or $Bound.ContainsKey("NoPlaywright")))     { $WithPlaywright = $true }
         # Notification sound left off (duplicates Stop). Model → opus unless set.
         if (-not $ModelProfile) { $ModelProfile = "opus" }
     }
@@ -186,6 +197,9 @@ if ($SkillsOnly) {
     $WithEnvDefaults = $false
     $WithCcstatusline = $false
     $WithCaveman = $false
+    $WithGh = $false
+    $WithClaudeSkip = $false
+    $WithPlaywright = $false
 }
 
 function Write-Ok($msg)   { Write-Host "  $msg" -ForegroundColor Green }
@@ -307,6 +321,20 @@ function Test-CavemanActive {
 function Test-MineruPrewarmActive {
     # No target gate: doc2kb ships to both claude and codex.
     return ($WithMineru -and -not $NoMineru -and $SkillsDst)
+}
+
+function Test-GhInstallActive {
+    # No target gate: gh helps both claude and codex users.
+    return ($WithGh -and -not $NoGh)
+}
+
+function Test-ClaudeSkipActive {
+    return ($Target -eq "claude" -and $WithClaudeSkip -and -not $NoClaudeSkip)
+}
+
+function Test-PlaywrightActive {
+    # No target gate: the @playwright/cli skill serves Claude, Codex, Copilot, ...
+    return ($WithPlaywright -and -not $NoPlaywright)
 }
 
 function Files-Equal($a, $b) {
@@ -1063,6 +1091,167 @@ function Do-CavemanDry {
     Write-Host ""
 }
 
+# --- GitHub CLI (opt-in, gated; god) ---
+# Installs gh via the system package manager IF missing (never intrudes when
+# present). Gated by interactive y/N. Mirror of install.sh do_gh.
+
+function Get-GhInstallCmd {
+    if (Get-Command winget -ErrorAction SilentlyContinue) { return "winget install --id GitHub.cli -e --source winget" }
+    if (Get-Command choco  -ErrorAction SilentlyContinue) { return "choco install gh -y" }
+    if (Get-Command scoop  -ErrorAction SilentlyContinue) { return "scoop install gh" }
+    return ""
+}
+
+function Do-Gh {
+    if (-not (Test-GhInstallActive)) { return }
+    if (Get-Command gh -ErrorAction SilentlyContinue) {
+        Write-Ok "gh already installed - not intruding"
+        return
+    }
+    $cmd = Get-GhInstallCmd
+    if (-not $cmd) {
+        Write-Warn "gh not installed and no known package manager (winget/choco/scoop) found."
+        Write-Info "install manually: https://github.com/cli/cli#installation"
+        return
+    }
+    if ([Console]::IsInputRedirected) {
+        Write-Warn "gh install skipped (non-interactive shell)."
+        Write-Info "run later: $cmd"
+        return
+    }
+    Write-Host ""
+    Write-Warn "GitHub CLI (gh) is not installed. Install it now via:"
+    Write-Warn "  $cmd"
+    $reply = Read-Host "  Install gh? [y/N]"
+    if ($reply -match '^(y|yes)$') {
+        Write-Info "Installing gh..."
+        Invoke-Expression $cmd
+        if (Get-Command gh -ErrorAction SilentlyContinue) { Write-Ok "gh installed" } else { Write-Warn "gh install failed - run later: $cmd" }
+    } else {
+        Write-Info "gh install declined - run later: $cmd"
+    }
+}
+
+function Do-GhDry {
+    if (-not (Test-GhInstallActive)) { return }
+    Write-Host "GitHub CLI (gh):"
+    if (Get-Command gh -ErrorAction SilentlyContinue) {
+        Write-Host "  = gh already installed (will not intrude)"
+    } else {
+        Write-Info "+ would offer to install gh via $(Get-GhInstallCmd) - interactive y/N at real install"
+    }
+    Write-Host ""
+}
+
+# --- claude-skip alias (claude target only, opt-in, gated; god) ---
+# Adds a `claude-skip` function (claude --dangerously-skip-permissions) to the
+# PowerShell $PROFILE. Deliberately not named `claude`. Gated + security warning,
+# never duplicates. Mirror of install.sh do_claude_skip.
+
+$Script:ClaudeSkipFnLine = 'function claude-skip { claude --dangerously-skip-permissions @args }'
+
+function Do-ClaudeSkip {
+    if (-not (Test-ClaudeSkipActive)) { return }
+    $rc = $PROFILE
+    if ((Test-Path $rc) -and (Select-String -Quiet -Path $rc -Pattern 'function claude-skip' -ErrorAction SilentlyContinue)) {
+        Write-Ok "claude-skip function already in $rc - not duplicating"
+        return
+    }
+    if ([Console]::IsInputRedirected) {
+        Write-Warn "claude-skip alias skipped (non-interactive shell)."
+        Write-Info "add manually to $rc :  $($Script:ClaudeSkipFnLine)"
+        return
+    }
+    Write-Host ""
+    Write-Warn "SECURITY: 'claude-skip' runs Claude Code with --dangerously-skip-permissions,"
+    Write-Warn "  which bypasses ALL permission prompts - Claude can run any command without"
+    Write-Warn "  asking. Use only in trusted/sandboxed/throwaway dirs. Named 'claude-skip'"
+    Write-Warn "  (not 'claude') so plain 'claude' stays safe."
+    $reply = Read-Host "  Add 'claude-skip' to $rc ? [y/N]"
+    if ($reply -match '^(y|yes)$') {
+        New-Item -ItemType Directory -Path (Split-Path $rc -Parent) -Force | Out-Null
+        Add-Content -Path $rc -Value "`n# agentpipe: opt-in dangerous skip-permissions alias`n$($Script:ClaudeSkipFnLine)"
+        Write-Ok "claude-skip added to $rc (reload: . `$PROFILE)"
+    } else {
+        Write-Info "claude-skip declined."
+        Write-Info "add manually to $rc :  $($Script:ClaudeSkipFnLine)"
+    }
+}
+
+function Do-ClaudeSkipDry {
+    if (-not (Test-ClaudeSkipActive)) { return }
+    Write-Host "claude-skip alias:"
+    $rc = $PROFILE
+    if ((Test-Path $rc) -and (Select-String -Quiet -Path $rc -Pattern 'function claude-skip' -ErrorAction SilentlyContinue)) {
+        Write-Host "  = claude-skip already in $rc (will not duplicate)"
+    } else {
+        Write-Info "+ would offer to add 'claude-skip' to $rc - interactive y/N + security warning"
+    }
+    Write-Host ""
+}
+
+# --- Playwright CLI (opt-in, gated; god) ---
+# Installs Microsoft's @playwright/cli + its bundled skill (never vendored here).
+# Skip if a playwright cli/mcp is already present. Mirror of install.sh do_playwright.
+
+function Test-PlaywrightPresent {
+    if (Get-Command playwright-cli -ErrorAction SilentlyContinue) { return $true }
+    if (Get-Command npx -ErrorAction SilentlyContinue) {
+        & npx --no-install playwright-cli --version *> $null
+        if ($LASTEXITCODE -eq 0) { return $true }
+    }
+    $settings = Join-Path $script:Base "settings.json"
+    if ((Test-Path $settings) -and (Select-String -Quiet -Path $settings -Pattern '"playwright"' -ErrorAction SilentlyContinue)) { return $true }
+    return $false
+}
+
+function Do-Playwright {
+    if (-not (Test-PlaywrightActive)) { return }
+    if (Test-PlaywrightPresent) {
+        Write-Ok "playwright (cli or mcp) already present - not intruding"
+        return
+    }
+    if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
+        Write-Warn "playwright-cli skipped - npm not found (install Node.js first)"
+        Write-Info "then run: npm install -g @playwright/cli@latest; playwright-cli install --skills"
+        return
+    }
+    if ([Console]::IsInputRedirected) {
+        Write-Warn "playwright-cli install skipped (non-interactive shell)."
+        Write-Info "run later: npm install -g @playwright/cli@latest; playwright-cli install --skills"
+        return
+    }
+    Write-Host ""
+    Write-Warn "Playwright CLI (@playwright/cli) gives terminal browser automation with"
+    Write-Warn "  persistent + parallel sessions, and ships its own agent skill. Installs via:"
+    Write-Warn "  npm install -g @playwright/cli@latest ; playwright-cli install --skills"
+    $reply = Read-Host "  Install @playwright/cli + skill now? [y/N]"
+    if ($reply -match '^(y|yes)$') {
+        Write-Info "Installing @playwright/cli..."
+        & npm install -g '@playwright/cli@latest'
+        if ($LASTEXITCODE -eq 0) {
+            & playwright-cli install --skills
+            if ($LASTEXITCODE -eq 0) { Write-Ok "playwright-cli + skill installed" } else { Write-Warn "playwright-cli skill step failed - run: playwright-cli install --skills" }
+        } else {
+            Write-Warn "playwright-cli install failed - run later: npm install -g @playwright/cli@latest; playwright-cli install --skills"
+        }
+    } else {
+        Write-Info "playwright-cli declined."
+        Write-Info "install later: npm install -g @playwright/cli@latest; playwright-cli install --skills"
+    }
+}
+
+function Do-PlaywrightDry {
+    if (-not (Test-PlaywrightActive)) { return }
+    Write-Host "Playwright CLI:"
+    if (Test-PlaywrightPresent) {
+        Write-Host "  = playwright already present (cli or mcp) - will not intrude"
+    } else {
+        Write-Info "+ would offer: npm install -g @playwright/cli@latest; playwright-cli install --skills - interactive y/N"
+    }
+    Write-Host ""
+}
+
 # --- Preset manifest + codex-downgrade notice ---
 
 function Get-MState([scriptblock]$pred) { if (& $pred) { return "on" } else { return "off" } }
@@ -1085,6 +1274,9 @@ function Show-PresetManifest {
     Write-Host "    ccstatusline:        $(Get-MState { Test-CcstatuslineActive })"
     Write-Host "    caveman (3rd-party): $(Get-MState { Test-CavemanActive })"
     Write-Host "    MinerU pre-warm:     $(Get-MState { Test-MineruPrewarmActive })"
+    Write-Host "    gh CLI (if missing): $(Get-MState { Test-GhInstallActive })"
+    Write-Host "    claude-skip alias:   $(Get-MState { Test-ClaudeSkipActive })"
+    Write-Host "    playwright-cli:      $(Get-MState { Test-PlaywrightActive })"
 }
 
 function Show-PresetCodexDowngradeNotice {
@@ -1392,6 +1584,9 @@ function Do-Install {
 
     Do-MineruPrewarm
     Do-Caveman
+    Do-Gh
+    Do-ClaudeSkip
+    Do-Playwright
 
     Write-Host ""
     Write-Info "Installed $count items to $Base"
@@ -1563,6 +1758,9 @@ function Do-Dry {
     Do-GostValidationDry
     Do-MineruPrewarmDry
     Do-CavemanDry
+    Do-GhDry
+    Do-ClaudeSkipDry
+    Do-PlaywrightDry
     Show-CodexSkipNotice
     Show-SkillsOnlyNotice
     Show-PresetCodexDowngradeNotice
