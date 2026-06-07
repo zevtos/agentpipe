@@ -90,7 +90,7 @@ HOOK_SCAN_SKIP_DIRS = frozenset({
 })
 # Маркеры корня проекта (тот же набор, что у gost_report.paths()). Хук
 # сканирует только если cwd или предок (но не сам $HOME) — это корень проекта.
-HOOK_ROOT_MARKERS = (".git", "Makefile", "pyproject.toml", ".claude")
+HOOK_ROOT_MARKERS = (".git", "Makefile", "pyproject.toml", ".gost-report", ".claude")
 
 TIER_FAIL = "a"
 TIER_WARN = "b"

@@ -3,8 +3,8 @@
 ensure_env.py — бутстрап + изоляция зависимостей).
 
     gr путь/к/build.py        запустить конкретный скрипт
-    gr                        найти .claude/gost-report/build.py вверх от cwd
-                              (дефолтный путь, куда Claude кладёт билды) и запустить
+    gr                        найти .gost-report/build.py вверх от cwd
+                              (дефолтный путь для build-скрипта) и запустить
 
 Кросс-платформенно (один и тот же код под bash- и .cmd-шимом). Stdlib-only."""
 from __future__ import annotations
@@ -15,16 +15,23 @@ from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
 ENSURE = SCRIPTS / "ensure_env.py"
-DEFAULT_REL = Path(".claude") / "gost-report" / "build.py"
+DEFAULT_REL = Path(".gost-report") / "build.py"
+LEGACY_REL = Path(".claude") / "gost-report" / "build.py"
 
 
-def _find_default_build() -> "Path | None":
-    """Обход вверх от cwd до первого .claude/gost-report/build.py."""
+def _find_default_build() -> "tuple[Path, bool] | None":
+    """Обход вверх от cwd до первого build-скрипта. На каждом уровне дерева
+    предпочитаем новый `.gost-report/build.py`, затем легаси
+    `.claude/gost-report/build.py`. Ближайший предок выигрывает в целом.
+    Возвращает (path, is_legacy) или None."""
     cur = Path.cwd().resolve()
     for d in (cur, *cur.parents):
         cand = d / DEFAULT_REL
         if cand.is_file():
-            return cand
+            return cand, False
+        legacy = d / LEGACY_REL
+        if legacy.is_file():
+            return legacy, True
     return None
 
 
@@ -40,15 +47,18 @@ def main(argv: list) -> int:
             sys.stderr.write(f"gr: файл не найден: {build}\n")
             return 2
     else:
-        build = _find_default_build()
+        found = _find_default_build()
         rest = argv
-        if build is None:
+        if found is None:
             sys.stderr.write(
                 "gr: build-скрипт не найден.\n"
                 "  Передай путь явно:      gr путь/к/build.py\n"
-                f"  Или создай дефолтный:   ./{DEFAULT_REL}\n"
-                "  (Claude кладёт билды именно туда.)\n")
+                f"  Или создай дефолтный:   ./{DEFAULT_REL}\n")
             return 2
+        build, is_legacy = found
+        if is_legacy:
+            sys.stderr.write(
+                f"gr: {LEGACY_REL} устарел; перенеси в {DEFAULT_REL}\n")
         sys.stderr.write(f"gr: запускаю {build}\n")
 
     # ensure_env.py сам поднимет venv и выполнит build его питоном.

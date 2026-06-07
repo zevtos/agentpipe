@@ -180,7 +180,7 @@ command instead of the long `python3 …/ensure_env.py …` form:
 
 | Command | Skill | Usage |
 |---------|-------|-------|
-| `gr`  | gost-report | `gr build.py` — run a build; `gr` (no arg) — find & run `.claude/gost-report/build.py` walking up from the cwd |
+| `gr`  | gost-report | `gr build.py` — run a build; `gr` (no arg) — find & run `.gost-report/build.py` walking up from the cwd (legacy `.claude/gost-report/build.py` still resolves with a deprecation notice) |
 | `us`  | ultrasearch | `us "query" --max-papers 30 --out review.md` |
 | `dkb` | doc2kb | `dkb input_dir/ output_kb/` (plus `dkb index`/`dkb query` subcommands) |
 

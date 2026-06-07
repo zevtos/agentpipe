@@ -1,18 +1,19 @@
 """Project-root detection + conventional artefact paths for gost-report.
 
 Цель: убрать `Path(__file__).parent / "figures"` бойлерплейт из user-скриптов.
-Скрипт может лежать где угодно (рекомендуется `<project>/.claude/gost-report/build.py`),
+Скрипт может лежать где угодно (рекомендуется `<project>/.gost-report/build.py`),
 а пути к figures/tables/out выводятся автоматически из конвенции `<root>/docs/...`.
 
 Project root определяется обходом вверх от caller'а с проверкой маркеров:
     1. .git/                  (cloned-репы, самый надёжный)
     2. Makefile               (lab-конвенция)
     3. pyproject.toml         (Python-проекты)
-    4. .claude/               (Claude Code-проекты, last resort)
-    5. Path.cwd() + RuntimeWarning (fallback)
+    4. .gost-report/          (дефолтная папка build-скрипта)
+    5. .claude/               (легаси Claude Code-проекты, last resort)
+    6. Path.cwd() + RuntimeWarning (fallback)
 
-"Contains marker" not "is marker" — скрипт внутри `<project>/.claude/gost-report/`
-безопасно проходит мимо `.claude/` и попадает в `<project>/`, у которого есть .git.
+"Contains marker" not "is marker" — скрипт внутри `<project>/.gost-report/`
+безопасно проходит мимо `.gost-report/` и попадает в `<project>/`, у которого есть .git.
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ from pathlib import Path
 from typing import Optional
 
 
-_MARKERS = (".git", "Makefile", "pyproject.toml", ".claude")
+_MARKERS = (".git", "Makefile", "pyproject.toml", ".gost-report", ".claude")
 
 
 @dataclass(frozen=True)
@@ -77,7 +78,8 @@ def paths(start: Optional[Path] = None) -> ProjectPaths:
     фрейма за пределами _paths.py / gost_report.py. Если и это не сработало —
     fallback на Path.cwd() с RuntimeWarning.
 
-    Маркеры project root: .git → Makefile → pyproject.toml → .claude. First-match
+    Маркеры project root: .git → Makefile → pyproject.toml → .gost-report →
+    .claude. First-match
     wins (ближайший проект, не самый внешний). Если ни один не найден,
     fallback к start (или cwd) с warning.
     """

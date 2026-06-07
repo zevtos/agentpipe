@@ -1,14 +1,15 @@
-"""Скелет build-скрипта для отчёта по ГОСТ. Положи в <project>/.claude/gost-report/build.py.
+"""Скелет build-скрипта для отчёта по ГОСТ. Положи в <project>/.gost-report/build.py.
 
-Запуск:
-    python3 ~/.claude/skills/gost-report/scripts/ensure_env.py .claude/gost-report/build.py
+Запуск (проще всего — через лаунчер `gr` из cwd проекта):
+    gr                       # найдёт .gost-report/build.py вверх по дереву
 
-Конвенции (резолвятся автоматически из <project>/.claude/gost-report/build.py):
+Конвенции (резолвятся автоматически из <project>/.gost-report/build.py):
     figures      — <project>/docs/figures/
     tables       — <project>/docs/tables/
     output .docx — <project>/docs/report.docx
 
-Project root детектится обходом вверх до первого маркера: .git → Makefile → pyproject.toml → .claude.
+Project root детектится обходом вверх до первого маркера:
+.git → Makefile → pyproject.toml → .gost-report → .claude.
 
 ФИО/группа/преподаватель/год берутся из ~/.config/gost-report/config (либо
 из переменных окружения GOST_REPORT_*). Если хочется захардкодить — передай
