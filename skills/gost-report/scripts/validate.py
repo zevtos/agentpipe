@@ -232,6 +232,28 @@ def _check_dashes(doc) -> List[Violation]:
                 message=f"длинное/среднее тире в основном тексте: «...{snippet}...»",
                 location=f"параграф {i + 1}",
             ))
+    # doc.paragraphs не обходит таблицы → тире в ячейках остаётся незамеченным.
+    # Бэкстоп: даже если какой-то будущий sink забудет санировать, запрещённое
+    # тире, дошедшее до ячейки docx, всё равно жёстко падает. Подписи живут
+    # ВНЕ ячеек (это обычные параграфы тела), так что caption/bibliography
+    # исключения здесь не нужны.
+    for ti, table in enumerate(getattr(doc, "tables", []) or []):
+        for ri, row in enumerate(table.rows):
+            for ci, cell in enumerate(row.cells):
+                for cp in cell.paragraphs:
+                    ctext = cp.text
+                    if not ctext:
+                        continue
+                    m = _PROHIBITED_DASH_RE.search(ctext)
+                    if m:
+                        start = max(0, m.start() - 20)
+                        end = min(len(ctext), m.end() + 20)
+                        snippet = ctext[start:end]
+                        violations.append(Violation(
+                            tier=TIER_FAIL, code="dashes",
+                            message=f"длинное/среднее тире в ячейке таблицы: «...{snippet}...»",
+                            location=f"таблица {ti + 1}, строка {ri + 1}, столбец {ci + 1}",
+                        ))
     return violations
 
 

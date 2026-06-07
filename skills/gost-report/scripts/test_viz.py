@@ -363,6 +363,16 @@ class _FakeCore:
     def tmp_dir(self) -> Path:
         return self._tmp
 
+    def sanitize(self, text):
+        # Mirror the real Report.sanitize/_sanitize_prose so the positive
+        # tests below can assert that a dash-bearing chart label is normalized.
+        if not text:
+            return text
+        import re
+        text = re.sub(r"\s+[—–]\s+", ", ", text)
+        text = re.sub(r"[—–]", "-", text)
+        return text
+
     def embed_figure(self, chart, caption, *, width_cm=None):
         png = chart.render()  # exercise the real render path
         _assert_png(png)
@@ -517,6 +527,60 @@ def test_numpy_x_equals_list_x():
 
 
 # ----------------------------------------------------------------------------
+# 6. SANITIZE — user-facing chart strings are normalized before they bake into
+#    the PNG (GAP 1). A dash-bearing label/xlabel/annotation must come out
+#    sanitized, and the resulting content key must differ from the raw variant.
+# ----------------------------------------------------------------------------
+def test_labels_sanitized():
+    api = _api()
+    fig = api.line([0, 1, 2], [1.0, 2.0, 3.0],
+                   labels=["ток — измеренный"], xlabel="t — время",
+                   ylabel="U — напряжение")
+    assert_eq(fig.labels[0], "ток, измеренный",
+              "legend label must be sanitized")
+    assert_eq(fig.xlabel, "t, время", "xlabel must be sanitized")
+    assert_eq(fig.ylabel, "U, напряжение", "ylabel must be sanitized")
+
+
+def test_hline_label_sanitized():
+    api = _api()
+    fig = api.line([0, 1, 2], [1.0, 2.0, 3.0],
+                   hlines=[{"value": 2.0, "label": "порог — верхний"}],
+                   vlines=[{"value": 1.0, "label": "старт – t0"}])
+    assert_eq(fig.hlines[0]["label"], "порог, верхний",
+              "hline label must be sanitized")
+    assert_eq(fig.vlines[0]["label"], "старт, t0",
+              "vline label must be sanitized")
+
+
+def test_annotation_text_sanitized():
+    api = _api()
+    fig = api.line([0, 1, 2], [1.0, 2.0, 3.0],
+                   annotations=[{"x": 1.0, "y": 2.0, "text": "пик — максимум"}])
+    assert_eq(fig.annotations[0]["text"], "пик, максимум",
+              "annotation text must be sanitized")
+
+
+def test_sanitized_label_changes_content_key():
+    api = _api()
+    clean = api.line([0, 1, 2], [1.0, 2.0, 3.0], labels=["ток, измеренный"])
+    dashed = api.line([0, 1, 2], [1.0, 2.0, 3.0], labels=["ток — измеренный"])
+    # The dashed label is canonicalized to the same string as the clean one,
+    # so the content key (and PNG bytes) must match — sanitize is the canon.
+    assert_eq(clean._content_key(), dashed._content_key(),
+              "dashed label must canonicalize to clean label's content key")
+
+
+def test_scalar_hlines_untouched():
+    api = _api()
+    # bare-number hlines have no label -> pass through unchanged, render fine
+    fig = api.line([0, 1, 2], [1.0, 2.0, 3.0], hlines=[2.0], vlines=[1.0])
+    _assert_png(fig.render())
+    assert_eq(fig.hlines[0]["value"], 2.0, "scalar hline value preserved")
+    assert_eq(fig.hlines[0]["label"], None, "scalar hline has no label")
+
+
+# ----------------------------------------------------------------------------
 # runner
 # ----------------------------------------------------------------------------
 def main() -> int:
@@ -552,6 +616,15 @@ def main() -> int:
     check("legend: labeled vline in legend handles", test_vline_label_in_legend)
     check("legend: unlabeled refline absent from legend",
           test_unlabeled_refline_not_in_legend)
+
+    # sanitize (GAP 1)
+    check("sanitize: legend/xlabel/ylabel normalized", test_labels_sanitized)
+    check("sanitize: hline/vline label normalized", test_hline_label_sanitized)
+    check("sanitize: annotation text normalized", test_annotation_text_sanitized)
+    check("sanitize: dashed label canonicalizes to clean content key",
+          test_sanitized_label_changes_content_key)
+    check("sanitize: scalar hlines pass through untouched",
+          test_scalar_hlines_untouched)
 
     total = _PASSED + len(_FAILURES)
     if _FAILURES:
