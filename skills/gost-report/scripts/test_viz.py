@@ -63,6 +63,23 @@ from gost_report_viz.charts import (  # noqa: E402
 )
 from gost_report_viz.module import _VizAPI, _check_yscale  # noqa: E402
 
+# Prefer the REAL prose sanitizer so the viz tests exercise the exact same
+# normalization the production path bakes into PNGs. gost_report imports
+# python-docx at module load; in a viz-only env (numpy+matplotlib, no docx)
+# that import fails — fall back to a byte-identical inline replica so the
+# suite still runs there. The skill venv has docx, so it uses the real one.
+try:  # noqa: SIM105
+    from gost_report import _sanitize_prose as _REAL_SANITIZE  # noqa: E402
+except Exception:  # noqa: BLE001 — docx (or other heavy dep) missing
+    import re as _re
+
+    def _REAL_SANITIZE(text):  # type: ignore[misc]
+        if not text:
+            return text
+        text = _re.sub(r"\s+[—–]\s+", ", ", text)
+        text = _re.sub(r"[—–]", "-", text)
+        return text
+
 
 # ----------------------------------------------------------------------------
 # tiny test harness
@@ -363,6 +380,12 @@ class _FakeCore:
     def tmp_dir(self) -> Path:
         return self._tmp
 
+    def sanitize(self, text):
+        # Delegate to the REAL Report.sanitize/_sanitize_prose (imported above,
+        # with a byte-identical fallback when docx is absent) so the positive
+        # tests below assert the exact production normalization, not a copy.
+        return _REAL_SANITIZE(text)
+
     def embed_figure(self, chart, caption, *, width_cm=None):
         png = chart.render()  # exercise the real render path
         _assert_png(png)
@@ -517,6 +540,125 @@ def test_numpy_x_equals_list_x():
 
 
 # ----------------------------------------------------------------------------
+# 6. SANITIZE — user-facing chart strings are normalized before they bake into
+#    the PNG (GAP 1). A dash-bearing label/xlabel/annotation must come out
+#    sanitized, and the resulting content key must differ from the raw variant.
+# ----------------------------------------------------------------------------
+def test_labels_sanitized():
+    api = _api()
+    fig = api.line([0, 1, 2], [1.0, 2.0, 3.0],
+                   labels=["ток — измеренный"], xlabel="t — время",
+                   ylabel="U — напряжение")
+    assert_eq(fig.labels[0], "ток, измеренный",
+              "legend label must be sanitized")
+    assert_eq(fig.xlabel, "t, время", "xlabel must be sanitized")
+    assert_eq(fig.ylabel, "U, напряжение", "ylabel must be sanitized")
+
+
+def test_hline_label_sanitized():
+    api = _api()
+    fig = api.line([0, 1, 2], [1.0, 2.0, 3.0],
+                   hlines=[{"value": 2.0, "label": "порог — верхний"}],
+                   vlines=[{"value": 1.0, "label": "старт – t0"}])
+    assert_eq(fig.hlines[0]["label"], "порог, верхний",
+              "hline label must be sanitized")
+    assert_eq(fig.vlines[0]["label"], "старт, t0",
+              "vline label must be sanitized")
+
+
+def test_annotation_text_sanitized():
+    api = _api()
+    fig = api.line([0, 1, 2], [1.0, 2.0, 3.0],
+                   annotations=[{"x": 1.0, "y": 2.0, "text": "пик — максимум"}])
+    assert_eq(fig.annotations[0]["text"], "пик, максимум",
+              "annotation text must be sanitized")
+
+
+def test_sanitized_label_changes_content_key():
+    api = _api()
+    clean = api.line([0, 1, 2], [1.0, 2.0, 3.0], labels=["ток, измеренный"])
+    dashed = api.line([0, 1, 2], [1.0, 2.0, 3.0], labels=["ток — измеренный"])
+    # The dashed label is canonicalized to the same string as the clean one,
+    # so the content key (and PNG bytes) must match — sanitize is the canon.
+    assert_eq(clean._content_key(), dashed._content_key(),
+              "dashed label must canonicalize to clean label's content key")
+
+
+def test_scalar_hlines_untouched():
+    api = _api()
+    # bare-number hlines have no label -> pass through unchanged, render fine
+    fig = api.line([0, 1, 2], [1.0, 2.0, 3.0], hlines=[2.0], vlines=[1.0])
+    _assert_png(fig.render())
+    assert_eq(fig.hlines[0]["value"], 2.0, "scalar hline value preserved")
+    assert_eq(fig.hlines[0]["label"], None, "scalar hline has no label")
+
+
+def test_no_prohibited_dash_in_any_chart_field():
+    # End-to-end guard: feed every user-facing string with an em/en-dash and
+    # assert NO prohibited [—–] survives in any built chart field that bakes
+    # into the PNG (labels, xlabel, ylabel, hline/vline label, annotation text).
+    import re
+    proh = re.compile(r"[—–]")
+    api = _api()
+    fig = api.line(
+        [0, 1, 2], [1.0, 2.0, 3.0],
+        labels=["ток — измеренный"], xlabel="t — время", ylabel="U — напряжение",
+        hlines=[{"value": 2.0, "label": "порог — верх"}],
+        vlines=[{"value": 1.0, "label": "старт – t0"}],
+        annotations=[{"x": 1.0, "y": 2.0, "text": "пик — максимум"}],
+    )
+    surfaces = [fig.xlabel, fig.ylabel,
+                *[l for l in fig.labels if l],
+                *[ln["label"] for ln in fig.hlines if ln.get("label")],
+                *[ln["label"] for ln in fig.vlines if ln.get("label")],
+                *[a["text"] for a in fig.annotations if a.get("text")]]
+    leaks = [s for s in surfaces if proh.search(s)]
+    assert not leaks, f"prohibited dash leaked into chart fields: {leaks!r}"
+
+
+# Per-type coverage: every chart method routes xlabel/ylabel (and labels where
+# present) through sanitize, not just `line`. Each entry: (name, factory) where
+# the factory calls the api method with caption=None so the chart is returned.
+def _sanitize_per_type_cases(api):
+    return [
+        ("scatter", lambda: api.scatter(
+            [0, 1, 2], [1.0, 2.0, 3.0], labels=["ряд — A"],
+            xlabel="x — ось", ylabel="y — ось")),
+        ("bar", lambda: api.bar(
+            ["A", "B"], [1.0, 2.0], xlabel="кат — ось", ylabel="N — счёт")),
+        ("grouped_bar", lambda: api.grouped_bar(
+            ["A", "B"], [[1, 2], [3, 4]], labels=["s1 — left", "s2 — right"],
+            xlabel="кат — ось", ylabel="N — счёт")),
+        ("stacked_bar", lambda: api.stacked_bar(
+            ["A", "B"], [[1, 2], [3, 4]], labels=["s1 — low", "s2 — high"],
+            xlabel="кат — ось", ylabel="N — счёт")),
+        ("area", lambda: api.area(
+            [0, 1, 2], [[1, 2, 3]], labels=["площадь — A"],
+            xlabel="t — ось", ylabel="U — ось")),
+        ("histogram", lambda: api.histogram(
+            [1, 2, 2, 3], xlabel="бин — ось", ylabel="частота — N")),
+    ]
+
+
+def make_sanitize_per_type_test(factory, has_labels):
+    def _t():
+        import re
+        proh = re.compile(r"[—–]")
+        chart = factory()
+        assert_eq(proh.search(chart.xlabel), None,
+                  f"xlabel not sanitized: {chart.xlabel!r}")
+        assert ", " in chart.xlabel, f"xlabel not normalized: {chart.xlabel!r}"
+        assert_eq(proh.search(chart.ylabel), None,
+                  f"ylabel not sanitized: {chart.ylabel!r}")
+        if has_labels:
+            for lab in chart.labels:
+                if lab:
+                    assert_eq(proh.search(lab), None,
+                              f"legend label not sanitized: {lab!r}")
+    return _t
+
+
+# ----------------------------------------------------------------------------
 # runner
 # ----------------------------------------------------------------------------
 def main() -> int:
@@ -552,6 +694,22 @@ def main() -> int:
     check("legend: labeled vline in legend handles", test_vline_label_in_legend)
     check("legend: unlabeled refline absent from legend",
           test_unlabeled_refline_not_in_legend)
+
+    # sanitize (GAP 1)
+    check("sanitize: legend/xlabel/ylabel normalized", test_labels_sanitized)
+    check("sanitize: hline/vline label normalized", test_hline_label_sanitized)
+    check("sanitize: annotation text normalized", test_annotation_text_sanitized)
+    check("sanitize: dashed label canonicalizes to clean content key",
+          test_sanitized_label_changes_content_key)
+    check("sanitize: scalar hlines pass through untouched",
+          test_scalar_hlines_untouched)
+    check("sanitize: no prohibited dash survives in any chart field",
+          test_no_prohibited_dash_in_any_chart_field)
+    _spt_api = _api()
+    for _name, _factory in _sanitize_per_type_cases(_spt_api):
+        _has_labels = _name in ("scatter", "grouped_bar", "stacked_bar", "area")
+        check(f"sanitize: {_name} xlabel/ylabel/labels normalized",
+              make_sanitize_per_type_test(_factory, _has_labels))
 
     total = _PASSED + len(_FAILURES)
     if _FAILURES:

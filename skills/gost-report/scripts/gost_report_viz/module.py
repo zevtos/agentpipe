@@ -29,6 +29,45 @@ class _VizAPI:
     def __init__(self, core):
         self._core = core
 
+    # --- санитайз пользовательских строк графика ---
+    # Текст графика (легенда, подписи осей, label опорных линий, текст
+    # аннотаций) запекается в PNG и обходит и _sanitize_prose, и docx-валидатор.
+    # Прогоняем его через self._core.sanitize ДО сборки/прокидывания графика,
+    # чтобы канонической (санированной) строкой определялся и контент-хэш PNG.
+    # НЕ трогаем: числовые данные, value_fmt (спека формата), caption (его
+    # санирует embed_figure), цвета/стили/маркеры/ha/va.
+    def _s(self, text):
+        # None/"" проходят без изменений; sanitize() — no-op на чистом тексте.
+        return self._core.sanitize(text) if text else text
+
+    def _s_labels(self, labels):
+        if labels is None:
+            return None
+        return [self._s(x) for x in labels]
+
+    def _s_lines(self, items):
+        # Санируем ТОЛЬКО видимое человеку поле `label` в dict'ах hline/vline,
+        # до того как norm_lines свернёт их в контент-ключ. Скаляры (голые
+        # числа) не имеют label → возвращаются нетронутыми.
+        if not items:
+            return items
+        out = []
+        for it in items:
+            if isinstance(it, dict) and it.get("label"):
+                it = {**it, "label": self._s(it["label"])}
+            out.append(it)
+        return out
+
+    def _s_annos(self, items):
+        if not items:
+            return items
+        out = []
+        for it in items:
+            if it.get("text") is not None:
+                it = {**it, "text": self._s(str(it["text"]))}
+            out.append(it)
+        return out
+
     # --- общий хвост: встроить или вернуть Figure ---
     def _finish(self, chart, caption: Optional[str], width_cm: Optional[float]):
         chart._out_dir = self._core.tmp_dir
@@ -53,11 +92,14 @@ class _VizAPI:
              hlines=None, vlines=None, ylim=None, xlim=None,
              yscale: str = "linear", annotations=None,
              colors=None, linestyles=None, markers=None):
+        hlines = self._s_lines(hlines)
+        vlines = self._s_lines(vlines)
+        annotations = self._s_annos(annotations)
         series = _as_series(y)
-        chart = LineChart(xlabel=xlabel, ylabel=ylabel)
+        chart = LineChart(xlabel=self._s(xlabel), ylabel=self._s(ylabel))
         chart.x = list(x)
         chart.series = series
-        chart.labels = _labels_for(labels, len(series))
+        chart.labels = _labels_for(self._s_labels(labels), len(series))
         chart.colors = list(colors) if colors is not None else None
         chart.linestyles = list(linestyles) if linestyles is not None else None
         chart.markers = (markers if isinstance(markers, bool)
@@ -72,11 +114,14 @@ class _VizAPI:
                 hlines=None, vlines=None, ylim=None, xlim=None,
                 yscale: str = "linear", annotations=None,
                 colors=None, markers=None):
+        hlines = self._s_lines(hlines)
+        vlines = self._s_lines(vlines)
+        annotations = self._s_annos(annotations)
         series = _as_series(y)
-        chart = ScatterChart(xlabel=xlabel, ylabel=ylabel)
+        chart = ScatterChart(xlabel=self._s(xlabel), ylabel=self._s(ylabel))
         chart.x = list(x)
         chart.series = series
-        chart.labels = _labels_for(labels, len(series))
+        chart.labels = _labels_for(self._s_labels(labels), len(series))
         chart.colors = list(colors) if colors is not None else None
         chart.markers = list(markers) if markers is not None else None
         self._thread_shared(chart, hlines=hlines, vlines=vlines, ylim=ylim,
@@ -90,7 +135,10 @@ class _VizAPI:
             colors=None, horizontal: bool = False,
             hlines=None, vlines=None, ylim=None, xlim=None,
             yscale: str = "linear", annotations=None):
-        chart = BarChart(xlabel=xlabel, ylabel=ylabel)
+        hlines = self._s_lines(hlines)
+        vlines = self._s_lines(vlines)
+        annotations = self._s_annos(annotations)
+        chart = BarChart(xlabel=self._s(xlabel), ylabel=self._s(ylabel))
         chart.categories = [str(c) for c in categories]
         chart.values = list(values)
         chart.value_labels = value_labels
@@ -109,11 +157,14 @@ class _VizAPI:
                     colors=None, horizontal: bool = False,
                     hlines=None, vlines=None, ylim=None, xlim=None,
                     yscale: str = "linear", annotations=None):
+        hlines = self._s_lines(hlines)
+        vlines = self._s_lines(vlines)
+        annotations = self._s_annos(annotations)
         series = _as_series(series)
-        chart = GroupedBarChart(xlabel=xlabel, ylabel=ylabel)
+        chart = GroupedBarChart(xlabel=self._s(xlabel), ylabel=self._s(ylabel))
         chart.categories = [str(c) for c in categories]
         chart.series = series
-        chart.labels = _labels_for(labels, len(series))
+        chart.labels = _labels_for(self._s_labels(labels), len(series))
         chart.value_labels = value_labels
         chart.value_fmt = value_fmt
         chart.colors = list(colors) if colors is not None else None
@@ -130,11 +181,14 @@ class _VizAPI:
                     colors=None,
                     hlines=None, vlines=None, ylim=None, xlim=None,
                     yscale: str = "linear", annotations=None):
+        hlines = self._s_lines(hlines)
+        vlines = self._s_lines(vlines)
+        annotations = self._s_annos(annotations)
         series = _as_series(series)
-        chart = StackedBarChart(xlabel=xlabel, ylabel=ylabel)
+        chart = StackedBarChart(xlabel=self._s(xlabel), ylabel=self._s(ylabel))
         chart.categories = [str(c) for c in categories]
         chart.series = series
-        chart.labels = _labels_for(labels, len(series))
+        chart.labels = _labels_for(self._s_labels(labels), len(series))
         chart.value_labels = value_labels
         chart.value_fmt = value_fmt
         chart.colors = list(colors) if colors is not None else None
@@ -147,11 +201,14 @@ class _VizAPI:
              width_cm: Optional[float] = None, colors=None,
              hlines=None, vlines=None, ylim=None, xlim=None,
              yscale: str = "linear", annotations=None):
+        hlines = self._s_lines(hlines)
+        vlines = self._s_lines(vlines)
+        annotations = self._s_annos(annotations)
         series = _as_series(y)
-        chart = AreaChart(xlabel=xlabel, ylabel=ylabel)
+        chart = AreaChart(xlabel=self._s(xlabel), ylabel=self._s(ylabel))
         chart.x = list(x)
         chart.series = series
-        chart.labels = _labels_for(labels, len(series))
+        chart.labels = _labels_for(self._s_labels(labels), len(series))
         chart.stacked = stacked
         chart.colors = list(colors) if colors is not None else None
         self._thread_shared(chart, hlines=hlines, vlines=vlines, ylim=ylim,
@@ -163,7 +220,10 @@ class _VizAPI:
                   width_cm: Optional[float] = None,
                   hlines=None, vlines=None, ylim=None, xlim=None,
                   yscale: str = "linear", annotations=None):
-        chart = Histogram(xlabel=xlabel, ylabel=ylabel)
+        hlines = self._s_lines(hlines)
+        vlines = self._s_lines(vlines)
+        annotations = self._s_annos(annotations)
+        chart = Histogram(xlabel=self._s(xlabel), ylabel=self._s(ylabel))
         chart.data = list(data)
         chart.bins = bins
         self._thread_shared(chart, hlines=hlines, vlines=vlines, ylim=ylim,

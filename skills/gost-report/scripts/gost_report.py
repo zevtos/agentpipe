@@ -1438,6 +1438,10 @@ class Report:
                 p.paragraph_format.line_spacing = LINE_SPACING_TABLE
                 p.paragraph_format.first_line_indent = Pt(0)
                 value = row_data[j] if j < len(row_data) else ""
+                # _append_inline санирует прозовые сегменты ячейки через
+                # _sanitize_prose, корректно ПРОПУСКАЯ $...$ (LaTeX/математику).
+                # Санировать здесь весь raw value нельзя — это искажало бы тире
+                # внутри инлайновой математики в ячейках таблицы.
                 self._append_inline(p, value, bold=(has_header and i == 0))
         return self._table_counter
 
