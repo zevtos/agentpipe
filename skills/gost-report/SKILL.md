@@ -146,7 +146,7 @@ r.save("draft.docx")
 **Палитра для build.py — что можно вставлять в отчёт:**
 - **Структура:** `r.toc()`, `r.h1/h2/h3`, `r.text`, `r.task`, `r.numbered/bullet`, `r.code`, `r.page_break`
 - **Формулы:** `r.formula(latex, where=)` (блочные, с номером) + инлайн `$...$` в любом тексте
-- **Графики** (тир `[viz]`): `r.plot.line/scatter/bar/grouped_bar/histogram` → ГОСТ-стиль, Ч/Б-safe
+- **Графики** (тир `[viz]`): `r.plot.line/scatter/bar/grouped_bar/stacked_bar/area/histogram` → ГОСТ-стиль, Ч/Б-safe
 - **Диаграммы** (Graphviz): `r.diagram(dot)` → структурные схемы, блок-схемы алгоритмов, деревья, ER
 - **Картинки/таблицы:** `r.figure(path|fig, caption)`, `r.table(rows, caption)`
 - **Литература/ссылки:** `r.bib.add/cite/references` (ГОСТ Р 7.0.5), `r.ref.on_figure/in_table/by_formula`
@@ -161,7 +161,7 @@ r.save("draft.docx")
 | `r.task(text)` | Жирный «Задание N. ...». |
 | `r.code(code)` | Блок моноширинного кода (Courier New 11). |
 | `r.figure(image, caption, width_cm=None) → int` | Картинка + «Рисунок N — caption». Возвращает номер (для `r.ref.on_figure`). `image` — путь ИЛИ Figure из модуля (`r.plot.*`, `r.diagram`). Ширина клампится по печатной области. Относительный путь → `<project>/docs/figures/`. |
-| `r.plot.line/scatter/bar/grouped_bar/histogram(...)` | График matplotlib в ГОСТ-стиле (opt-in тир `[viz]`). С `caption=...` → встраивает и возвращает номер рисунка; без — возвращает Figure для `r.figure(fig, caption)`. См. ниже. |
+| `r.plot.line/scatter/bar/grouped_bar/stacked_bar/area/histogram(...)` | График matplotlib в ГОСТ-стиле (opt-in тир `[viz]`). С `caption=...` → встраивает и возвращает номер рисунка; без — возвращает Figure для `r.figure(fig, caption)`. Общие kw: `hlines`/`vlines` (опорные линии), `ylim`/`xlim`, `yscale='log'`, `annotations`. Bar/grouped/stacked: `value_labels`, `value_fmt`, `colors`, `horizontal`. См. ниже. |
 | `r.diagram(dot, caption=None)` | Диаграмма Graphviz (DOT) → PNG. Нужен системный `dot` (brew/apt install graphviz). С `caption` → номер рисунка; без — Figure. |
 | `r.formula(latex, where=None) → int` | LaTeX-формула как нативное Word-уравнение, авто-номер «(N)» справа. Возвращает номер для ссылок. Реализация вынесена в модуль `gost_report_math` (доступно и как `r.math.formula`); поведение идентично. |
 | `r.table(rows, caption, has_header=True) → int` | Таблица + «Таблица N — caption». Возвращает номер (для `r.ref.in_table`). В заголовках столбцов указывай единицы измерения (см. ниже). |
@@ -209,6 +209,24 @@ r.plot.line([0,1,2,3], [[0,1,4,9],[0,2,4,6]], labels=["y=x²","y=2x"],
             xlabel="x", ylabel="y", caption="Сравнение зависимостей")
 r.plot.bar(["A","B","C"], [3,7,5], ylabel="Значение", caption="Распределение")
 r.plot.histogram(data, bins=20, xlabel="x", caption="Гистограмма выборки")
+
+# Опорные линии + подписи значений (1-2 строки на «публикационный» график):
+r.plot.grouped_bar(["Q1","Q2","Q3"], [[95,97,99],[88,91,94]], labels=["A","B"],
+    value_labels=True, value_fmt="{:.0f}", ylabel="%",
+    hlines=[{"value":98,"label":"SLA"}], caption="Доступность по кварталам")
+r.plot.line(t, v, xlabel="t, с", ylabel="U, В",
+    hlines=[{"value":3.3,"label":"номинал"}], vlines=[{"value":2.0,"label":"сбой"}],
+    caption="Переходный процесс")
+
+# Лог-ось, лимиты, аннотации, escape hatch цветов/линий (детерминизм сохранён):
+r.plot.line(x, y, yscale="log", ylim=(1,1e3), caption="Сходимость")
+r.plot.line(x, y, colors=["#111","#999"], linestyles=["-",":"], markers=False)
+r.plot.line(x, y, annotations=[{"x":10,"y":42,"text":"экстремум","arrow":True}])
+
+# Новые формы: горизонтальный/накопительный бар, область:
+r.plot.bar(["a","b","c"], [3,7,5], horizontal=True, value_labels=True)
+r.plot.stacked_bar(["A","B"], [[1,2],[3,4]], labels=["низ","верх"])
+r.plot.area(x, [y1, y2], labels=["band","mean"], stacked=False)
 
 # Вернуть Figure и встроить вручную (один call-site с готовым PNG):
 fig = r.plot.scatter(xs, ys, xlabel="x", ylabel="y")

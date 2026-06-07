@@ -1,6 +1,7 @@
 """gost_report_viz — matplotlib-графики по ГОСТ как подключаемый модуль.
 
-Namespace `r.plot`: line / scatter / bar / grouped_bar / histogram.
+Namespace `r.plot`: line / scatter / bar / grouped_bar / stacked_bar /
+area / histogram.
 Каждый хелпер либо встраивает рисунок (если передан caption) и возвращает его
 номер, либо возвращает Figure-объект для ручного r.figure(chart, caption).
 

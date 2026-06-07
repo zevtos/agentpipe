@@ -29,6 +29,12 @@ LINESTYLES = ["-", "--", "-.", ":"]
 MARKERS = ["o", "s", "^", "D", "v", "P", "X", "*"]
 HATCHES = ["", "//", "\\\\", "xx", "..", "++", "oo", "**"]
 
+# Опорные линии (hlines/vlines): нейтральный серый пунктир, читается как
+# вспомогательная линия и в Ч/Б. Дефолты переопределяются per-line dict'ом.
+REFLINE_COLOR = "#444444"
+REFLINE_LINESTYLE = "--"
+REFLINE_LINEWIDTH = 1.0
+
 _STYLE_APPLIED = False
 
 
