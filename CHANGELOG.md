@@ -7,6 +7,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Changed
+- **`gost-report`: default build-script location moved to tool-neutral `<project>/.gost-report/build.py`** (was `<project>/.claude/gost-report/build.py`). The `.claude/` prefix both branded every report as Claude-made and was wrong for Codex users (`install.sh --target codex`), who may have no `.claude/` directory. `gr` (no-arg) now walks up the tree preferring `.gost-report/build.py` at each level and **still resolves the legacy `.claude/gost-report/build.py`** with a one-line stderr deprecation notice — zero breakage for existing projects; the legacy fallback stays until the next major. Project-root marker set gains `.gost-report` ahead of `.claude` (`.git → Makefile → pyproject.toml → .gost-report → .claude`), kept in sync across `_paths.py` and `validate.py`. Docs/template/SKILL.md updated to the new path; `.claude` retained as a legacy marker.
+
 ### Fixed
 - **Codex silently skipped `doc2kb` and `ultrasearch`.** Their YAML `description:` contained `: ` (colon-space), which Codex's strict YAML loader (Ruby Psych) misparses as a mapping indicator and drops the skill — while Claude Code's lenient parser accepted it, so the breakage was Codex-only and invisible locally. Quoted both descriptions (single-quoted scalars, inner `'` doubled); valid YAML for both parsers and the parsed value is byte-identical. (cherry-picked from PR #7 by virxdxk.)
 

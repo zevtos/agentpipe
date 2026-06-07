@@ -25,10 +25,10 @@ description: Generate Russian academic reports (.docx) formatted to GOST 7.32 �
 
 ```bash
 gr твой_скрипт.py     # запустить конкретный билд
-gr                    # без аргумента: найти .claude/gost-report/build.py и запустить
+gr                    # без аргумента: найти .gost-report/build.py и запустить
 ```
 
-`gr` сам поднимает venv скилла (бутстрап + изоляция зависимостей) и выполняет билд. Без аргумента ищет дефолтный билд `.claude/gost-report/build.py` (обходя дерево вверх от текущей папки) — именно туда рекомендуется класть build-скрипт.
+`gr` сам поднимает venv скилла (бутстрап + изоляция зависимостей) и выполняет билд. Без аргумента ищет дефолтный билд `.gost-report/build.py` (обходя дерево вверх от текущей папки) — именно туда рекомендуется класть build-скрипт. Легаси-путь `.claude/gost-report/build.py` ещё резолвится (с предупреждением об устаревании) — перенеси скрипт в `.gost-report/`.
 
 Если `gr` не на PATH (установщик пропустил из-за конфликта имён, либо ручная установка) — fallback на длинную форму:
 
@@ -75,12 +75,12 @@ r = Report(TitleConfig(
 
 ## Project layout (рекомендуемая конвенция)
 
-Скрипт-генератор кладётся в `<project>/.claude/gost-report/build.py`. Артефакты идут в `<project>/docs/`:
+Скрипт-генератор кладётся в `<project>/.gost-report/build.py`. Артефакты идут в `<project>/docs/`:
 
 ```
 <project>/
-├── .claude/
-│   └── gost-report/build.py          # скрипт (инструмент, не артефакт)
+├── .gost-report/
+│   └── build.py                      # скрипт (инструмент, не артефакт)
 ├── docs/
 │   ├── figures/*.png                 # картинки
 │   ├── tables/*.tex                  # таблицы (если есть)
@@ -89,7 +89,7 @@ r = Report(TitleConfig(
 └── ...
 ```
 
-Project root определяется автоматически (обход вверх до первого маркера: `.git/` → `Makefile` → `pyproject.toml` → `.claude/`). Из этого выводятся:
+Project root определяется автоматически (обход вверх до первого маркера: `.git/` → `Makefile` → `pyproject.toml` → `.gost-report/` → `.claude/`). Из этого выводятся:
 - `r.figure("name.png", ...)` — резолвится от `<project>/docs/figures/`
 - `r.save()` без аргумента — кладёт в `<project>/docs/report.docx`
 - `paths()` — `(root, docs, figures, tables, out, tex)` если нужен явный доступ
