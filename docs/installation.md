@@ -77,6 +77,7 @@ The skill becomes globally available across all your conversations on that accou
 
 | Flag | Bash | PowerShell | Description |
 |------|------|------------|-------------|
+| Preset | `--preset <name>` | `-Preset <name>` | Apply a bundle: `minimum`, `default`, `senior`, `god`, `codex-full` (see [Install Presets](#install-presets)) |
 | Target | `--target <name>` | `-Target <name>` | Install for `claude` (default) or `codex` |
 | Dry run | `--dry` | `-Dry` | Show what would be copied without copying |
 | Diff | `--diff` | `-Diff` | Show differences between repo and installed files |
@@ -93,6 +94,10 @@ The skill becomes globally available across all your conversations on that accou
 | With notification sound | `--with-notification-sound` | `-WithNotificationSound` | Opt-in: Claude-only Notification sound hook (permission/wait-for-input) |
 | Clean sound hooks | `--clean-sound-hooks` | `-CleanSoundHooks` | Strip every sound hook (Stop+Notification) from the target hook config |
 | With thinking summaries | `--with-thinking-summaries` | `-WithThinkingSummaries` | Opt-in: `showThinkingSummaries=true` |
+| With env defaults | `--with-env-defaults` | `-WithEnvDefaults` | Merge maxed perf/privacy env into `settings.json` `"env"` (xhigh effort + disable adaptive thinking + non-essential traffic). No secrets. `--no-env-defaults` to skip |
+| With ccstatusline | `--with-ccstatusline` | `-WithCcstatusline` | Add a ccstatusline `statusLine` (install-if-missing; runs `npx -y ccstatusline@latest`). `--no-ccstatusline` to skip |
+| With caveman | `--with-caveman` | `-WithCaveman` | Install caveman (third-party `curl\|bash`, gated by interactive y/N, needs node≥18). `--no-caveman` to skip |
+| With MinerU | `--with-mineru` | `-WithMineru` | Pre-warm doc2kb's MinerU tier (~3 GB, gated by interactive y/N, skipped non-interactively). `--no-mineru` to skip |
 | Model profile | `--model-profile <preset>` | `-ModelProfile <preset>` | Per-agent model assignment: `opus`, `sonnet`, `mixed` (default) |
 | Help | `--help` | `-Help` | Show usage information |
 
@@ -105,6 +110,45 @@ bash install.sh --diff                      # diff Claude install (default targe
 bash install.sh --skills-only                # update only skills/* under ~/.claude/
 bash install.sh --target codex --skills-only # update only skills/* under ~/.codex/
 ```
+
+## Install Presets
+
+A preset is a named bundle of layers, so you pick one name instead of stacking a dozen flags. It's an escalating ladder — `minimum < default < senior < god` — plus a `codex-full` combo for the Codex target.
+
+A preset sets per-layer **defaults**. Any explicit flag overrides the preset for that one layer, and `--skills-only` still wins over everything. Precedence, low to high:
+
+```
+target rules  <  preset  <  explicit flags  <  --skills-only
+```
+
+So `--preset god --no-caveman --no-mineru` gives you the full god bundle minus the two gated external installs, and `--preset minimum --with-sound-hooks` is minimum plus a Stop beep. Pass `--preset <name> --dry` to print the exact resolved manifest (every layer on/off, the model profile, the sound choice, MinerU/caveman) before anything is written — this is also the quickest way to remember what the no-flag `default` actually does.
+
+| Layer | minimum | default | senior | god | codex-full |
+|---|:-:|:-:|:-:|:-:|:-:|
+| agents · commands · skills · launchers | ✅ | ✅ | ✅ | ✅ | skills + launchers |
+| config-defaults (security deny-list) | ✅ | ✅ | ✅ | ✅ | — |
+| gost-report persona config | ✅ | ✅ | ✅ | ✅ | ✅ |
+| attribution-fix · CLAUDE.md baseline · gost-validation hook | — | ✅ | ✅ | ✅ | — |
+| Stop sound hook | — | — | ✅ | ✅ | ✅ |
+| thinking summaries | — | — | ✅ | ✅ | — |
+| env defaults (`CLAUDE_CODE_EFFORT_LEVEL=xhigh` + disable adaptive thinking + non-essential traffic) | — | — | ✅ | ✅ | — |
+| ccstatusline (`statusLine`, install-if-missing) | — | — | — | ✅ | — |
+| caveman (third-party `curl\|bash`, gated) | — | — | — | ✅ | — |
+| MinerU pre-warm (~3 GB, gated) | — | — | — | ✅ | — |
+| model-profile | mixed | mixed | mixed | **opus** | mixed |
+
+- **`minimum`** — tools + safety only. Installs the agents/commands/skills, the launchers, the security deny-list, and the gost-report persona template, and nothing that mutates your global git config or installs a session hook. Good first install if you want to keep your environment untouched.
+- **`default`** — exactly the no-flag `bash install.sh` behavior, named so `--preset default --dry` documents the baseline.
+- **`senior`** — `default` plus Stop sound, thinking summaries, and a maxed non-secret env block merged into `settings.json` `"env"` (`CLAUDE_CODE_EFFORT_LEVEL=xhigh` raises per-turn reasoning **and** quota use). No API keys are ever shipped — ultrasearch's OpenAlex/Unpaywall/S2 keys stay manual (see [Optional: Shell Environment Variables](#optional-shell-environment-variables)).
+- **`god`** — everything, on the opus model profile (~5× the per-session cost). Notification sound is deliberately left **off** (it duplicates the Stop beep). The three external installs are **gated**:
+  - **caveman** and **MinerU** require an interactive `y/N` (default **N**) and are skipped in non-interactive shells (CI, piped installs) with a pointer to run them later. Heavy/third-party code is never auto-installed.
+  - **ccstatusline** only writes a `statusLine` block if you don't already have one (never clobbers) and renders via `npx` at runtime, so it's a no-op until Node.js is on PATH.
+  - caveman pipes `https://raw.githubusercontent.com/JuliusBrussee/caveman/main/install.sh` to bash (third-party, unpinned `main`, needs node≥18). The confirm prompt shows the URL.
+- **`codex-full`** — the Codex-native bundle: skills + gost-report persona config + Stop sound + launchers. It implies `--target codex` (unless you pass `--target` yourself). Use this instead of `--preset god --target codex`, which would silently drop every Claude-only layer; the installer warns and recommends `codex-full` if you do that.
+
+Per-layer override flags pair a `--with-*` and a `--no-*` for each gated/opt-in layer: `--with-mineru`/`--no-mineru`, `--with-env-defaults`/`--no-env-defaults`, `--with-ccstatusline`/`--no-ccstatusline`, `--with-caveman`/`--no-caveman`. All are mirrored as PowerShell switches.
+
+The preset is **not** persisted (re-running without `--preset` falls back to per-layer defaults). The one thing that does persist is the model profile: `god` sets it to opus, which is remembered the same way `--model-profile opus` is.
 
 ## CLI Launchers (`gr` / `us` / `dkb`)
 

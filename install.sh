@@ -18,8 +18,27 @@ set -euo pipefail
 #   bash install.sh --skills-only         # copy only skills/* (skip agents, commands, hooks)
 #   bash install.sh --with-sound-hooks         # opt-in: Stop sound hook only
 #   bash install.sh --with-notification-sound  # opt-in: Claude Notification sound hook only
+#   bash install.sh --preset god          # bundle: everything + extras + opus + MinerU (gated)
+#   bash install.sh --preset senior       # bundle: default + Stop sound + thinking + maxed env
+#   bash install.sh --preset minimum      # bundle: tools + safety only, no global git/hook mutation
+#   bash install.sh --with-mineru         # pre-warm doc2kb MinerU tier (gated, ~3 GB)
 #   bash install.sh --model-profile opus  # all agents on opus (default: mixed)
 #   bash install.sh --version             # show version
+#
+# Presets (an escalating ladder; set per-layer defaults; explicit flags override,
+# --skills-only wins). Resolved manifest is printed before install and under --dry:
+#   minimum    — tools + safety: agents/commands/skills + launchers + config-defaults
+#                (security deny-list) + gost-config. OFF: attribution-fix, claude-md,
+#                gost-validation (no global git / settings-hook mutation).
+#   default    — the no-flag baseline (every default-on layer), named so it prints.
+#   senior     — default + Stop sound + thinking summaries + maxed env defaults
+#                (CLAUDE_CODE_EFFORT_LEVEL=xhigh, disable adaptive thinking + non-
+#                essential traffic, merged into settings.json "env"). Still sonnet/mixed.
+#   god        — senior + ccstatusline + caveman + --model-profile opus + MinerU
+#                pre-warm. The three external installs (caveman, MinerU; ccstatusline
+#                via runtime npx) are gated — caveman/MinerU need an interactive y/N.
+#   codex-full — Codex-native bundle: skills + gost-config + Stop sound + launchers
+#                (implies --target codex unless --target is given).
 #
 # Targets:
 #   claude (default) — copies agents, commands, and skills to ~/.claude/
@@ -104,27 +123,60 @@ THINKING_SUMMARIES=0
 GOST_VALIDATION=1
 SKILLS_ONLY=0
 LAUNCHERS=1
+MINERU_PREWARM=0
+ENV_DEFAULTS=0         # merge maxed perf/privacy env into settings.json "env"
+CCSTATUSLINE=0         # add ccstatusline statusLine block to settings.json (install-if-missing)
+CAVEMAN=0             # install caveman (third-party curl|bash, gated like MinerU)
 MODEL_PROFILE_FLAG=""  # empty = no CLI flag; resolved later from settings.json or default
+PRESET=""              # empty = no preset; resolved after parse, before target resolution
+
+# "was-set" bits: 1 once the user passes the matching flag explicitly. The preset
+# resolver only fills layers the user did NOT set, so `--preset god --no-launchers`
+# = god minus launchers. Precedence (low→high): target rules < preset < explicit
+# flags < --skills-only.
+TARGET_SET=0
+ATTRIBUTION_FIX_SET=0
+CONFIG_DEFAULTS_SET=0
+CLAUDE_MD_SET=0
+SOUND_HOOKS_SET=0
+NOTIFICATION_SOUND_SET=0
+THINKING_SUMMARIES_SET=0
+GOST_VALIDATION_SET=0
+LAUNCHERS_SET=0
+MINERU_PREWARM_SET=0
+ENV_DEFAULTS_SET=0
+CCSTATUSLINE_SET=0
+CAVEMAN_SET=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --target=*)  TARGET="${1#--target=}"; shift ;;
-        --target)    TARGET="${2:-}"; shift 2 ;;
+        --target=*)  TARGET="${1#--target=}"; TARGET_SET=1; shift ;;
+        --target)    TARGET="${2:-}"; TARGET_SET=1; shift 2 ;;
         --dry)       ACTION="dry"; shift ;;
         --diff)      ACTION="diff"; shift ;;
         --pull)      ACTION="pull"; shift ;;
         --update)    ACTION="update"; shift ;;
         --uninstall) ACTION="uninstall"; shift ;;
         --clean-sound-hooks) ACTION="clean-sound-hooks"; shift ;;
-        --no-attribution-fix) ATTRIBUTION_FIX=0; shift ;;
-        --no-config-defaults) CONFIG_DEFAULTS=0; shift ;;
-        --no-claude-md) CLAUDE_MD=0; shift ;;
-        --no-gost-validation) GOST_VALIDATION=0; shift ;;
+        --preset=*)  PRESET="${1#--preset=}"; shift ;;
+        --preset)    PRESET="${2:-}"; shift 2 ;;
+        --no-attribution-fix) ATTRIBUTION_FIX=0; ATTRIBUTION_FIX_SET=1; shift ;;
+        --no-config-defaults) CONFIG_DEFAULTS=0; CONFIG_DEFAULTS_SET=1; shift ;;
+        --no-claude-md) CLAUDE_MD=0; CLAUDE_MD_SET=1; shift ;;
+        --no-gost-validation) GOST_VALIDATION=0; GOST_VALIDATION_SET=1; shift ;;
         --skills-only) SKILLS_ONLY=1; shift ;;
-        --no-launchers) LAUNCHERS=0; shift ;;
-        --with-sound-hooks) SOUND_HOOKS=1; shift ;;
-        --with-notification-sound) NOTIFICATION_SOUND=1; shift ;;
-        --with-thinking-summaries) THINKING_SUMMARIES=1; shift ;;
+        --no-launchers) LAUNCHERS=0; LAUNCHERS_SET=1; shift ;;
+        --with-sound-hooks) SOUND_HOOKS=1; SOUND_HOOKS_SET=1; shift ;;
+        --with-notification-sound) NOTIFICATION_SOUND=1; NOTIFICATION_SOUND_SET=1; shift ;;
+        --with-thinking-summaries) THINKING_SUMMARIES=1; THINKING_SUMMARIES_SET=1; shift ;;
+        --with-mineru) MINERU_PREWARM=1; MINERU_PREWARM_SET=1; shift ;;
+        --no-mineru)   MINERU_PREWARM=0; MINERU_PREWARM_SET=1; shift ;;
+        --with-env-defaults) ENV_DEFAULTS=1; ENV_DEFAULTS_SET=1; shift ;;
+        --no-env-defaults)   ENV_DEFAULTS=0; ENV_DEFAULTS_SET=1; shift ;;
+        --with-ccstatusline) CCSTATUSLINE=1; CCSTATUSLINE_SET=1; shift ;;
+        --no-ccstatusline)   CCSTATUSLINE=0; CCSTATUSLINE_SET=1; shift ;;
+        --with-caveman) CAVEMAN=1; CAVEMAN_SET=1; shift ;;
+        --no-caveman)   CAVEMAN=0; CAVEMAN_SET=1; shift ;;
         --model-profile=*) MODEL_PROFILE_FLAG="${1#--model-profile=}"; shift ;;
         --model-profile)   MODEL_PROFILE_FLAG="${2:-}"; shift 2 ;;
         --version|-v)
@@ -157,7 +209,45 @@ Actions:
                 with --with-sound-hooks / --with-notification-sound.
   --version     Show version
 
+Presets (--preset <name>): one bundle instead of stacking flags. A preset sets
+  per-layer DEFAULTS; any explicit flag overrides the preset for that layer, and
+  --skills-only still wins over everything. Precedence: target < preset < flags <
+  --skills-only. The resolved manifest is printed before install (and under --dry).
+  An escalating ladder: minimum < default < senior < god.
+  minimum     Tools + safety: agents/commands/skills + launchers + config-defaults
+              (security deny-list) + gost-config. OFF: attribution-fix, claude-md,
+              gost-validation — no global git / settings-hook mutation.
+  default     The no-flag baseline (every default-on layer), named so it prints.
+  senior      default + Stop sound + thinking summaries + maxed env defaults
+              (CLAUDE_CODE_EFFORT_LEVEL=xhigh + disable adaptive thinking + disable
+              non-essential traffic, merged into settings.json "env"). Stays mixed.
+  god         senior + ccstatusline + caveman + --model-profile opus + MinerU
+              pre-warm. caveman and MinerU are gated by an interactive y/N confirm.
+  codex-full  Codex-native bundle (implies --target codex unless --target is set):
+              skills + gost-config + Stop sound + launchers.
+
 Options:
+  --preset <name>           Apply a preset bundle (minimum|default|senior|god|codex-full).
+  --with-env-defaults       Merge maxed perf/privacy env vars into settings.json "env":
+                            CLAUDE_CODE_EFFORT_LEVEL=xhigh, DISABLE_ADAPTIVE_THINKING=1,
+                            DISABLE_NONESSENTIAL_TRAFFIC=1. No secrets. senior/god imply it.
+                            Note: xhigh raises per-turn reasoning (and quota use).
+  --no-env-defaults         Skip the env-defaults merge (overrides a preset).
+  --with-ccstatusline       Add a ccstatusline statusLine to settings.json (runs
+                            'npx -y ccstatusline@latest'; needs node/npx). Install-if-
+                            missing — never clobbers an existing statusLine. god implies it.
+  --no-ccstatusline         Skip ccstatusline (overrides a preset).
+  --with-caveman            Install caveman (THIRD-PARTY: pipes
+                            github.com/JuliusBrussee/caveman main install.sh to bash,
+                            needs node>=18). Remote code execution: requires an
+                            interactive y/N confirm (default N), skipped non-interactively.
+                            god implies it.
+  --no-caveman              Never install caveman (overrides a preset).
+  --with-mineru             Pre-warm doc2kb's MinerU tier (~3 GB+, several minutes,
+                            MLX/CUDA wheels). HEAVY deps are never auto-installed:
+                            requires an interactive y/N confirm (default N) and is
+                            skipped in non-interactive shells. god implies this.
+  --no-mineru               Never pre-warm MinerU (overrides a preset that requests it).
   --no-attribution-fix      Skip Co-Authored-By suppression (settings keys + git hook).
                             On by default for --target claude. Always off for codex.
   --no-config-defaults      Skip safe-defaults layer (\$schema URL, autoUpdatesChannel=stable,
@@ -208,6 +298,74 @@ EOF
     esac
 done
 
+# --- Preset resolution (before target/destination resolution) ---
+#
+# A preset fills per-layer DEFAULTS for every layer the user did NOT set
+# explicitly (tracked via the *_SET bits). Explicit flags therefore always win,
+# and `--skills-only` (applied later) wins over everything. codex-full also flips
+# the target to codex unless the user passed --target.
+
+# Set VAR=VALUE only if the matching *_SET bit is 0 (user left it at default).
+_preset_set() {  # $1=var  $2=value  $3=setbit-var
+    [[ "${!3}" -eq 1 ]] && return 0
+    printf -v "$1" '%s' "$2"
+}
+
+apply_preset() {
+    case "$1" in
+        minimum)
+            # Tools + safety only. config-defaults (deny-list) and gost-config stay
+            # on (gost-config has no toggle anyway). Strip the layers that mutate
+            # global git config or install session hooks.
+            _preset_set ATTRIBUTION_FIX 0 ATTRIBUTION_FIX_SET
+            _preset_set CLAUDE_MD 0 CLAUDE_MD_SET
+            _preset_set GOST_VALIDATION 0 GOST_VALIDATION_SET
+            ;;
+        default)
+            : # baseline — every layer already at its literal default
+            ;;
+        senior)
+            _preset_set SOUND_HOOKS 1 SOUND_HOOKS_SET
+            _preset_set THINKING_SUMMARIES 1 THINKING_SUMMARIES_SET
+            _preset_set ENV_DEFAULTS 1 ENV_DEFAULTS_SET
+            ;;
+        god)
+            # Everything senior gives, made explicit, plus the extras.
+            _preset_set ATTRIBUTION_FIX 1 ATTRIBUTION_FIX_SET
+            _preset_set CONFIG_DEFAULTS 1 CONFIG_DEFAULTS_SET
+            _preset_set CLAUDE_MD 1 CLAUDE_MD_SET
+            _preset_set GOST_VALIDATION 1 GOST_VALIDATION_SET
+            _preset_set LAUNCHERS 1 LAUNCHERS_SET
+            _preset_set SOUND_HOOKS 1 SOUND_HOOKS_SET
+            _preset_set THINKING_SUMMARIES 1 THINKING_SUMMARIES_SET
+            _preset_set ENV_DEFAULTS 1 ENV_DEFAULTS_SET
+            _preset_set CCSTATUSLINE 1 CCSTATUSLINE_SET
+            _preset_set CAVEMAN 1 CAVEMAN_SET
+            _preset_set MINERU_PREWARM 1 MINERU_PREWARM_SET
+            # Notification sound intentionally left off: it duplicates the Stop beep.
+            # Model profile → opus unless the user passed --model-profile.
+            # (if/fi, not `&&`: a false test as the branch's last command would
+            #  return non-zero and trip set -e.)
+            if [[ -z "$MODEL_PROFILE_FLAG" ]]; then MODEL_PROFILE_FLAG="opus"; fi
+            ;;
+        codex-full)
+            if [[ "$TARGET_SET" -eq 0 ]]; then TARGET="codex"; fi
+            _preset_set SOUND_HOOKS 1 SOUND_HOOKS_SET
+            _preset_set LAUNCHERS 1 LAUNCHERS_SET
+            ;;
+    esac
+}
+
+if [[ -n "$PRESET" ]]; then
+    case "$PRESET" in
+        minimum|default|senior|god|codex-full) apply_preset "$PRESET" ;;
+        *)
+            err "Unknown --preset: $PRESET (use: minimum, default, senior, god, codex-full)"
+            exit 1
+            ;;
+    esac
+fi
+
 # --- Resolve destinations from target ---
 
 case "$TARGET" in
@@ -248,6 +406,9 @@ if [[ "$SKILLS_ONLY" -eq 1 ]]; then
     NOTIFICATION_SOUND=0
     THINKING_SUMMARIES=0
     GOST_VALIDATION=0
+    ENV_DEFAULTS=0
+    CCSTATUSLINE=0
+    CAVEMAN=0
 fi
 
 skills_only_notice() {
@@ -521,6 +682,88 @@ JSON
 do_config_defaults_unfix() {
     config_defaults_active || return 0
     info "note: config-defaults keys left as-is — edit settings.json to revert"
+}
+
+# --- Env-defaults layer (claude target only, opt-in; senior/god) ---
+#
+# Merges a maxed perf/privacy block into settings.json "env". settings.json env
+# is injected into every session, so no shell-rc mutation. No secrets shipped
+# (ultrasearch API keys stay manual). xhigh raises per-turn reasoning AND quota.
+
+ENV_DEFAULTS_PAYLOAD='{"env": {"CLAUDE_CODE_EFFORT_LEVEL": "xhigh", "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}}'
+
+env_defaults_active() {
+    [[ "$TARGET" == "claude" && "$ENV_DEFAULTS" -eq 1 ]]
+}
+
+do_env_defaults() {
+    env_defaults_active || return 0
+    if ! command -v python3 >/dev/null 2>&1; then
+        warn "python3 not found — skipping env-defaults"
+        return 0
+    fi
+    local settings="$BASE/settings.json"
+    if python3 "$JSON_MERGE" "$settings" "$ENV_DEFAULTS_PAYLOAD" 2>/dev/null; then
+        log "settings/env merged (CLAUDE_CODE_EFFORT_LEVEL=xhigh + disable adaptive thinking + non-essential traffic)"
+    else
+        warn "settings.json env-defaults merge failed"
+    fi
+}
+
+do_env_defaults_dry() {
+    env_defaults_active || return 0
+    echo "Env defaults:"
+    info "  + settings/env += CLAUDE_CODE_EFFORT_LEVEL=xhigh, DISABLE_ADAPTIVE_THINKING=1, DISABLE_NONESSENTIAL_TRAFFIC=1"
+    echo ""
+}
+
+# --- ccstatusline layer (claude target only, opt-in; god) ---
+#
+# Adds a statusLine block to settings.json that runs ccstatusline via npx at
+# render time (no install-time download; needs node/npx on PATH to render).
+# Install-if-missing: never clobbers a statusLine the user already configured.
+
+CCSTATUSLINE_PAYLOAD='{"statusLine": {"type": "command", "command": "npx -y ccstatusline@latest", "padding": 0, "refreshInterval": 10}}'
+
+ccstatusline_active() {
+    [[ "$TARGET" == "claude" && "$CCSTATUSLINE" -eq 1 ]]
+}
+
+_has_statusline() {
+    local settings="$BASE/settings.json"
+    [[ -f "$settings" ]] || return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get("statusLine") else 1)' "$settings" 2>/dev/null
+}
+
+do_ccstatusline() {
+    ccstatusline_active || return 0
+    if ! command -v python3 >/dev/null 2>&1; then
+        warn "python3 not found — skipping ccstatusline"
+        return 0
+    fi
+    if _has_statusline; then
+        log "ccstatusline — statusLine already set, leaving as-is"
+        return 0
+    fi
+    local settings="$BASE/settings.json"
+    if python3 "$JSON_MERGE" "$settings" "$CCSTATUSLINE_PAYLOAD" 2>/dev/null; then
+        log "settings/statusLine = ccstatusline (npx -y ccstatusline@latest)"
+        command -v npx >/dev/null 2>&1 || warn "  note: 'npx' not on PATH — install Node.js for the statusline to render"
+    else
+        warn "settings.json ccstatusline merge failed"
+    fi
+}
+
+do_ccstatusline_dry() {
+    ccstatusline_active || return 0
+    echo "ccstatusline:"
+    if _has_statusline; then
+        echo "  = statusLine already set (will not overwrite)"
+    else
+        info "  + settings/statusLine = ccstatusline (npx -y ccstatusline@latest)"
+    fi
+    echo ""
 }
 
 # --- CLAUDE.md baseline (claude target only, install-if-missing) ---
@@ -1055,6 +1298,153 @@ do_launchers_dry() {
     echo ""
 }
 
+# --- MinerU pre-warm (opt-in, gated; both targets ship doc2kb) ---
+#
+# HARD RULE: heavy ML deps (MinerU's ~3 GB+ MLX/CUDA stack) are NEVER auto-
+# installed or silently routed. Pre-warm fires only when explicitly requested
+# (--with-mineru, or the god preset) AND an interactive y/N is answered yes.
+# Non-interactive shells (CI, piped installs) skip with a pointer. The
+# lightweight tier stays the only thing that installs without confirmation.
+
+mineru_prewarm_active() {
+    [[ "$MINERU_PREWARM" -eq 1 && -n "$SKILLS_DST" ]]
+}
+
+do_mineru_prewarm() {
+    mineru_prewarm_active || return 0
+    local ensure="$SKILLS_DST/doc2kb/scripts/ensure_env.py"
+    if [[ ! -f "$ensure" ]]; then
+        warn "MinerU pre-warm skipped — doc2kb skill not installed this run"
+        return 0
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        warn "MinerU pre-warm skipped — python3 not found"
+        return 0
+    fi
+    if [[ ! -t 0 ]]; then
+        warn "MinerU pre-warm skipped (non-interactive shell)."
+        info "  run later: python3 \"$ensure\" --tier mineru"
+        return 0
+    fi
+    echo ""
+    warn "MinerU tier is a HEAVY download: ~3 GB+, several minutes (MLX/CUDA wheels)."
+    printf "  Pre-warm doc2kb MinerU tier now? [y/N] "
+    local reply=""
+    read -r reply || true
+    case "$reply" in
+        y|Y|yes|YES)
+            info "Installing MinerU tier — this will take a while..."
+            if python3 "$ensure" --tier mineru; then
+                log "MinerU tier installed"
+            else
+                warn "MinerU tier install failed — run later: python3 \"$ensure\" --tier mineru"
+            fi
+            ;;
+        *)
+            info "MinerU pre-warm declined — lightweight tier remains the default."
+            info "  install later: python3 \"$ensure\" --tier mineru"
+            ;;
+    esac
+}
+
+do_mineru_prewarm_dry() {
+    mineru_prewarm_active || return 0
+    echo "MinerU pre-warm:"
+    info "  + would pre-warm doc2kb MinerU tier (~3 GB, several minutes) — interactive y/N confirm at real install"
+    echo ""
+}
+
+# --- caveman (third-party, opt-in, gated; god) ---
+#
+# Pipes a remote install script to bash (executes third-party code at install
+# time). Same hard gate as MinerU: explicit request (--with-caveman / god) AND an
+# interactive y/N (default N). Non-interactive shells skip. URL + source shown so
+# the confirm is honest; the script is unpinned (main branch).
+
+CAVEMAN_INSTALL_URL='https://raw.githubusercontent.com/JuliusBrussee/caveman/main/install.sh'
+
+caveman_active() {
+    [[ "$TARGET" == "claude" && "$CAVEMAN" -eq 1 ]]
+}
+
+do_caveman() {
+    caveman_active || return 0
+    if ! command -v curl >/dev/null 2>&1; then
+        warn "caveman skipped — curl not found"
+        return 0
+    fi
+    if [[ ! -t 0 ]]; then
+        warn "caveman install skipped (non-interactive shell)."
+        info "  run later: curl -fsSL $CAVEMAN_INSTALL_URL | bash"
+        return 0
+    fi
+    echo ""
+    warn "caveman is THIRD-PARTY. This pipes a remote script to bash (runs code):"
+    warn "  $CAVEMAN_INSTALL_URL"
+    warn "  Source: github.com/JuliusBrussee/caveman (main, unpinned). Needs node>=18."
+    printf "  Install caveman now? [y/N] "
+    local reply=""
+    read -r reply || true
+    case "$reply" in
+        y|Y|yes|YES)
+            info "Installing caveman..."
+            if curl -fsSL "$CAVEMAN_INSTALL_URL" | bash; then
+                log "caveman installed"
+            else
+                warn "caveman install failed — run later: curl -fsSL $CAVEMAN_INSTALL_URL | bash"
+            fi
+            ;;
+        *)
+            info "caveman declined."
+            info "  install later: curl -fsSL $CAVEMAN_INSTALL_URL | bash"
+            ;;
+    esac
+}
+
+do_caveman_dry() {
+    caveman_active || return 0
+    echo "caveman (third-party):"
+    info "  + would offer caveman via curl|bash ($CAVEMAN_INSTALL_URL) — interactive y/N at real install"
+    echo ""
+}
+
+# --- Preset manifest + codex-downgrade notice ---
+# Surfaces the resolved per-layer state so the bundle is obvious (cures the
+# "I don't remember what's default" problem). Each line reflects the *active*
+# state — i.e. it already accounts for target rules and --skills-only.
+
+_mstate() { if "$@" >/dev/null 2>&1; then printf 'on'; else printf 'off'; fi; }
+
+print_preset_manifest() {
+    [[ -n "$PRESET" ]] || return 0
+    echo ""
+    info "Preset '$PRESET' resolved → target=$TARGET, model-profile=$MODEL_PROFILE"
+    [[ "$SKILLS_ONLY" -eq 1 ]] && echo "    mode:                skills-only (agents/commands/settings layers off)"
+    echo "    attribution-fix:     $(_mstate attribution_active)"
+    echo "    config-defaults:     $(_mstate config_defaults_active)"
+    echo "    claude-md baseline:  $(_mstate claude_md_active)"
+    echo "    gost persona config: $(_mstate gost_config_active)"
+    echo "    gost-validation:     $(_mstate gost_validation_active)"
+    echo "    launchers gr/us/dkb: $(_mstate launchers_active)"
+    echo "    stop sound:          $(_mstate stop_sound_active)"
+    echo "    notification sound:  $(_mstate notification_sound_active)"
+    echo "    thinking summaries:  $(_mstate thinking_summaries_active)"
+    echo "    env defaults (xhigh):  $(_mstate env_defaults_active)"
+    echo "    ccstatusline:        $(_mstate ccstatusline_active)"
+    echo "    caveman (3rd-party): $(_mstate caveman_active)"
+    echo "    MinerU pre-warm:     $(_mstate mineru_prewarm_active)"
+}
+
+preset_codex_downgrade_notice() {
+    [[ "$TARGET" == "codex" ]] || return 0
+    case "$PRESET" in
+        minimum|default|senior|god)
+            warn "Preset '$PRESET' targets Claude Code; under --target codex only"
+            warn "  skills/gost-config/stop-sound/launchers apply. Use --preset codex-full."
+            ;;
+    esac
+}
+
 # --- Actions ---
 
 do_install() {
@@ -1063,6 +1453,8 @@ do_install() {
     else
         info "Installing agentpipe v$VERSION (target: $TARGET) to: $BASE"
     fi
+    print_preset_manifest
+    preset_codex_downgrade_notice
     local count=0
 
     if [[ -n "$AGENTS_DST" ]]; then
@@ -1133,6 +1525,16 @@ do_install() {
         do_config_defaults
     fi
 
+    if env_defaults_active; then
+        echo ""
+        do_env_defaults
+    fi
+
+    if ccstatusline_active; then
+        echo ""
+        do_ccstatusline
+    fi
+
     if claude_md_active; then
         echo ""
         do_claude_md
@@ -1174,6 +1576,9 @@ do_install() {
     fi
 
     do_launchers
+
+    do_mineru_prewarm
+    do_caveman
 
     echo ""
     info "Installed $count items to $BASE"
@@ -1266,6 +1671,7 @@ do_uninstall() {
 
 do_dry() {
     info "Dry run (target: $TARGET) — would install to: $BASE"
+    print_preset_manifest
     echo ""
 
     if [[ -n "$AGENTS_DST" ]]; then
@@ -1334,6 +1740,8 @@ do_dry() {
     do_launchers_dry
     do_attribution_dry
     do_config_defaults_dry
+    do_env_defaults_dry
+    do_ccstatusline_dry
     do_claude_md_dry
     do_gost_config_dry
     warn_sound_overlap
@@ -1341,8 +1749,11 @@ do_dry() {
     do_notification_sound_hook_dry
     do_thinking_summaries_dry
     do_gost_validation_dry
+    do_mineru_prewarm_dry
+    do_caveman_dry
     codex_skip_notice
     skills_only_notice
+    preset_codex_downgrade_notice
 }
 
 do_diff() {

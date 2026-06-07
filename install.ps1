@@ -24,12 +24,31 @@
     .\install.ps1 -WithSoundHooks          # opt-in: Stop sound hook only (one beep per turn)
     .\install.ps1 -WithNotificationSound   # opt-in: Claude Notification sound hook only
     .\install.ps1 -WithThinkingSummaries   # opt-in: showThinkingSummaries=true
+    .\install.ps1 -Preset god              # bundle: everything + extras + opus + MinerU (gated)
+    .\install.ps1 -Preset senior           # bundle: default + Stop sound + thinking + maxed env
+    .\install.ps1 -Preset minimum          # bundle: tools + safety only, no global git/hook mutation
+    .\install.ps1 -WithMineru              # pre-warm doc2kb MinerU tier (gated, ~3 GB)
+    .\install.ps1 -WithEnvDefaults         # merge maxed perf/privacy env into settings.json
+    .\install.ps1 -WithCcstatusline        # add ccstatusline statusLine (install-if-missing)
+    .\install.ps1 -WithCaveman             # install caveman (third-party curl|bash, gated)
     .\install.ps1 -ModelProfile opus       # all agents on opus (default: mixed)
     .\install.ps1 -ShowVersion             # show version
+
+    Presets (ladder: minimum < default < senior < god; plus codex-full). A preset
+    sets per-layer DEFAULTS; explicit flags override; -SkillsOnly wins. Resolved
+    manifest prints before install and under -Dry.
+      minimum     tools + safety only (no attribution-fix / claude-md / gost-validation)
+      default     the no-flag baseline
+      senior      default + Stop sound + thinking + maxed env defaults (xhigh)
+      god         senior + ccstatusline + caveman + opus + MinerU (caveman/MinerU gated)
+      codex-full  Codex-native bundle (implies -Target codex): skills + gost-config +
+                  Stop sound + launchers
 #>
 param(
     [ValidateSet("claude", "codex")]
     [string]$Target = "claude",
+    # Preset bundle — validated manually below (empty default = no preset).
+    [string]$Preset = "",
     [switch]$Dry,
     [switch]$Diff,
     [switch]$Pull,
@@ -45,6 +64,14 @@ param(
     [switch]$WithSoundHooks,
     [switch]$WithNotificationSound,
     [switch]$WithThinkingSummaries,
+    [switch]$WithMineru,
+    [switch]$NoMineru,
+    [switch]$WithEnvDefaults,
+    [switch]$NoEnvDefaults,
+    [switch]$WithCcstatusline,
+    [switch]$NoCcstatusline,
+    [switch]$WithCaveman,
+    [switch]$NoCaveman,
     # Validated manually below — ValidateSet rejects the empty default.
     [string]$ModelProfile = "",
     [switch]$ShowVersion,
@@ -80,6 +107,49 @@ $ConfigDenyList = @(
     "Bash(dd * of=/dev/*)"
 )
 
+# --- Preset resolution (before target/destination resolution) ---
+# A preset fills per-layer DEFAULTS for layers the user did NOT pass explicitly
+# ($PSBoundParameters tracks explicit flags). Explicit flags win; -SkillsOnly
+# (applied after the target switch) wins over everything. codex-full flips the
+# target to codex unless -Target was given. Mirror of install.sh apply_preset.
+$Bound = $PSBoundParameters
+
+if ($Preset -and $Preset -notin @("minimum", "default", "senior", "god", "codex-full")) {
+    Write-Host "  Unknown -Preset: $Preset (use: minimum, default, senior, god, codex-full)" -ForegroundColor Red
+    exit 1
+}
+
+switch ($Preset) {
+    "minimum" {
+        # Tools + safety only. config-defaults + gost-config stay on; strip the
+        # layers that mutate global git config or install session hooks.
+        if (-not $Bound.ContainsKey("NoAttributionFix")) { $NoAttributionFix = $true }
+        if (-not $Bound.ContainsKey("NoClaudeMd"))        { $NoClaudeMd = $true }
+        if (-not $Bound.ContainsKey("NoGostValidation"))  { $NoGostValidation = $true }
+    }
+    "default" { }
+    "senior" {
+        if (-not $Bound.ContainsKey("WithSoundHooks"))        { $WithSoundHooks = $true }
+        if (-not $Bound.ContainsKey("WithThinkingSummaries")) { $WithThinkingSummaries = $true }
+        if (-not ($Bound.ContainsKey("WithEnvDefaults") -or $Bound.ContainsKey("NoEnvDefaults"))) { $WithEnvDefaults = $true }
+    }
+    "god" {
+        if (-not $Bound.ContainsKey("WithSoundHooks"))        { $WithSoundHooks = $true }
+        if (-not $Bound.ContainsKey("WithThinkingSummaries")) { $WithThinkingSummaries = $true }
+        if (-not ($Bound.ContainsKey("WithEnvDefaults") -or $Bound.ContainsKey("NoEnvDefaults")))   { $WithEnvDefaults = $true }
+        if (-not ($Bound.ContainsKey("WithCcstatusline") -or $Bound.ContainsKey("NoCcstatusline"))) { $WithCcstatusline = $true }
+        if (-not ($Bound.ContainsKey("WithCaveman") -or $Bound.ContainsKey("NoCaveman")))           { $WithCaveman = $true }
+        if (-not ($Bound.ContainsKey("WithMineru") -or $Bound.ContainsKey("NoMineru")))             { $WithMineru = $true }
+        # Notification sound left off (duplicates Stop). Model → opus unless set.
+        if (-not $ModelProfile) { $ModelProfile = "opus" }
+    }
+    "codex-full" {
+        if (-not $Bound.ContainsKey("Target"))         { $Target = "codex" }
+        if (-not $Bound.ContainsKey("WithSoundHooks")) { $WithSoundHooks = $true }
+        # launchers are on by default already
+    }
+}
+
 # Resolve destinations from target. Codex skills go to ~/.codex/skills/.
 $LegacyCodexSkillsDst = $null
 switch ($Target) {
@@ -113,6 +183,9 @@ if ($SkillsOnly) {
     $WithSoundHooks = $false
     $WithNotificationSound = $false
     $WithThinkingSummaries = $false
+    $WithEnvDefaults = $false
+    $WithCcstatusline = $false
+    $WithCaveman = $false
 }
 
 function Write-Ok($msg)   { Write-Host "  $msg" -ForegroundColor Green }
@@ -217,6 +290,23 @@ function Test-ThinkingSummariesActive {
 
 function Test-GostValidationActive {
     return ($Target -eq "claude" -and -not $NoGostValidation)
+}
+
+function Test-EnvDefaultsActive {
+    return ($Target -eq "claude" -and $WithEnvDefaults -and -not $NoEnvDefaults)
+}
+
+function Test-CcstatuslineActive {
+    return ($Target -eq "claude" -and $WithCcstatusline -and -not $NoCcstatusline)
+}
+
+function Test-CavemanActive {
+    return ($Target -eq "claude" -and $WithCaveman -and -not $NoCaveman)
+}
+
+function Test-MineruPrewarmActive {
+    # No target gate: doc2kb ships to both claude and codex.
+    return ($WithMineru -and -not $NoMineru -and $SkillsDst)
 }
 
 function Files-Equal($a, $b) {
@@ -828,6 +918,183 @@ function Do-GostValidationDry {
     Write-Host ""
 }
 
+# --- Env-defaults layer (claude target only, opt-in; senior/god) ---
+# Merges a maxed perf/privacy block into settings.json "env". No secrets shipped.
+# xhigh raises per-turn reasoning AND quota. Mirror of install.sh do_env_defaults.
+
+function Do-EnvDefaults {
+    if (-not (Test-EnvDefaultsActive)) { return }
+    $r = Read-SettingsJson
+    if (-not $r.Ok) { Write-Warn "settings.json has invalid JSON - skipping env-defaults"; return }
+    $base = $r.Hash
+    $envMap = @{}
+    if ($base.ContainsKey("env") -and $base["env"]) {
+        $base["env"].PSObject.Properties | ForEach-Object { $envMap[$_.Name] = $_.Value }
+    }
+    $envMap["CLAUDE_CODE_EFFORT_LEVEL"] = "xhigh"
+    $envMap["CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING"] = "1"
+    $envMap["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+    $base["env"] = $envMap
+    if (Write-SettingsJson $base) {
+        Write-Ok "settings/env merged (CLAUDE_CODE_EFFORT_LEVEL=xhigh + disable adaptive thinking + non-essential traffic)"
+    }
+}
+
+function Do-EnvDefaultsDry {
+    if (-not (Test-EnvDefaultsActive)) { return }
+    Write-Host "Env defaults:"
+    Write-Info "+ settings/env += CLAUDE_CODE_EFFORT_LEVEL=xhigh, DISABLE_ADAPTIVE_THINKING=1, DISABLE_NONESSENTIAL_TRAFFIC=1"
+    Write-Host ""
+}
+
+# --- ccstatusline layer (claude target only, opt-in; god) ---
+# Adds a statusLine block (runs ccstatusline via npx at render time; needs
+# node/npx). Install-if-missing — never clobbers an existing statusLine.
+
+function Test-HasStatusLine {
+    $r = Read-SettingsJson
+    if (-not $r.Ok) { return $false }
+    return ($r.Hash.ContainsKey("statusLine") -and $r.Hash["statusLine"])
+}
+
+function Do-Ccstatusline {
+    if (-not (Test-CcstatuslineActive)) { return }
+    if (Test-HasStatusLine) { Write-Ok "ccstatusline - statusLine already set, leaving as-is"; return }
+    $r = Read-SettingsJson
+    if (-not $r.Ok) { Write-Warn "settings.json has invalid JSON - skipping ccstatusline"; return }
+    $base = $r.Hash
+    $base["statusLine"] = @{ type = "command"; command = "npx -y ccstatusline@latest"; padding = 0; refreshInterval = 10 }
+    if (Write-SettingsJson $base) {
+        Write-Ok "settings/statusLine = ccstatusline (npx -y ccstatusline@latest)"
+        if (-not (Get-Command npx -ErrorAction SilentlyContinue)) {
+            Write-Warn "  note: 'npx' not on PATH - install Node.js for the statusline to render"
+        }
+    }
+}
+
+function Do-CcstatuslineDry {
+    if (-not (Test-CcstatuslineActive)) { return }
+    Write-Host "ccstatusline:"
+    if (Test-HasStatusLine) {
+        Write-Host "  = statusLine already set (will not overwrite)"
+    } else {
+        Write-Info "+ settings/statusLine = ccstatusline (npx -y ccstatusline@latest)"
+    }
+    Write-Host ""
+}
+
+# --- MinerU pre-warm (opt-in, gated; both targets ship doc2kb) ---
+# HARD RULE: heavy ML deps never auto-installed. Requires explicit request AND an
+# interactive y/N (default N). Non-interactive shells skip. Mirror of install.sh.
+
+function Do-MineruPrewarm {
+    if (-not (Test-MineruPrewarmActive)) { return }
+    $ensure = Join-Path $SkillsDst "doc2kb\scripts\ensure_env.py"
+    if (-not (Test-Path $ensure)) { Write-Warn "MinerU pre-warm skipped - doc2kb skill not installed this run"; return }
+    $py = Get-Command python3 -ErrorAction SilentlyContinue
+    if (-not $py) { $py = Get-Command python -ErrorAction SilentlyContinue }
+    if (-not $py) { Write-Warn "MinerU pre-warm skipped - python not found"; return }
+    if ([Console]::IsInputRedirected) {
+        Write-Warn "MinerU pre-warm skipped (non-interactive shell)."
+        Write-Info "run later: python `"$ensure`" --tier mineru"
+        return
+    }
+    Write-Host ""
+    Write-Warn "MinerU tier is a HEAVY download: ~3 GB+, several minutes (MLX/CUDA wheels)."
+    $reply = Read-Host "  Pre-warm doc2kb MinerU tier now? [y/N]"
+    if ($reply -match '^(y|yes)$') {
+        Write-Info "Installing MinerU tier - this will take a while..."
+        & $py.Source $ensure "--tier" "mineru"
+        if ($LASTEXITCODE -eq 0) { Write-Ok "MinerU tier installed" }
+        else { Write-Warn "MinerU tier install failed - run later: python `"$ensure`" --tier mineru" }
+    } else {
+        Write-Info "MinerU pre-warm declined - lightweight tier remains the default."
+    }
+}
+
+function Do-MineruPrewarmDry {
+    if (-not (Test-MineruPrewarmActive)) { return }
+    Write-Host "MinerU pre-warm:"
+    Write-Info "+ would pre-warm doc2kb MinerU tier (~3 GB, several minutes) - interactive y/N confirm at real install"
+    Write-Host ""
+}
+
+# --- caveman (third-party, opt-in, gated; god) ---
+# Pipes a remote install script to bash. Same hard gate as MinerU. Needs bash
+# (Git Bash / WSL) on Windows. Mirror of install.sh do_caveman.
+
+$Script:CavemanInstallUrl = 'https://raw.githubusercontent.com/JuliusBrussee/caveman/main/install.sh'
+
+function Do-Caveman {
+    if (-not (Test-CavemanActive)) { return }
+    # Pre-flight: caveman's installer is a `curl | bash` pipe, so bash must exist
+    # (Git Bash / WSL on Windows). Check BEFORE prompting — never make the user
+    # confirm an RCE that then cannot run. Mirrors install.sh's pre-prompt curl check.
+    $bash = Get-Command bash -ErrorAction SilentlyContinue
+    if (-not $bash) {
+        Write-Warn "caveman skipped - bash not found (needs Git Bash / WSL)."
+        Write-Info "run later (Git Bash/WSL): curl -fsSL $($Script:CavemanInstallUrl) | bash"
+        return
+    }
+    if ([Console]::IsInputRedirected) {
+        Write-Warn "caveman install skipped (non-interactive shell)."
+        Write-Info "run later (Git Bash/WSL): curl -fsSL $($Script:CavemanInstallUrl) | bash"
+        return
+    }
+    Write-Host ""
+    Write-Warn "caveman is THIRD-PARTY. This pipes a remote script to bash (runs code):"
+    Write-Warn "  $($Script:CavemanInstallUrl)"
+    Write-Warn "  Source: github.com/JuliusBrussee/caveman (main, unpinned). Needs node>=18."
+    $reply = Read-Host "  Install caveman now? [y/N]"
+    if ($reply -match '^(y|yes)$') {
+        Write-Info "Installing caveman..."
+        & $bash.Source -c "curl -fsSL '$($Script:CavemanInstallUrl)' | bash"
+        if ($LASTEXITCODE -eq 0) { Write-Ok "caveman installed" } else { Write-Warn "caveman install failed" }
+    } else {
+        Write-Info "caveman declined."
+        Write-Info "  install later: curl -fsSL $($Script:CavemanInstallUrl) | bash"
+    }
+}
+
+function Do-CavemanDry {
+    if (-not (Test-CavemanActive)) { return }
+    Write-Host "caveman (third-party):"
+    Write-Info "+ would offer caveman via curl|bash ($($Script:CavemanInstallUrl)) - interactive y/N at real install"
+    Write-Host ""
+}
+
+# --- Preset manifest + codex-downgrade notice ---
+
+function Get-MState([scriptblock]$pred) { if (& $pred) { return "on" } else { return "off" } }
+
+function Show-PresetManifest {
+    if (-not $Preset) { return }
+    Write-Host ""
+    Write-Info "Preset '$Preset' resolved -> target=$Target, model-profile=$ModelProfile"
+    if ($SkillsOnly) { Write-Host "    mode:                skills-only (agents/commands/settings layers off)" }
+    Write-Host "    attribution-fix:     $(Get-MState { Test-AttributionActive })"
+    Write-Host "    config-defaults:     $(Get-MState { Test-ConfigDefaultsActive })"
+    Write-Host "    claude-md baseline:  $(Get-MState { Test-ClaudeMdActive })"
+    Write-Host "    gost persona config: $(Get-MState { Test-GostConfigActive })"
+    Write-Host "    gost-validation:     $(Get-MState { Test-GostValidationActive })"
+    Write-Host "    launchers gr/us/dkb: $(Get-MState { Test-LaunchersActive })"
+    Write-Host "    stop sound:          $(Get-MState { Test-StopSoundActive })"
+    Write-Host "    notification sound:  $(Get-MState { Test-NotificationSoundActive })"
+    Write-Host "    thinking summaries:  $(Get-MState { Test-ThinkingSummariesActive })"
+    Write-Host "    env defaults (xhigh): $(Get-MState { Test-EnvDefaultsActive })"
+    Write-Host "    ccstatusline:        $(Get-MState { Test-CcstatuslineActive })"
+    Write-Host "    caveman (3rd-party): $(Get-MState { Test-CavemanActive })"
+    Write-Host "    MinerU pre-warm:     $(Get-MState { Test-MineruPrewarmActive })"
+}
+
+function Show-PresetCodexDowngradeNotice {
+    if ($Target -ne "codex") { return }
+    if ($Preset -in @("minimum", "default", "senior", "god")) {
+        Write-Warn "Preset '$Preset' targets Claude Code; under -Target codex only"
+        Write-Warn "  skills/gost-config/stop-sound/launchers apply. Use -Preset codex-full."
+    }
+}
+
 # --- Model-profile layer (claude target only) ---
 # See install.sh's "Model-profile layer" comment for the design rationale.
 # Three presets: opus, sonnet, mixed (default = canonical opus-for-architect+
@@ -1005,6 +1272,8 @@ function Do-Install {
     } else {
         Write-Info "Installing agentpipe v$($Script:Version) (target: $Target) to: $Base"
     }
+    Show-PresetManifest
+    Show-PresetCodexDowngradeNotice
     $count = 0
 
     if ($AgentsDst) {
@@ -1070,6 +1339,16 @@ function Do-Install {
         Do-ConfigDefaults
     }
 
+    if (Test-EnvDefaultsActive) {
+        Write-Host ""
+        Do-EnvDefaults
+    }
+
+    if (Test-CcstatuslineActive) {
+        Write-Host ""
+        Do-Ccstatusline
+    }
+
     if (Test-ClaudeMdActive) {
         Write-Host ""
         Do-ClaudeMd
@@ -1110,6 +1389,9 @@ function Do-Install {
     }
 
     Do-Launchers
+
+    Do-MineruPrewarm
+    Do-Caveman
 
     Write-Host ""
     Write-Info "Installed $count items to $Base"
@@ -1196,6 +1478,7 @@ function Do-Uninstall {
 
 function Do-Dry {
     Write-Info "Dry run (target: $Target) - would install to: $Base"
+    Show-PresetManifest
     Write-Host ""
 
     if ($AgentsDst) {
@@ -1269,6 +1552,8 @@ function Do-Dry {
     Do-LaunchersDry
     Do-AttributionDry
     Do-ConfigDefaultsDry
+    Do-EnvDefaultsDry
+    Do-CcstatuslineDry
     Do-ClaudeMdDry
     Do-GostConfigDry
     Warn-SoundOverlap
@@ -1276,8 +1561,11 @@ function Do-Dry {
     Do-NotificationSoundHookDry
     Do-ThinkingSummariesDry
     Do-GostValidationDry
+    Do-MineruPrewarmDry
+    Do-CavemanDry
     Show-CodexSkipNotice
     Show-SkillsOnlyNotice
+    Show-PresetCodexDowngradeNotice
 }
 
 function Do-Diff {

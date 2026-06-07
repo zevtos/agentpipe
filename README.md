@@ -23,8 +23,12 @@
 ```bash
 git clone https://github.com/zevtos/agentpipe.git && cd agentpipe
 bash install.sh                 # Claude Code (default)
+bash install.sh --preset god    # everything, maxed (opus + sound + env + extras, gated heavy deps)
+bash install.sh --preset minimum # bare: tools + safety, no global git/hook mutation
 bash install.sh --target codex  # Codex CLI (skills only)
 ```
+
+Too many flags to remember? Use a **preset** — one name instead of stacking toggles. The ladder is `minimum < default < senior < god` (plus `codex-full`). Run `bash install.sh --preset <name> --dry` to see the exact resolved manifest before anything is written. See [Install presets](#install-presets).
 
 Then in Claude Code:
 
@@ -156,6 +160,32 @@ Each gate must pass before proceeding. Agents have bounded tool access (reviewer
 
 ## Customization
 
+### Install presets
+
+`--preset <name>` (`-Preset` on PowerShell) applies a bundle of layers instead of stacking individual flags. A preset sets per-layer **defaults**; any explicit flag overrides the preset for that layer, and `--skills-only` still wins over everything. Precedence: `target < preset < explicit flags < --skills-only`. The resolved manifest prints before install and under `--dry`.
+
+| Layer | minimum | default | senior | god | codex-full |
+|---|:-:|:-:|:-:|:-:|:-:|
+| agents · commands · skills · launchers | ✅ | ✅ | ✅ | ✅ | skills + launchers |
+| config-defaults (security deny-list) | ✅ | ✅ | ✅ | ✅ | — |
+| gost-report persona config | ✅ | ✅ | ✅ | ✅ | ✅ |
+| attribution-fix · CLAUDE.md baseline · gost-validation hook | — | ✅ | ✅ | ✅ | — |
+| Stop sound hook | — | — | ✅ | ✅ | ✅ |
+| thinking summaries | — | — | ✅ | ✅ | — |
+| env defaults (`CLAUDE_CODE_EFFORT_LEVEL=xhigh` + disable adaptive thinking + non-essential traffic) | — | — | ✅ | ✅ | — |
+| ccstatusline (`statusLine`, install-if-missing) | — | — | — | ✅ | — |
+| caveman (third-party `curl\|bash`, gated) | — | — | — | ✅ | — |
+| MinerU pre-warm (~3 GB, gated) | — | — | — | ✅ | — |
+| model-profile | mixed | mixed | mixed | **opus** | mixed |
+
+- **`minimum`** — tools + safety only; never mutates global git config or installs session hooks.
+- **`default`** — the no-flag baseline, named so its manifest is visible.
+- **`senior`** — `default` plus the power-user comforts: Stop sound, thinking summaries, and maxed perf/privacy env vars merged into `settings.json` `"env"` (no secrets shipped).
+- **`god`** — everything, on opus. The three external installs are **gated**: caveman and MinerU need an interactive `y/N` (default N) and are skipped in non-interactive shells; ccstatusline only renders if `npx` is on PATH and never clobbers an existing `statusLine`.
+- **`codex-full`** — the Codex-native bundle (implies `--target codex`): skills + gost-config + Stop sound + launchers. Use this instead of `--preset god --target codex`, which would silently drop every Claude-only layer.
+
+Per-layer override flags: `--with-mineru` / `--no-mineru`, `--with-env-defaults` / `--no-env-defaults`, `--with-ccstatusline` / `--no-ccstatusline`, `--with-caveman` / `--no-caveman` (all mirrored as PowerShell switches). Example: `bash install.sh --preset god --no-caveman --no-mineru`.
+
 - **Project-level overrides**:
   - Claude: `.claude/agents/`, `.claude/commands/`, `.claude/skills/` in your project
   - Codex: `.codex/skills/` in your project (or `.codex/agents/` for TOML agents)
@@ -168,7 +198,7 @@ Each gate must pass before proceeding. Agents have bounded tool access (reviewer
 - **Opt-in personal preferences**: `--with-sound-hooks` (Stop sound hook only — one beep when Claude or Codex finishes a turn, OS auto-detected), `--with-notification-sound` (Claude-only Notification sound hook — beep on permission prompts and "waiting for input"), `--with-thinking-summaries` (`showThinkingSummaries: true`). Passing both sound flags is allowed but warns on Claude: Notification often fires right after Stop, producing two beeps in sequence. Use `--clean-sound-hooks` (`-CleanSoundHooks` on PowerShell) to strip every sound hook from `settings.json`/`hooks.json` without touching unrelated hooks (gost-validation, user customs).
 - **Skills-only updates**: `--skills-only` (`-SkillsOnly` on PowerShell) copies only `skills/*` and skips agents, commands, and every `settings.json`/hook layer. Works with both targets and composes with `--dry` / `--diff` / `--pull` / `--uninstall`. Handy for fast iteration on a single skill: `bash install.sh --skills-only` re-syncs `~/.claude/skills/` without re-running the full settings merge.
 - **Per-agent model profile**: `--model-profile opus` puts every agent on opus, `--model-profile sonnet` downgrades all to sonnet, default is `mixed` (canonical opus-for-architect+security, sonnet-for-the-rest). Choice is persisted to `settings.json` so `update.sh` re-uses it. Source files are never modified — rewrite happens at copy time. See [docs/installation.md](docs/installation.md#per-agent-model-profile---model-profile).
-- **Optional shell env vars**: `scripts/agentpipe.env.example` documents reasoning-effort, adaptive-thinking, and telemetry-bundle vars. Not auto-installed — copy what you want into your shell rc. See [docs/installation.md](docs/installation.md#optional-shell-environment-variables).
+- **Optional shell env vars**: `scripts/agentpipe.env.example` documents reasoning-effort, adaptive-thinking, and telemetry-bundle vars. Not auto-installed — copy what you want into your shell rc. The `senior`/`god` presets (or `--with-env-defaults`) merge a maxed non-secret subset (`CLAUDE_CODE_EFFORT_LEVEL=xhigh` + disable adaptive thinking + non-essential traffic) into `settings.json` `"env"` instead of your rc. See [docs/installation.md](docs/installation.md#optional-shell-environment-variables).
 - **Update entry point**: `bash update.sh` (or `.\update.ps1`) — pulls latest and re-installs. Same thing as `install.sh --update`, just a clearer entry point.
 
 ## Building Release Archives

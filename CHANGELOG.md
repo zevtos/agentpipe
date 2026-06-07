@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Installer presets — `--preset <name>` (`-Preset` on PowerShell): one named bundle instead of stacking a dozen toggles.** An escalating ladder `minimum < default < senior < god`, plus a `codex-full` combo for the Codex target. A preset sets per-layer **defaults**; any explicit flag overrides the preset for that layer, and `--skills-only` still wins over everything — precedence is `target < preset < explicit flags < --skills-only`. Resolution is a two-pass model: parse records which layer flags the user passed explicitly (a `*_SET` bit per flag in bash; `$PSBoundParameters` in PowerShell), then the preset fills only the layers the user left at default. A no-`--preset` install is **byte-for-byte unchanged** (the resolver is skipped entirely). The resolved manifest (every layer on/off + model profile + sound + MinerU/caveman) prints before the first write and under `--dry`, which doubles as the cure for "I don't remember what the default install does" — `--preset default --dry`.
+  - **`minimum`** — tools + safety only: agents/commands/skills + launchers + config-defaults (security deny-list) + gost-report persona config. OFF: attribution-fix, CLAUDE.md baseline, gost-validation hook — nothing that mutates global git config or installs a session hook.
+  - **`default`** — the no-flag baseline, named so its manifest is visible.
+  - **`senior`** — `default` + Stop sound + thinking summaries + maxed non-secret env defaults merged into `settings.json` `"env"` (`CLAUDE_CODE_EFFORT_LEVEL=xhigh`, `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`).
+  - **`god`** — everything `senior` gives plus ccstatusline + caveman + MinerU pre-warm, on `--model-profile opus`. Notification sound is deliberately left **off** (it duplicates the Stop beep — the one toggle dedup the maintainer called out).
+  - **`codex-full`** — Codex-native bundle (implies `--target codex` unless `--target` is given): skills + gost-config + Stop sound + launchers. A Claude-oriented preset under `--target codex` now warns and recommends `codex-full` instead of silently dropping every Claude-only layer.
+- **New opt-in layers, each with a `--with-*` / `--no-*` flag pair (mirrored as PowerShell switches):**
+  - `--with-env-defaults` — merge the maxed perf/privacy env block into `settings.json` `"env"` (preserves existing env keys; no secrets shipped — ultrasearch's OpenAlex/Unpaywall/S2 keys stay manual). `xhigh` raises per-turn reasoning **and** quota use.
+  - `--with-ccstatusline` — add a [ccstatusline](https://github.com/sirmalloc/ccstatusline) `statusLine` block (`npx -y ccstatusline@latest`), **install-if-missing** so it never clobbers an existing `statusLine`; renders only once `npx` is on PATH.
+  - `--with-caveman` — install [caveman](https://github.com/JuliusBrussee/caveman) via its third-party `curl|bash` installer. **Gated:** interactive `y/N` (default N) with the URL shown, skipped in non-interactive shells, and (PowerShell) a `bash`-availability pre-flight so the user is never asked to confirm an install that can't run.
+  - `--with-mineru` — pre-warm doc2kb's MinerU tier (`ensure_env.py --tier mineru`, ~3 GB). Same hard gate as caveman: interactive confirm, non-interactive skip. Upholds the project rule that heavy ML deps are never auto-installed or silently routed.
+- **Installer flag parity (validate-repo Check E) preserved** — all nine new long options (`--preset`, `--with`/`--no` for mineru/env-defaults/ccstatusline/caveman) exist identically in `install.sh` and `install.ps1`. Documented in README (preset table) and docs/installation.md (Install Presets section + flag table).
+
 ## [1.0.0] - 2026-06-06
 
 First stable release. Gated multi-agent pipeline orchestration for Claude Code and Codex CLI — 9 specialist agents, 16 workflows, and a multi-vendor skill suite, installed globally in ~30 seconds.
