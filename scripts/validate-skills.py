@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
-"""Validate skills/*/SKILL.md frontmatter against Codex's 1024-byte description limit.
+"""Validate skills/*/SKILL.md frontmatter for Codex compatibility.
 
-Codex CLI rejects skills whose YAML `description:` value exceeds 1024 UTF-8 bytes
-(not characters). Skills failing the check are silently skipped at load time,
-which is hard to debug after the fact — so this validator fails fast in CI and
-in the pre-commit hook at scripts/git-hooks/pre-commit.
+Two failure modes, both silent at load time and both hard to debug after the fact,
+so this validator fails fast in CI and in the pre-commit hook at
+scripts/git-hooks/pre-commit:
+
+  1. Description over Codex's 1024 UTF-8 byte limit (not characters). Codex CLI
+     rejects oversized descriptions and skips the skill.
+  2. YAML-hostile unquoted description. Codex parses frontmatter with a strict
+     YAML loader (Ruby Psych); a plain (unquoted) scalar containing ": "
+     (colon-space) or " #" (space-hash) is misparsed as a mapping/comment and
+     the skill is dropped — while Claude Code's lenient parser accepts it, so
+     the breakage is Codex-only and invisible locally. Fix: wrap the value in
+     single quotes (double any inner ' as ''). See skills/doc2kb, skills/ultrasearch.
 
 Exit codes:
-    0  every SKILL.md is within the limit
-    1  at least one SKILL.md is over the limit
+    0  every SKILL.md is within the limit and YAML-safe
+    1  at least one SKILL.md is over the limit or has a YAML-hostile description
     2  a SKILL.md is malformed (missing frontmatter or description)
 """
 from __future__ import annotations
@@ -23,6 +31,26 @@ SKILLS_DIR = ROOT / "skills"
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*(?:\n|$)", re.DOTALL)
 DESCRIPTION_RE = re.compile(r"^description:\s*(.*)$", re.MULTILINE)
+
+# Patterns that turn an *unquoted* YAML plain scalar into something Codex's strict
+# loader misparses: ": " (mapping value indicator), a trailing ":", or " #"
+# (comment start). Quoted scalars are exempt.
+YAML_HOSTILE_RE = re.compile(r":\s|:$|\s#")
+
+
+def yaml_unsafe_reason(value: str) -> str | None:
+    """Return why an unquoted description breaks Codex's YAML loader, else None."""
+    if value.startswith(("'", '"')):
+        return None  # quoted scalar — Codex parses it correctly
+    m = YAML_HOSTILE_RE.search(value)
+    if not m:
+        return None
+    token = m.group(0).replace("\n", "\\n")
+    return (
+        f"unquoted description contains YAML-hostile {token!r} — Codex's strict "
+        "loader will skip this skill. Wrap the value in single quotes (double any "
+        "inner ' as '')."
+    )
 
 
 def extract_description(path: Path) -> str | None:
@@ -59,17 +87,21 @@ def main(argv: list[str]) -> int:
             failed += 1
             continue
         size = len(desc.encode("utf-8"))
-        status = "OK  " if size <= MAX_BYTES else "FAIL"
+        unsafe = yaml_unsafe_reason(desc)
+        status = "OK  " if size <= MAX_BYTES and unsafe is None else "FAIL"
         rel = path.relative_to(ROOT) if path.is_absolute() else path
         print(f"{status} {rel}: {size} bytes (limit {MAX_BYTES})")
         if size > MAX_BYTES:
             failed += 1
+        if unsafe is not None:
+            sys.stderr.write(f"ERROR {rel}: {unsafe}\n")
+            failed += 1
 
     if failed:
         sys.stderr.write(
-            f"\n{failed} skill(s) over the {MAX_BYTES}-byte description limit. "
-            "Codex CLI will silently skip them at load time. Shorten the YAML "
-            "description: field and move long workflow text into the body.\n"
+            f"\n{failed} skill description issue(s) (over the {MAX_BYTES}-byte limit "
+            "and/or YAML-hostile). Codex CLI will silently skip the affected skills "
+            "at load time. Shorten the description and/or quote it as flagged above.\n"
         )
         return 1
     return 0

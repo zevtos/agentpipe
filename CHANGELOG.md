@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Codex silently skipped `doc2kb` and `ultrasearch`.** Their YAML `description:` contained `: ` (colon-space), which Codex's strict YAML loader (Ruby Psych) misparses as a mapping indicator and drops the skill — while Claude Code's lenient parser accepted it, so the breakage was Codex-only and invisible locally. Quoted both descriptions (single-quoted scalars, inner `'` doubled); valid YAML for both parsers and the parsed value is byte-identical. (cherry-picked from PR #7 by virxdxk.)
+
+### Added
+- **`validate-skills.py` now FAILs on a YAML-hostile *unquoted* skill description** (`: `, trailing `:`, or ` #` in a plain scalar) — the regression guard for the Codex fix above, so pre-commit and CI catch it before Codex does. `gost-report` (no `: `) is unaffected; quoted descriptions are exempt.
+
 ## [1.2.0] - 2026-06-07
 
 ### Added
