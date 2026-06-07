@@ -198,6 +198,56 @@ CVD-safe дефолты — низкоконтрастные пользоват�
 - **`r.plot.area(x, y, *, labels=None, stacked=False, colors=None, + общие kw)`**
   — заливка `fill_between` (с hatch/alpha для Ч/Б); `stacked=True` → `ax.stackplot`.
 
+### Готовые рецепты (copy-paste, минимальный отчёт)
+
+Полный скелет отчёта с графиком — от импорта до `r.save()`. С `caption=...`
+график встраивается сразу и возвращает номер; передавать путь в `r.figure` не нужно.
+
+**Сгруппированный бар с опорной линией SLA + подписями значений:**
+
+```python
+from gost_report import Report, TitleConfig
+
+r = Report(TitleConfig(
+    work_type="Лабораторная работа",
+    work_number="№4",
+    topic="Анализ доступности сервиса",
+))
+r.h1("Результаты")
+r.plot.grouped_bar(
+    ["Q1", "Q2", "Q3"], [[95, 97, 99], [88, 91, 94]],
+    labels=["Сервис A", "Сервис B"],
+    value_labels=True, value_fmt="{:.0f}", ylabel="Доступность, %",
+    hlines=[{"value": 98, "label": "SLA"}],       # серый пунктир + запись в легенде
+    caption="Доступность по кварталам",
+)
+r.text(f"Сервис A держит SLA весь период {r.ref.on_figure(1)}.")
+r.save("availability.docx")
+```
+
+**Стресс-линия с порогом SLA (hline) и моментом отказа (vline):**
+
+```python
+from gost_report import Report, TitleConfig
+
+r = Report(TitleConfig(
+    work_type="Лабораторная работа",
+    work_number="№4",
+    topic="Нагрузочное тестирование",
+))
+r.h1("Переходный процесс")
+t = list(range(0, 11))                         # секунды
+latency = [40, 42, 45, 51, 70, 130, 210, 260, 180, 90, 55]   # мс
+r.plot.line(
+    t, latency, xlabel="t, с", ylabel="Задержка, мс",
+    hlines=[{"value": 200, "label": "SLA, 200 мс"}],   # порог
+    vlines=[{"value": 5, "label": "пик нагрузки"}],    # момент отказа
+    annotations=[{"x": 7, "y": 260, "text": "перегрузка", "arrow": True}],
+    caption="Деградация задержки под нагрузкой",
+)
+r.save("stress.docx")
+```
+
 Заметка по детерминизму: сворачивание общих полей в базовый хэш-ключ меняет имя
 PNG у ВСЕХ графиков один раз (даже при дефолтных значениях), т.к. прежний
 content-key их не включал. Это безвредно — файлы content-addressed, ни один doc/тест
