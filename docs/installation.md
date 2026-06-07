@@ -95,12 +95,12 @@ The skill becomes globally available across all your conversations on that accou
 | Clean sound hooks | `--clean-sound-hooks` | `-CleanSoundHooks` | Strip every sound hook (Stop+Notification) from the target hook config |
 | With thinking summaries | `--with-thinking-summaries` | `-WithThinkingSummaries` | Opt-in: `showThinkingSummaries=true` |
 | With env defaults | `--with-env-defaults` | `-WithEnvDefaults` | Merge maxed perf/privacy env into `settings.json` `"env"` (xhigh effort + disable adaptive thinking + non-essential traffic). No secrets. `--no-env-defaults` to skip |
-| With ccstatusline | `--with-ccstatusline` | `-WithCcstatusline` | Add a ccstatusline `statusLine` (install-if-missing; runs `npx -y ccstatusline@latest`). `--no-ccstatusline` to skip |
+| With ccstatusline | `--with-ccstatusline` | `-WithCcstatusline` | Add a ccstatusline `statusLine` (install-if-missing; runs `npx -y ccstatusline@<pinned>`). `--no-ccstatusline` to skip |
 | With caveman | `--with-caveman` | `-WithCaveman` | Install caveman (third-party `curl\|bash`, gated by interactive y/N, needs node≥18). `--no-caveman` to skip |
 | With MinerU | `--with-mineru` | `-WithMineru` | Pre-warm doc2kb's MinerU tier (~3 GB, gated by interactive y/N, skipped non-interactively). `--no-mineru` to skip |
 | With gh | `--with-gh` | `-WithGh` | Install GitHub CLI (`gh`) via the system package manager IF missing (gated; never intrudes when present). `--no-gh` to skip |
 | With claude-skip | `--with-claude-skip` | `-WithClaudeSkip` | Add a `claude-skip` shell alias for `claude --dangerously-skip-permissions` (DANGEROUS — gated by y/N + security warning, never named `claude`). `--no-claude-skip` to skip |
-| With playwright | `--with-playwright` | `-WithPlaywright` | Install Microsoft's `@playwright/cli` + its bundled agent skill (`npm i -g @playwright/cli@latest && playwright-cli install --skills`) IF no playwright cli/mcp present (gated). `--no-playwright` to skip |
+| With playwright | `--with-playwright` | `-WithPlaywright` | Install Microsoft's `@playwright/cli` (pinned) + its bundled agent skill (`npm i -g @playwright/cli@<pinned> && playwright-cli install --skills`) IF no playwright cli/mcp present (gated). `--no-playwright` to skip |
 | Model profile | `--model-profile <preset>` | `-ModelProfile <preset>` | Per-agent model assignment: `opus`, `sonnet`, `mixed` (default) |
 | Help | `--help` | `-Help` | Show usage information |
 
@@ -147,17 +147,31 @@ So `--preset god --no-caveman --no-mineru` gives you the full god bundle minus t
 - **`default`** — exactly the no-flag `bash install.sh` behavior, named so `--preset default --dry` documents the baseline.
 - **`senior`** — `default` plus Stop sound, thinking summaries, and a maxed non-secret env block merged into `settings.json` `"env"` (`CLAUDE_CODE_EFFORT_LEVEL=xhigh` raises per-turn reasoning **and** quota use). No API keys are ever shipped — ultrasearch's OpenAlex/Unpaywall/S2 keys stay manual (see [Optional: Shell Environment Variables](#optional-shell-environment-variables)).
 - **`god`** — everything, on the opus model profile (~5× the per-session cost). Notification sound is deliberately left **off** (it duplicates the Stop beep). The external/dangerous steps are each **gated** — interactive `y/N` (default **N**), skipped in non-interactive shells (CI, piped installs) with a pointer to run them later:
-  - **caveman** pipes `https://raw.githubusercontent.com/JuliusBrussee/caveman/main/install.sh` to bash (third-party, unpinned `main`, needs node≥18). The confirm prompt shows the URL.
+  - **caveman** is third-party code. agentpipe fetches a **pinned commit SHA** (never the moving `main`), **verifies its sha256 before running it**, and refuses on mismatch — so an `y` authorizes the exact bytes the maintainer reviewed, not whatever upstream HEAD is at install time. Needs node≥18.
   - **MinerU** pre-warms doc2kb's ~3 GB tier. Heavy/third-party code is never auto-installed.
+  - **gh** is installed via the system package manager only if missing; never intrudes when present.
+  - **claude-skip** writes a `claude-skip` alias to your shell rc (zsh/bash) or PowerShell `$PROFILE`, behind a security warning. It is **removed by `--uninstall`** (marker-scoped) — see the reversibility note below.
   - **gh** is installed via the system package manager (brew/apt/dnf/pacman/zypper/winget) **only if it's missing** — never intrudes when `gh` is already on PATH.
   - **claude-skip** adds a `claude-skip` shell alias for `claude --dangerously-skip-permissions`, behind a loud security warning. It's named `claude-skip` (not `claude`) on purpose, so the permission-bypass is an explicit per-invocation opt-in; plain `claude` stays safe.
-  - **playwright** installs Microsoft's official `@playwright/cli` and its bundled agent skill (`npm i -g @playwright/cli@latest && playwright-cli install --skills`) **only if no playwright cli/mcp is already set up**. agentpipe installs the tool; the skill ships with it (never vendored here).
+  - **playwright** installs Microsoft's official `@playwright/cli` (pinned version) and its bundled agent skill (`npm i -g @playwright/cli@<pinned> && playwright-cli install --skills`) **only if no playwright cli/mcp is already set up**. agentpipe installs the tool; the skill ships with it (never vendored here).
   - **ccstatusline** only writes a `statusLine` block if you don't already have one (never clobbers) and renders via `npx` at runtime, so it's a no-op until Node.js is on PATH.
 - **`codex-full`** — the Codex-native bundle: skills + gost-report persona config + Stop sound + launchers. It implies `--target codex` (unless you pass `--target` yourself). Use this instead of `--preset god --target codex`, which would silently drop every Claude-only layer; the installer warns and recommends `codex-full` if you do that.
 
 Per-layer override flags pair a `--with-*` and a `--no-*` for each gated/opt-in layer: `--with-mineru`/`--no-mineru`, `--with-env-defaults`/`--no-env-defaults`, `--with-ccstatusline`/`--no-ccstatusline`, `--with-caveman`/`--no-caveman`, `--with-gh`/`--no-gh`, `--with-claude-skip`/`--no-claude-skip`, `--with-playwright`/`--no-playwright`. All are mirrored as PowerShell switches.
 
 The preset is **not** persisted (re-running without `--preset` falls back to per-layer defaults). The one thing that does persist is the model profile: `god` sets it to opus, which is remembered the same way `--model-profile opus` is.
+
+### Reversibility
+
+`--uninstall` removes agents/commands/skills, launchers, the commit-msg hook, `init.templateDir`, the `claude-skip` alias (marker-scoped), and the agentpipe `ccstatusline` `statusLine` (only if you haven't replaced it). It then **prints a "left in place" list** for things it can't safely auto-reverse: externally installed tools (caveman, `gh`, `@playwright/cli` — in your own package managers) and `settings.json` env/hook keys that may have been merged with your own. Nothing dangerous is left silently: the permission-bypass alias and the recurring `ccstatusline` command are both removed.
+
+### External-Inclusion Bar (what `god` is allowed to install)
+
+`god` is a *curated config bundle*, not an open-ended software installer. New external layers must clear this bar:
+
+- **Tier A — agentpipe's own content** (agents, commands, skills, launchers, settings keys it owns). Always allowed; versioned and uninstalled by agentpipe.
+- **Tier B — register/install an *official, vendor-backed* tool** (`gh`, `@playwright/cli`, ccstatusline). Allowed in `god` only if: installed through a channel the user already trusts (their OS package manager / npm), **pinned to an exact version**, gated, install-if-missing/don't-intrude, and reversible (or `--uninstall` prints the reversal command).
+- **Tier C — third-party code agentpipe doesn't maintain, or anything that weakens the user's safety model.** Banned by default. The only accepted entries are **caveman** (pinned commit + sha256-verified) and **claude-skip** (reversible by `--uninstall`, named so it's never the default `claude`), each behind an explicit `--with-*` flag and an interactive confirm. No unpinned `curl|bash`, no `@latest`, ever — enforced by `validate-repo.py` Check F.
 
 ## CLI Launchers (`gr` / `us` / `dkb`)
 

@@ -250,7 +250,7 @@ Options:
                             Note: xhigh raises per-turn reasoning (and quota use).
   --no-env-defaults         Skip the env-defaults merge (overrides a preset).
   --with-ccstatusline       Add a ccstatusline statusLine to settings.json (runs
-                            'npx -y ccstatusline@latest'; needs node/npx). Install-if-
+                            'npx -y ccstatusline@2.2.19'; needs node/npx). Install-if-
                             missing — never clobbers an existing statusLine. god implies it.
   --no-ccstatusline         Skip ccstatusline (overrides a preset).
   --with-caveman            Install caveman (THIRD-PARTY: pipes
@@ -272,7 +272,7 @@ Options:
   --no-claude-skip          Never add the claude-skip alias (overrides a preset).
   --with-playwright         Install Microsoft's @playwright/cli (terminal browser
                             automation, persistent + parallel sessions) plus its
-                            bundled agent skill (npm install -g @playwright/cli@latest
+                            bundled agent skill (npm install -g @playwright/cli@0.1.13
                             && playwright-cli install --skills) IF no playwright cli/mcp
                             is already present. Gated by y/N; needs npm. god implies it.
   --no-playwright           Never install playwright-cli (overrides a preset).
@@ -762,7 +762,7 @@ do_env_defaults_dry() {
 # render time (no install-time download; needs node/npx on PATH to render).
 # Install-if-missing: never clobbers a statusLine the user already configured.
 
-CCSTATUSLINE_PAYLOAD='{"statusLine": {"type": "command", "command": "npx -y ccstatusline@latest", "padding": 0, "refreshInterval": 10}}'
+CCSTATUSLINE_PAYLOAD='{"statusLine": {"type": "command", "command": "npx -y ccstatusline@2.2.19", "padding": 0, "refreshInterval": 10}}'
 
 ccstatusline_active() {
     [[ "$TARGET" == "claude" && "$CCSTATUSLINE" -eq 1 ]]
@@ -787,7 +787,7 @@ do_ccstatusline() {
     fi
     local settings="$BASE/settings.json"
     if python3 "$JSON_MERGE" "$settings" "$CCSTATUSLINE_PAYLOAD" 2>/dev/null; then
-        log "settings/statusLine = ccstatusline (npx -y ccstatusline@latest)"
+        log "settings/statusLine = ccstatusline (npx -y ccstatusline@2.2.19)"
         command -v npx >/dev/null 2>&1 || warn "  note: 'npx' not on PATH — install Node.js for the statusline to render"
     else
         warn "settings.json ccstatusline merge failed"
@@ -800,9 +800,39 @@ do_ccstatusline_dry() {
     if _has_statusline; then
         echo "  = statusLine already set (will not overwrite)"
     else
-        info "  + settings/statusLine = ccstatusline (npx -y ccstatusline@latest)"
+        info "  + settings/statusLine = ccstatusline (npx -y ccstatusline@2.2.19)"
     fi
     echo ""
+}
+
+# Reversal: drop the statusLine key on uninstall ONLY if it is still agentpipe's
+# ccstatusline command (never clobber a user-customised statusLine).
+do_ccstatusline_unfix() {
+    [[ "$TARGET" == "claude" ]] || return 0
+    command -v python3 >/dev/null 2>&1 || return 0
+    local settings="$BASE/settings.json"
+    [[ -f "$settings" ]] || return 0
+    local removed
+    removed=$(python3 - "$settings" <<'PY'
+import json, sys
+p = sys.argv[1]
+try:
+    d = json.load(open(p))
+except Exception:
+    print("0"); sys.exit(0)
+sl = d.get("statusLine")
+cmd = sl.get("command", "") if isinstance(sl, dict) else ""
+if "ccstatusline" in cmd:
+    d.pop("statusLine", None)
+    with open(p, "w", encoding="utf-8") as fh:
+        json.dump(d, fh, indent=2, ensure_ascii=False); fh.write("\n")
+    print("1")
+else:
+    print("0")
+PY
+)
+    [[ "$removed" == "1" ]] && log "removed ccstatusline statusLine from settings.json"
+    return 0
 }
 
 # --- CLAUDE.md baseline (claude target only, install-if-missing) ---
@@ -1400,10 +1430,21 @@ do_mineru_prewarm_dry() {
 # interactive y/N (default N). Non-interactive shells skip. URL + source shown so
 # the confirm is honest; the script is unpinned (main branch).
 
-CAVEMAN_INSTALL_URL='https://raw.githubusercontent.com/JuliusBrussee/caveman/main/install.sh'
+# Pinned to a reviewed commit (never the moving `main`) and checksum-verified
+# before exec. Bump CAVEMAN_REF + CAVEMAN_SHA256 together on a deliberate upgrade.
+CAVEMAN_REF='655b7d9c5431f822264b7732e9901c5578ac84cf'
+CAVEMAN_INSTALL_URL="https://raw.githubusercontent.com/JuliusBrussee/caveman/${CAVEMAN_REF}/install.sh"
+CAVEMAN_SHA256='8ddef49c15f089c26affed3c31d97142c683e1d37a1499ae557281ca09c2712c'
 
 caveman_active() {
     [[ "$TARGET" == "claude" && "$CAVEMAN" -eq 1 ]]
+}
+
+# Portable sha256 of a file (sha256sum on Linux, shasum on macOS). Empty if none.
+_sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+    else echo ""; fi
 }
 
 do_caveman() {
@@ -1418,24 +1459,42 @@ do_caveman() {
         return 0
     fi
     echo ""
-    warn "caveman is THIRD-PARTY. This pipes a remote script to bash (runs code):"
-    warn "  $CAVEMAN_INSTALL_URL"
-    warn "  Source: github.com/JuliusBrussee/caveman (main, unpinned). Needs node>=18."
+    warn "caveman is THIRD-PARTY code (github.com/JuliusBrussee/caveman). agentpipe runs"
+    warn "  a pinned, checksum-verified commit — not whatever 'main' is today — but it is"
+    warn "  still code agentpipe does not maintain. Needs node>=18. Pinned ref:"
+    warn "  ${CAVEMAN_REF}"
     printf "  Install caveman now? [y/N] "
     local reply=""
     read -r reply || true
     case "$reply" in
         y|Y|yes|YES)
-            info "Installing caveman..."
-            if curl -fsSL "$CAVEMAN_INSTALL_URL" | bash; then
-                log "caveman installed"
+            info "Installing caveman (pinned $CAVEMAN_REF, checksum-verified)..."
+            local _cv_tmp got
+            _cv_tmp="$(mktemp)"
+            if ! curl -fsSL "$CAVEMAN_INSTALL_URL" -o "$_cv_tmp"; then
+                warn "caveman download failed"
+                rm -f "$_cv_tmp"
             else
-                warn "caveman install failed — run later: curl -fsSL $CAVEMAN_INSTALL_URL | bash"
+                got="$(_sha256_of "$_cv_tmp")"
+                if [[ -z "$got" ]]; then
+                    err "no sha256 tool (sha256sum/shasum) — cannot verify caveman; refusing to run"
+                    rm -f "$_cv_tmp"
+                elif [[ "$got" != "$CAVEMAN_SHA256" ]]; then
+                    err "caveman checksum MISMATCH — refusing to run (upstream changed or tampered)"
+                    warn "  expected $CAVEMAN_SHA256"
+                    warn "  got      $got"
+                    rm -f "$_cv_tmp"
+                elif bash "$_cv_tmp"; then
+                    rm -f "$_cv_tmp"
+                    log "caveman installed"
+                else
+                    rm -f "$_cv_tmp"
+                    warn "caveman install failed"
+                fi
             fi
             ;;
         *)
-            info "caveman declined."
-            info "  install later: curl -fsSL $CAVEMAN_INSTALL_URL | bash"
+            info "caveman declined (pinned ref $CAVEMAN_REF)."
             ;;
     esac
 }
@@ -1557,8 +1616,9 @@ do_claude_skip() {
     echo ""
     warn "SECURITY: 'claude-skip' runs Claude Code with --dangerously-skip-permissions,"
     warn "  which bypasses ALL permission prompts — Claude can run any command without"
-    warn "  asking. Use it only in trusted, sandboxed, or throwaway dirs. The alias is"
-    warn "  named 'claude-skip' (not 'claude') so plain 'claude' stays safe."
+    warn "  asking. Prefer an OS sandbox / devcontainer over the host shell; use only in"
+    warn "  trusted or throwaway dirs. Named 'claude-skip' (not 'claude') so plain"
+    warn "  'claude' stays safe. Persists in your rc until 'install.sh --uninstall'."
     printf "  Add 'claude-skip' alias to %s? [y/N] " "$rc"
     local reply=""
     read -r reply || true
@@ -1585,6 +1645,20 @@ do_claude_skip_dry() {
         info "  + would offer to add 'claude-skip' alias to $rc — interactive y/N + security warning"
     fi
     echo ""
+}
+
+# Reversal: strip the agentpipe-added claude-skip alias (+ its marker comment) from
+# the shell rc on uninstall. Marker-scoped so it never touches user-authored lines.
+do_claude_skip_unfix() {
+    [[ "$TARGET" == "claude" ]] || return 0
+    local rc
+    rc="$(_claude_skip_rc)"
+    [[ -f "$rc" ]] || return 0
+    grep -qF "alias claude-skip=" "$rc" 2>/dev/null || return 0
+    local tmp
+    tmp="$(mktemp)"
+    grep -v -e "# agentpipe: opt-in dangerous skip-permissions alias" -e "alias claude-skip=" "$rc" > "$tmp" && mv "$tmp" "$rc"
+    log "removed claude-skip alias from $rc"
 }
 
 # --- Playwright CLI (opt-in, gated; god) ---
@@ -1617,33 +1691,33 @@ do_playwright() {
     fi
     if ! command -v npm >/dev/null 2>&1; then
         warn "playwright-cli skipped — npm not found (install Node.js first)"
-        info "  then run: npm install -g @playwright/cli@latest && playwright-cli install --skills"
+        info "  then run: npm install -g @playwright/cli@0.1.13 && playwright-cli install --skills"
         return 0
     fi
     if [[ ! -t 0 ]]; then
         warn "playwright-cli install skipped (non-interactive shell)."
-        info "  run later: npm install -g @playwright/cli@latest && playwright-cli install --skills"
+        info "  run later: npm install -g @playwright/cli@0.1.13 && playwright-cli install --skills"
         return 0
     fi
     echo ""
     warn "Playwright CLI (@playwright/cli) gives terminal browser automation with"
     warn "  persistent + parallel sessions, and ships its own agent skill. Installs via:"
-    warn "  npm install -g @playwright/cli@latest  &&  playwright-cli install --skills"
+    warn "  npm install -g @playwright/cli@0.1.13  &&  playwright-cli install --skills"
     printf "  Install @playwright/cli + skill now? [y/N] "
     local reply=""
     read -r reply || true
     case "$reply" in
         y|Y|yes|YES)
             info "Installing @playwright/cli..."
-            if npm install -g @playwright/cli@latest && playwright-cli install --skills; then
+            if npm install -g @playwright/cli@0.1.13 && playwright-cli install --skills; then
                 log "playwright-cli + skill installed"
             else
-                warn "playwright-cli install failed — run later: npm install -g @playwright/cli@latest && playwright-cli install --skills"
+                warn "playwright-cli install failed — run later: npm install -g @playwright/cli@0.1.13 && playwright-cli install --skills"
             fi
             ;;
         *)
             info "playwright-cli declined."
-            info "  install later: npm install -g @playwright/cli@latest && playwright-cli install --skills"
+            info "  install later: npm install -g @playwright/cli@0.1.13 && playwright-cli install --skills"
             ;;
     esac
 }
@@ -1654,7 +1728,7 @@ do_playwright_dry() {
     if _playwright_present; then
         echo "  = playwright already present (cli or mcp) — will not intrude"
     else
-        info "  + would offer: npm install -g @playwright/cli@latest && playwright-cli install --skills — interactive y/N"
+        info "  + would offer: npm install -g @playwright/cli@0.1.13 && playwright-cli install --skills — interactive y/N"
     fi
     echo ""
 }
@@ -1920,7 +1994,23 @@ do_uninstall() {
         do_config_defaults_unfix
     fi
 
+    # Reverse the marker-scoped god side-effects we CAN safely undo.
+    if [[ "$TARGET" == "claude" ]]; then
+        do_claude_skip_unfix
+        do_ccstatusline_unfix
+    fi
+
     do_launchers_remove
+
+    # State agentpipe cannot safely auto-reverse (externally installed tools live in
+    # the user's package managers; settings.json env/hooks may be user-merged).
+    echo ""
+    info "Left in place (remove manually if you no longer want them):"
+    info "  settings.json env/hooks keys (env xhigh, sound, gost-validation) — edit ~/.claude/settings.json"
+    info "  caveman    — see github.com/JuliusBrussee/caveman for removal"
+    info "  gh         — your package manager (brew uninstall gh / apt remove gh / …)"
+    info "  @playwright/cli — npm uninstall -g @playwright/cli"
+    info "  MinerU tier (doc2kb) — delete the doc2kb venv under your agentpipe state dir"
 
     echo ""
     info "Removed $count items from $BASE"

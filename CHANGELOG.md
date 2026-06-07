@@ -14,6 +14,15 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   - `--with-playwright` — install Microsoft's official `@playwright/cli` (terminal browser automation with persistent + parallel sessions — what the Playwright MCP can't do) and its bundled agent skill via `npm i -g @playwright/cli@latest && playwright-cli install --skills`, **only if no playwright cli/mcp is already set up**. agentpipe installs the tool; the skill ships with it — never vendored into this repo.
 - The resolved-preset manifest and `--dry` output now print the gh / claude-skip / playwright lines; installer flag parity (validate-repo Check E) preserved across `install.sh` and `install.ps1`.
 
+### Security
+- **Supply-chain hardening of the `god` preset's external installs (from a `/audit` pass).**
+  - **caveman is now pinned + checksum-verified.** Replaced the moving `main` ref with a fixed commit SHA and a `sha256` that is verified before the script runs (downloads to a temp file, compares, refuses on mismatch — never `curl … | bash` of unpinned HEAD). An accepted `y` now authorizes the exact bytes the maintainer reviewed. CWE-494/CWE-829/CWE-426.
+  - **Pinned `ccstatusline` and `@playwright/cli`** to exact versions (no `@latest`). The ccstatusline `statusLine` previously re-resolved `@latest` via `npx -y` on *every* session, forever — now pinned.
+  - **`--uninstall` is now reversible for the dangerous god side-effects:** it strips the marker-scoped `claude-skip` alias from the shell rc / `$PROFILE`, removes the agentpipe `ccstatusline` `statusLine` (only if unmodified), and prints a "left in place" list with reversal commands for externally installed tools (caveman/gh/playwright) and merged settings keys.
+  - **New `validate-repo.py` Check F (FAIL):** the build fails if `@latest` or a `main`/`master` `raw.githubusercontent.com` ref appears anywhere in `install.sh`/`install.ps1` — a machine guard against unpinned-external regressions.
+  - **Documented the External-Inclusion Bar** (Tier A/B/C) in `CLAUDE.md` + `docs/installation.md`: `god` installs only agentpipe's own content (A) or pinned, reversible, official vendor tools (B); third-party-exec / safety-weakening layers (C) are banned except the two explicitly-gated, hardened entries (caveman, claude-skip).
+  - claude-skip warning strengthened (recommends an OS sandbox; notes it persists until `--uninstall`).
+
 ## [1.1.0] - 2026-06-07
 
 ### Added

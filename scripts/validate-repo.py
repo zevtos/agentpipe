@@ -22,6 +22,9 @@ Checks:
     E  installer flag parity — long-option set of install.sh == install.ps1
        (WARNING only in v1: the two installer DSLs are parsed by regex and the
        check is the most brittle; a mismatch warns but does not fail the build)
+    F  installer supply-chain pinning (FAIL) — no `@latest` or moving git ref
+       (raw.githubusercontent.com/<repo>/(main|master)/) anywhere in install.sh /
+       install.ps1; every external install must pin an exact version / commit SHA
 
 Exit codes (identical contract to validate-skills.py):
     0  every check passed (Check E warnings do not change this)
@@ -218,6 +221,31 @@ def ps_flags() -> set[str]:
     return flags
 
 
+# --- Check F: installer supply-chain pinning (FAIL) ----------------------------
+# The installers must never fetch/exec an external artifact from a moving ref: no
+# `@latest` (npm) and no raw.githubusercontent.com/<repo>/(main|master)/ (git
+# branch). Every external install must pin an exact version or commit SHA so a
+# poisoned upstream cannot reach users who already accepted the gate. Applies to
+# the whole installer text (exec + help + hints) so a stray unpinned string in a
+# "run this later" message can't drift back to recommending `@latest`.
+_UNPINNED_RE = re.compile(r"@latest|raw\.githubusercontent\.com/[^\s\"']*/(?:main|master)/")
+
+
+def check_installer_pinning(fails: list[str]) -> None:
+    for fname in ("install.sh", "install.ps1"):
+        path = ROOT / fname
+        if not path.exists():
+            continue
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            m = _UNPINNED_RE.search(line)
+            if m:
+                fails.append(
+                    f"FAIL {fname}:{lineno}: unpinned external ref '{m.group(0)}' — "
+                    f"pin an exact version/commit SHA (supply-chain). "
+                    f"\"{line.strip()[:80]}\""
+                )
+
+
 def check_installer_parity(warns: list[str]) -> None:
     sh, ps = sh_flags(), ps_flags()
     if not sh or not ps:
@@ -248,6 +276,7 @@ def main() -> int:
     check_agents(fails)
     check_commands(fails)
     check_skills(fails)
+    check_installer_pinning(fails)
     check_installer_parity(warns)
 
     for w in warns:

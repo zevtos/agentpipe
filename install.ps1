@@ -991,9 +991,9 @@ function Do-Ccstatusline {
     $r = Read-SettingsJson
     if (-not $r.Ok) { Write-Warn "settings.json has invalid JSON - skipping ccstatusline"; return }
     $base = $r.Hash
-    $base["statusLine"] = @{ type = "command"; command = "npx -y ccstatusline@latest"; padding = 0; refreshInterval = 10 }
+    $base["statusLine"] = @{ type = "command"; command = "npx -y ccstatusline@2.2.19"; padding = 0; refreshInterval = 10 }
     if (Write-SettingsJson $base) {
-        Write-Ok "settings/statusLine = ccstatusline (npx -y ccstatusline@latest)"
+        Write-Ok "settings/statusLine = ccstatusline (npx -y ccstatusline@2.2.19)"
         if (-not (Get-Command npx -ErrorAction SilentlyContinue)) {
             Write-Warn "  note: 'npx' not on PATH - install Node.js for the statusline to render"
         }
@@ -1006,7 +1006,7 @@ function Do-CcstatuslineDry {
     if (Test-HasStatusLine) {
         Write-Host "  = statusLine already set (will not overwrite)"
     } else {
-        Write-Info "+ settings/statusLine = ccstatusline (npx -y ccstatusline@latest)"
+        Write-Info "+ settings/statusLine = ccstatusline (npx -y ccstatusline@2.2.19)"
     }
     Write-Host ""
 }
@@ -1051,7 +1051,11 @@ function Do-MineruPrewarmDry {
 # Pipes a remote install script to bash. Same hard gate as MinerU. Needs bash
 # (Git Bash / WSL) on Windows. Mirror of install.sh do_caveman.
 
-$Script:CavemanInstallUrl = 'https://raw.githubusercontent.com/JuliusBrussee/caveman/main/install.sh'
+# Pinned to a reviewed commit (never moving `main`) + checksum-verified before exec.
+# Bump CavemanRef + CavemanSha256 together on a deliberate upgrade. Mirror of install.sh.
+$Script:CavemanRef = '655b7d9c5431f822264b7732e9901c5578ac84cf'
+$Script:CavemanInstallUrl = "https://raw.githubusercontent.com/JuliusBrussee/caveman/$($Script:CavemanRef)/install.sh"
+$Script:CavemanSha256 = '8ddef49c15f089c26affed3c31d97142c683e1d37a1499ae557281ca09c2712c'
 
 function Do-Caveman {
     if (-not (Test-CavemanActive)) { return }
@@ -1070,17 +1074,32 @@ function Do-Caveman {
         return
     }
     Write-Host ""
-    Write-Warn "caveman is THIRD-PARTY. This pipes a remote script to bash (runs code):"
-    Write-Warn "  $($Script:CavemanInstallUrl)"
-    Write-Warn "  Source: github.com/JuliusBrussee/caveman (main, unpinned). Needs node>=18."
+    Write-Warn "caveman is THIRD-PARTY code (github.com/JuliusBrussee/caveman). agentpipe runs"
+    Write-Warn "  a pinned, checksum-verified commit - not whatever 'main' is today - but it is"
+    Write-Warn "  still code agentpipe does not maintain. Needs node>=18. Pinned ref:"
+    Write-Warn "  $($Script:CavemanRef)"
     $reply = Read-Host "  Install caveman now? [y/N]"
     if ($reply -match '^(y|yes)$') {
-        Write-Info "Installing caveman..."
-        & $bash.Source -c "curl -fsSL '$($Script:CavemanInstallUrl)' | bash"
-        if ($LASTEXITCODE -eq 0) { Write-Ok "caveman installed" } else { Write-Warn "caveman install failed" }
+        Write-Info "Installing caveman (pinned $($Script:CavemanRef), checksum-verified)..."
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("caveman-" + [System.IO.Path]::GetRandomFileName() + ".sh")
+        try {
+            Invoke-WebRequest -Uri $Script:CavemanInstallUrl -OutFile $tmp -UseBasicParsing
+            $got = (Get-FileHash -Algorithm SHA256 -Path $tmp).Hash.ToLower()
+            if ($got -ne $Script:CavemanSha256) {
+                Write-Err "caveman checksum MISMATCH - refusing to run (upstream changed or tampered)"
+                Write-Warn "  expected $($Script:CavemanSha256)"
+                Write-Warn "  got      $got"
+            } else {
+                & $bash.Source $tmp
+                if ($LASTEXITCODE -eq 0) { Write-Ok "caveman installed" } else { Write-Warn "caveman install failed" }
+            }
+        } catch {
+            Write-Warn "caveman download/verify failed: $_"
+        } finally {
+            if (Test-Path $tmp) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+        }
     } else {
-        Write-Info "caveman declined."
-        Write-Info "  install later: curl -fsSL $($Script:CavemanInstallUrl) | bash"
+        Write-Info "caveman declined (pinned ref $($Script:CavemanRef))."
     }
 }
 
@@ -1165,8 +1184,9 @@ function Do-ClaudeSkip {
     Write-Host ""
     Write-Warn "SECURITY: 'claude-skip' runs Claude Code with --dangerously-skip-permissions,"
     Write-Warn "  which bypasses ALL permission prompts - Claude can run any command without"
-    Write-Warn "  asking. Use only in trusted/sandboxed/throwaway dirs. Named 'claude-skip'"
-    Write-Warn "  (not 'claude') so plain 'claude' stays safe."
+    Write-Warn "  asking. Prefer an OS sandbox / devcontainer over the host shell; use only in"
+    Write-Warn "  trusted or throwaway dirs. Named 'claude-skip' (not 'claude') so plain"
+    Write-Warn "  'claude' stays safe. Persists in `$PROFILE until 'install.ps1 -Uninstall'."
     $reply = Read-Host "  Add 'claude-skip' to $rc ? [y/N]"
     if ($reply -match '^(y|yes)$') {
         New-Item -ItemType Directory -Path (Split-Path $rc -Parent) -Force | Out-Null
@@ -1188,6 +1208,38 @@ function Do-ClaudeSkipDry {
         Write-Info "+ would offer to add 'claude-skip' to $rc - interactive y/N + security warning"
     }
     Write-Host ""
+}
+
+# Reversal: strip the agentpipe-added claude-skip function (+ marker comment) from
+# $PROFILE on uninstall. Marker-scoped — never touches user-authored lines.
+function Do-ClaudeSkipUnfix {
+    if ($Target -ne "claude") { return }
+    $rc = $PROFILE
+    if (-not ($rc -and (Test-Path $rc))) { return }
+    if (-not (Select-String -Quiet -Path $rc -Pattern 'function claude-skip' -ErrorAction SilentlyContinue)) { return }
+    $kept = Get-Content -Path $rc | Where-Object {
+        ($_ -notmatch 'function claude-skip') -and ($_ -notmatch 'agentpipe: opt-in dangerous skip-permissions alias')
+    }
+    Set-Content -Path $rc -Value $kept -Encoding UTF8
+    Write-Ok "removed claude-skip from $rc"
+}
+
+# Reversal: drop the statusLine key on uninstall ONLY if it is still agentpipe's
+# ccstatusline command (never clobber a user-customised statusLine).
+function Do-CcstatuslineUnfix {
+    if ($Target -ne "claude") { return }
+    $r = Read-SettingsJson
+    if (-not $r.Ok) { return }
+    $base = $r.Hash
+    if (-not $base.ContainsKey("statusLine")) { return }
+    $sl = $base["statusLine"]
+    $cmd = ""
+    if ($sl -is [hashtable]) { $cmd = [string]$sl["command"] }
+    elseif ($sl -and ($sl.PSObject.Properties.Name -contains "command")) { $cmd = [string]$sl.command }
+    if ($cmd -match 'ccstatusline') {
+        $base.Remove("statusLine")
+        if (Write-SettingsJson $base) { Write-Ok "removed ccstatusline statusLine from settings.json" }
+    }
 }
 
 # --- Playwright CLI (opt-in, gated; god) ---
@@ -1213,31 +1265,31 @@ function Do-Playwright {
     }
     if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
         Write-Warn "playwright-cli skipped - npm not found (install Node.js first)"
-        Write-Info "then run: npm install -g @playwright/cli@latest; playwright-cli install --skills"
+        Write-Info "then run: npm install -g @playwright/cli@0.1.13; playwright-cli install --skills"
         return
     }
     if ([Console]::IsInputRedirected) {
         Write-Warn "playwright-cli install skipped (non-interactive shell)."
-        Write-Info "run later: npm install -g @playwright/cli@latest; playwright-cli install --skills"
+        Write-Info "run later: npm install -g @playwright/cli@0.1.13; playwright-cli install --skills"
         return
     }
     Write-Host ""
     Write-Warn "Playwright CLI (@playwright/cli) gives terminal browser automation with"
     Write-Warn "  persistent + parallel sessions, and ships its own agent skill. Installs via:"
-    Write-Warn "  npm install -g @playwright/cli@latest ; playwright-cli install --skills"
+    Write-Warn "  npm install -g @playwright/cli@0.1.13 ; playwright-cli install --skills"
     $reply = Read-Host "  Install @playwright/cli + skill now? [y/N]"
     if ($reply -match '^(y|yes)$') {
         Write-Info "Installing @playwright/cli..."
-        & npm install -g '@playwright/cli@latest'
+        & npm install -g '@playwright/cli@0.1.13'
         if ($LASTEXITCODE -eq 0) {
             & playwright-cli install --skills
             if ($LASTEXITCODE -eq 0) { Write-Ok "playwright-cli + skill installed" } else { Write-Warn "playwright-cli skill step failed - run: playwright-cli install --skills" }
         } else {
-            Write-Warn "playwright-cli install failed - run later: npm install -g @playwright/cli@latest; playwright-cli install --skills"
+            Write-Warn "playwright-cli install failed - run later: npm install -g @playwright/cli@0.1.13; playwright-cli install --skills"
         }
     } else {
         Write-Info "playwright-cli declined."
-        Write-Info "install later: npm install -g @playwright/cli@latest; playwright-cli install --skills"
+        Write-Info "install later: npm install -g @playwright/cli@0.1.13; playwright-cli install --skills"
     }
 }
 
@@ -1247,7 +1299,7 @@ function Do-PlaywrightDry {
     if (Test-PlaywrightPresent) {
         Write-Host "  = playwright already present (cli or mcp) - will not intrude"
     } else {
-        Write-Info "+ would offer: npm install -g @playwright/cli@latest; playwright-cli install --skills - interactive y/N"
+        Write-Info "+ would offer: npm install -g @playwright/cli@0.1.13; playwright-cli install --skills - interactive y/N"
     }
     Write-Host ""
 }
@@ -1665,7 +1717,23 @@ function Do-Uninstall {
         Do-ConfigDefaultsUnfix
     }
 
+    # Reverse the marker-scoped god side-effects we CAN safely undo.
+    if ($Target -eq "claude") {
+        Do-ClaudeSkipUnfix
+        Do-CcstatuslineUnfix
+    }
+
     Do-LaunchersRemove
+
+    # State agentpipe cannot safely auto-reverse (external tools live in the user's
+    # package managers; settings.json env/hooks may be user-merged).
+    Write-Host ""
+    Write-Info "Left in place (remove manually if you no longer want them):"
+    Write-Info "  settings.json env/hooks keys (env xhigh, sound, gost-validation) - edit settings.json"
+    Write-Info "  caveman    - see github.com/JuliusBrussee/caveman for removal"
+    Write-Info "  gh         - your package manager (winget uninstall / choco uninstall gh / ...)"
+    Write-Info "  @playwright/cli - npm uninstall -g @playwright/cli"
+    Write-Info "  MinerU tier (doc2kb) - delete the doc2kb venv under your agentpipe state dir"
 
     Write-Host ""
     Write-Info "Removed $count items from $Base"

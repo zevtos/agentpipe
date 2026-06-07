@@ -174,7 +174,7 @@ Each gate must pass before proceeding. Agents have bounded tool access (reviewer
 | thinking summaries | — | — | ✅ | ✅ | — |
 | env defaults (`CLAUDE_CODE_EFFORT_LEVEL=xhigh` + disable adaptive thinking + non-essential traffic) | — | — | ✅ | ✅ | — |
 | ccstatusline (`statusLine`, install-if-missing) | — | — | — | ✅ | — |
-| caveman (third-party `curl\|bash`, gated) | — | — | — | ✅ | — |
+| caveman (third-party, pinned SHA + sha256-verified, gated) | — | — | — | ✅ | — |
 | MinerU pre-warm (~3 GB, gated) | — | — | — | ✅ | — |
 | GitHub CLI `gh` (install if missing, gated) | — | — | — | ✅ | — |
 | `claude-skip` shell alias (dangerous, gated) | — | — | — | ✅ | — |
@@ -184,7 +184,7 @@ Each gate must pass before proceeding. Agents have bounded tool access (reviewer
 - **`minimum`** — tools + safety only; never mutates global git config or installs session hooks.
 - **`default`** — the no-flag baseline, named so its manifest is visible.
 - **`senior`** — `default` plus the power-user comforts: Stop sound, thinking summaries, and maxed perf/privacy env vars merged into `settings.json` `"env"` (no secrets shipped).
-- **`god`** — everything, on opus. The external/dangerous steps are each **gated** (interactive `y/N`, default N, skipped in non-interactive shells): caveman (`curl\|bash`), MinerU pre-warm, `gh` install (only if missing — never intrudes when present), the `claude-skip` alias (with a security warning), and `@playwright/cli` + its bundled agent skill (only if no playwright cli/mcp is already set up — agentpipe installs the official tool, it carries its own skill). ccstatusline only renders if `npx` is on PATH and never clobbers an existing `statusLine`.
+- **`god`** — everything, on opus. The external/dangerous steps are each **gated** (interactive `y/N`, default N, skipped in non-interactive shells): caveman (third-party, fetched from a **pinned commit + sha256-verified** before it runs — never the moving `main`), MinerU pre-warm, `gh` install (only if missing — never intrudes when present), the `claude-skip` alias (security warning; **removed by `--uninstall`**), and `@playwright/cli` (pinned) + its bundled agent skill (only if no playwright cli/mcp is already set up — agentpipe installs the official tool, it carries its own skill). ccstatusline (pinned) only renders if `npx` is on PATH and never clobbers an existing `statusLine`. External installs follow an [inclusion bar](docs/installation.md#external-inclusion-bar-what-god-is-allowed-to-install) (no unpinned `curl\|bash`, no `@latest`).
 - **`codex-full`** — the Codex-native bundle (implies `--target codex`): skills + gost-config + Stop sound + launchers. Use this instead of `--preset god --target codex`, which would silently drop every Claude-only layer.
 
 Per-layer override flags: `--with-mineru` / `--no-mineru`, `--with-env-defaults` / `--no-env-defaults`, `--with-ccstatusline` / `--no-ccstatusline`, `--with-caveman` / `--no-caveman`, `--with-gh` / `--no-gh`, `--with-claude-skip` / `--no-claude-skip`, `--with-playwright` / `--no-playwright` (all mirrored as PowerShell switches). Example: `bash install.sh --preset god --no-caveman --no-mineru --no-claude-skip`.
