@@ -186,13 +186,15 @@ def _scout(kb_root: Path, input_dir: Path, tier: Optional[str],
 
 
 def _extract(kb_root: Path, tier: Optional[str], *, timeout: Optional[int],
-             normalize: bool, shard: bool, always_popo: bool,
-             quiet: bool) -> tuple[int, Optional[dict]]:
+             normalize: bool, shard: bool, patch_warnings: bool,
+             always_popo: bool, quiet: bool) -> tuple[int, Optional[dict]]:
     args = [str(kb_root)]
     if timeout is not None:
         args += ["--timeout", str(timeout)]
     if normalize:
         args.append("--normalize")
+    if patch_warnings:
+        args.append("--patch-warnings")
     if shard:
         args.append("--shard")
     if quiet:
@@ -359,6 +361,7 @@ def _run_pipeline(args: argparse.Namespace) -> int:
 
     rc, summary = _extract(kb_root, tier, timeout=args.timeout,
                            normalize=args.normalize, shard=args.shard,
+                           patch_warnings=args.patch_warnings,
                            always_popo=args.always_popo, quiet=args.quiet)
     if rc == 2:
         return _fail((summary or {}).get("reason", "extract refused to start"))
@@ -394,6 +397,8 @@ def _add_pipeline_flags(p: argparse.ArgumentParser) -> None:
                    help="run normalize_md after each extraction")
     p.add_argument("--shard", action="store_true",
                    help="split oversized docs (>24k tok) into per-chapter folders")
+    p.add_argument("--patch-warnings", action="store_true",
+                   help="mineru page-patch dropped_pictures PDFs (needs --tier mineru)")
     p.add_argument("--no-index", action="store_true",
                    help="skip the Phase 5.5 BM25 search index (default: build it)")
     p.add_argument("--timeout", type=int, default=None,
@@ -428,6 +433,7 @@ def main() -> int:
     p_ext.add_argument("--always-popo", action="store_true")
     p_ext.add_argument("--normalize", action="store_true")
     p_ext.add_argument("--shard", action="store_true")
+    p_ext.add_argument("--patch-warnings", action="store_true")
     p_ext.add_argument("--timeout", type=int, default=None)
     p_ext.add_argument("-q", "--quiet", action="store_true")
 
@@ -483,6 +489,7 @@ def main() -> int:
             return resolved
         rc, summary = _extract(kb_root, tier, timeout=args.timeout,
                                normalize=args.normalize, shard=args.shard,
+                               patch_warnings=args.patch_warnings,
                                always_popo=args.always_popo, quiet=args.quiet)
         return _finish_extract(kb_root, rc, summary)
     if args.command == "manifest":

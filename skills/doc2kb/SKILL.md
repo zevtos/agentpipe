@@ -117,6 +117,7 @@ python3 <skill_dir>/scripts/ensure_env.py apply_overrides.py <kb_dir> [--dry-run
 ```bash
 python3 <skill_dir>/scripts/ensure_env.py extract_corpus.py <kb_dir>
 # опции: --timeout 600 (на файл), --normalize (прогнать normalize_md после каждого),
+#        --patch-warnings (авто mineru page-patch dropped_pictures PDF, нужен tier),
 #        --shard (Phase 4.5: крупные доки → папки по главам), --quiet
 ```
 
@@ -129,7 +130,7 @@ Exit codes: `0` — все файлы дошли до терминального
 **Разберите `needs_attention[]` после диспетчера — это файлы, требующие ВАШЕГО суждения (диспетчер их НЕ решает сам, только surface'ит):**
 - `reason: "needs_install"` — extractor вышел с кодом 2: `.doc` без системного конвертера, либо `mineru` CLI не установлен. `install_hint` подскажет, что поставить. Это НЕ ошибка и НЕ corrupt — поставьте инструмент и **перезапустите `extract_corpus.py`** (идемпотентность доделает только этот файл).
 - `reason: "visual_transcription"` — `ok:true` PDF с warning'ом `mangled_visual_layout`: body извлечён, но позиционная математика рассыпана. Перечитайте исходный PDF через `Read` и перепишите body `docs/<id>-*.md` вручную (см. pitfalls #13), затем `extraction_method: claude-pagewise-manual@1`.
-- `reason: "dropped_pictures_residual"` — `ok:true` PDF с остаточными `dropped_pictures`: поле `pages` (список номеров страниц, восстановленный из тела документа) подскажет, какие страницы догнать через mineru page-patch (`extract_pdf_mineru.py --pages … --patch-into …`) или ручную транскрипцию.
+- `reason: "dropped_pictures_residual"` — `ok:true` PDF с остаточными `dropped_pictures`: поле `pages` (список номеров страниц, восстановленный из тела документа) подскажет, какие страницы догнать через mineru page-patch (`extract_pdf_mineru.py --pages … --patch-into …`) или ручную транскрипцию. **Автоматизация:** запустите `extract_corpus.py --patch-warnings` (или `dkb … --patch-warnings`) — он сам прогонит mineru page-patch по каждой такой PDF (нужен установленный `--tier mineru`; если не установлен — surface `tier_missing`, ничего молча не качает). `visual_transcription` не патчится авто (нет списка страниц — `--patch-into` требует `--pages`), только surface'ится.
 
 Файлы `visual_transcription`/`dropped_pictures_residual` помечены `extracted_but_flagged: true` — считаются в `extracted` И присутствуют в `needs_attention[]` (body уже на диске, но требует доводки). `unclassified_warnings[]` эхо-ит любые нераспознанные warning'и дословно — **ничего не глотается молча**. После разбора `needs_attention[]` переходите к Phase 5 (`build_manifest.py` подхватит `_logs/errors.json`).
 
