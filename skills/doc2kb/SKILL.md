@@ -1,6 +1,6 @@
 ---
 name: doc2kb
-description: 'Converts a heterogeneous corpus of raw documents (PDF, DOCX, DOC, PPTX, IPYNB, RTF, MD, TXT, HTML, etc.) into a structured, LLM-optimized knowledge base — per-source Markdown + manifest.json + INDEX.md + AGENTS.md + a built-in BM25 search index (`query.sh`, citation-first), ready for ingestion in a separate Claude / Codex session. USE WHEN the user asks to ingest, index, preprocess, search, or build a knowledge base from a folder of mixed documents; "feed files to Claude", "prepare a corpus", "make my documents searchable", "build a doc index", "RAG prep", "convert documents to markdown", "ingest Jupyter notebooks". RU triggers: "обработай папку с документами", "сделай базу знаний из папки", "подготовь корпус для LLM", "найди в моих документах", "извлеки markdown из файлов". Output is for AI agents, not human reading. For single-file PDF use Anthropic''s `pdf` skill.'
+description: 'Converts a heterogeneous corpus of raw documents (PDF, DOCX, DOC, PPTX, IPYNB, RTF, EPUB, MD, TXT, HTML, etc.) into a structured, LLM-optimized knowledge base — per-source Markdown + manifest.json + INDEX.md + AGENTS.md + a built-in BM25 search index (`query.sh`, citation-first), ready for ingestion in a separate Claude / Codex session. USE WHEN the user asks to ingest, index, preprocess, search, or build a knowledge base from a folder of mixed documents; "feed files to Claude", "prepare a corpus", "make my documents searchable", "build a doc index", "RAG prep", "convert documents to markdown", "ingest Jupyter notebooks". RU triggers: "обработай папку с документами", "сделай базу знаний из папки", "подготовь корпус для LLM", "найди в моих документах", "извлеки markdown из файлов". Output is for AI agents, not human reading. For single-file PDF use Anthropic''s `pdf` skill.'
 ---
 
 # doc2kb — Document Corpus → LLM Knowledge Base
@@ -47,7 +47,7 @@ python3 <skill_dir>/scripts/ensure_env.py
 
 **Системные зависимости (macOS):** `brew install libmagic` — обязательно, иначе python-magic не импортируется. На Linux: `apt install libmagic1`. На WSL то же. Без libmagic scout всё равно работает (fallback на расширение файла), но `mime_confidence` будет всегда `"high"` без перекрёстной проверки.
 
-**Опциональная зависимость для DOCX с математикой:** `pandoc` (`brew install pandoc` / `apt install pandoc`). Если установлен, `extract_docx.py` автоматически переключается на него для документов, помеченных scout'ом как `has_equations: true`, и сохраняет OOXML math как `$...$` LaTeX. Без pandoc такие документы извлекаются через mammoth и теряют формулы (warning будет в JSON output). `pandoc` также используется как предпочтительный маршрут для **`.rtf`** (`extract_rtf.py`): он сохраняет таблицы/картинки/структуру. Без pandoc `.rtf` всё равно извлекается через pure-Python `striprtf` (plain text), так что rtf никогда не падает.
+**Опциональная зависимость для DOCX с математикой:** `pandoc` (`brew install pandoc` / `apt install pandoc`). Если установлен, `extract_docx.py` автоматически переключается на него для документов, помеченных scout'ом как `has_equations: true`, и сохраняет OOXML math как `$...$` LaTeX. Без pandoc такие документы извлекаются через mammoth и теряют формулы (warning будет в JSON output). `pandoc` также используется как предпочтительный маршрут для **`.rtf`** (`extract_rtf.py`): он сохраняет таблицы/картинки/структуру. Без pandoc `.rtf` всё равно извлекается через pure-Python `striprtf` (plain text), так что rtf никогда не падает. Аналогично для **`.epub`** (`extract_epub.py`): с pandoc сохраняется OPF spine-порядок, картинки и EPUB3 MathML → `$...$` LaTeX; без pandoc работает pure-Python fallback (`zip` + `markdownify`), который flatten'ит картинки в `![image N]()` placeholder'ы и теряет формулы (warning в JSON), но никогда не падает.
 
 **Системный конвертер для legacy `.doc`:** бинарный формат `.doc` (OLE2) не читается чистым Python, поэтому `extract_doc.py` шеллится во внешний конвертер по убыванию точности: `soffice`/`libreoffice` (`brew install --cask libreoffice` / `apt install libreoffice-writer`) → конвертит в `.docx` и переиспользует весь DOCX-пайплайн (таблицы, картинки, OOXML math); на macOS — `textutil` (встроен) тем же путём; иначе `antiword` (`apt install antiword`) — только plain text. Ни один из конвертеров не ставится в venv (как и opt-in mineru CLI). Если ни одного нет на PATH, `extract_doc.py` выходит с кодом 2 и install-hint — главный цикл должен трактовать это как «нужна установка конвертера», а не как corrupt-файл, и залогировать в `_logs/errors.json`. Scout заранее предупреждает (`no .doc converter on PATH ...`), когда в корпусе есть `.doc`, а конвертера нет.
 
@@ -116,8 +116,11 @@ python3 <skill_dir>/scripts/ensure_env.py apply_overrides.py <kb_dir> [--dry-run
 
 ```bash
 python3 <skill_dir>/scripts/ensure_env.py extract_corpus.py <kb_dir>
-# опции: --timeout 600 (на файл), --normalize (прогнать normalize_md после каждого), --quiet
+# опции: --timeout 600 (на файл), --normalize (прогнать normalize_md после каждого),
+#        --shard (Phase 4.5: крупные доки → папки по главам), --quiet
 ```
+
+**Опционально (`--shard`) — Phase 4.5: шардинг крупных документов.** Большая книга/PDF извлекается в один `docs/<id>-<slug>.md` на 50k–500k токенов; после search-хита агент, открывающий этот файл для контекста, переполняет окно. `--shard` запускает `shard_doc.py` пост-проходом: документ выше порога (**24k токенов** по умолчанию) и со структурой режется **in place** в папку `docs/<id>-<slug>/` (`_index.md` TOC + `NNN-*.md` главы, ~8k токенов каждая). Деление heading-first (по главам/заголовкам, токены — только под-делитель на границе абзаца, никогда посреди мысли), части сбалансированы (band `[2k, 12k]`), verbatim гарантирован self-check'ом (reassembly mismatch → откат к плоскому файлу). Поиск (`index_kb`) индексит части → цитата указывает на маленький файл главы, а не на всю книгу. Мелкие доки остаются плоскими. Подробности — `references/format-spec.md` («Sharded documents»).
 
 Exit codes: `0` — все файлы дошли до терминального состояния (`needs_attention` это НЕ ошибка); `2` — отказ старта (нет `_scout.json`, либо у какого-то файла остался непустой `action_required` — вернитесь в Phase 3); `3` — был хотя бы один файл в `error`-бакете (см. `_logs/errors.json`).
 
@@ -144,6 +147,7 @@ Exit codes: `0` — все файлы дошли до терминального
 | `passthrough-txt` | `extract_md_txt.py --mode txt` |
 | `trafilatura`     | `extract_html.py` |
 | `ipynb`           | `extract_ipynb.py` |
+| `epub`            | `extract_epub.py` *(pandoc when on PATH; else `zip`+`markdownify` fallback)* |
 
 ```bash
 python3 <skill_dir>/scripts/ensure_env.py extract_pdf_pymupdf4llm.py \
@@ -357,10 +361,12 @@ heading catalog alone is fine; the index earns its keep from dozens of docs up.
 | `extract_docx.py`            | DOCX → Markdown via mammoth + markdownify; switches to pandoc when source contains OOXML math so formulas survive as LaTeX |
 | `extract_doc.py`             | legacy binary `.doc` → Markdown via a system-converter cascade (`soffice`/`libreoffice` or macOS `textutil` → `.docx` → full DOCX pipeline; `antiword` → plain text). Exits 2 with an install hint when no converter is on PATH |
 | `extract_rtf.py`             | RTF → Markdown via pandoc when available (tables/images/structure), else the pure-Python `striprtf` fallback (plain text) |
+| `extract_epub.py`            | EPUB → Markdown via pandoc when available (OPF spine order, images, EPUB3 MathML → `$...$` LaTeX), else the pure-Python `zip`+`markdownify` fallback (images → placeholders, MathML dropped). Records `book_title`/`book_authors` in frontmatter |
 | `extract_pptx.py`            | PPTX → Markdown, preserves speaker notes |
 | `extract_ipynb.py`           | Jupyter notebook (.ipynb) → Markdown; per-cell anchors, text outputs preserved, base64 images dropped |
 | `extract_md_txt.py`          | normalize Markdown/text, encoding-aware |
 | `extract_html.py`            | HTML → Markdown via trafilatura (boilerplate removal) |
+| `shard_doc.py`               | Phase 4.5 opt-in (`extract_corpus --shard`) — splits oversized docs (>24k tok) into `docs/<id>-<slug>/` folders (`_index.md` TOC + balanced per-chapter `NNN-*.md` parts). Heading-first split, verbatim self-check (abort-to-flat on mismatch), idempotent by `source_sha256` |
 | `normalize_md.py`            | structural cleanup pass (idempotent, never summarizes) |
 | `postprocess_popo.py`        | **opt-in stage 2** — runs upstream opendatalab/MinerU-Popo over cached mineru outputs to rebuild document trees (heading hierarchy, cross-page table merging, paragraph truncation repair). Resolves the Popo repo from `--popo-repo` > `$DOC2KB_POPO_REPO` > the `bootstrap_popo.py` auto-default; PATH-injects the bootstrapped env (sentinel `.doc2kb-popo-python`); `--auto-setup` runs `bootstrap_popo.py` when unconfigured. |
 | `bootstrap_popo.py`          | **opt-in** auto-setup of the Popo stage-2 env — clone repo → create env (uv→conda→venv, py3.10) → install deps (upstream CUDA reqs on Linux, `requirements-popo-mac.txt` MPS set on macOS) → download the ~16 GB model (resumable, completeness-checked) → patch `POPO_MODEL_PATH` default; on macOS also pins `device_map`→MPS (verified ~22 tok/s, else accelerate disk-offloads). Never runs in the default pipeline; invoked directly or via `postprocess_popo.py --auto-setup` (gated by `DOC2KB_POPO_AUTO`). |
@@ -515,10 +521,12 @@ python3 <skill_dir>/scripts/ensure_env.py scout_corpus.py <in> <kb> --enable-min
 **MVP lightweight tier (всегда установлен):**
 - PDF (text-layer), DOCX, PPTX (с speaker notes), IPYNB (Jupyter notebook —
   source + text outputs, base64-картинки заменяются placeholder),
-  RTF, MD, TXT, HTML.
+  RTF, EPUB, MD, TXT, HTML.
 - `.ipynb` парсится stdlib `json` — никаких jupyter/nbformat в venv.
 - `.rtf` — pure-Python `striprtf` всегда доступен; pandoc (если на PATH)
   даёт более качественный маршрут с таблицами/картинками.
+- `.epub` — pure-Python `zip`+`markdownify` (spine-порядок) всегда доступен;
+  pandoc (если на PATH) даёт картинки + EPUB3 MathML → LaTeX.
 - `.doc` (legacy binary Word) — поддержан через системный конвертер
   (`soffice`/`libreoffice`, macOS `textutil`, или `antiword`). Конвертер
   НЕ ставится в venv; без него `extract_doc.py` выходит с install-hint.
@@ -533,6 +541,6 @@ python3 <skill_dir>/scripts/ensure_env.py scout_corpus.py <in> <kb> --enable-min
   Оба env по-умолчанию выключены (heavy-deps-opt-in).
 
 **Follow-up (ещё не в скилле):**
-- XLSX, EPUB, ODT, standalone images.
+- XLSX, ODT, standalone images.
 - Scanned PDFs через OCRmyPDF + Tesseract (альтернатива MinerU без VLM).
 - Heavy tier на базе docling / marker-pdf для специфических layout-кейсов.

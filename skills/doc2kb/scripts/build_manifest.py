@@ -37,38 +37,74 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 TEMPLATE_AGENTS = SKILL_DIR / "assets" / "agents_template.md"
 
 
+_EXTRA_KEYS = (
+    "pages", "slides", "has_notes", "notes_chars",
+    "inline_images", "has_tables", "has_equations",
+    "has_charts", "has_tracked_changes", "paragraphs",
+    "source_encoding", "headings",
+    "cells", "code_cells", "markdown_cells", "raw_cells",
+    "has_outputs", "language", "kernelspec_name",
+)
+
+
+def _record_from(fm: dict[str, Any], kb_path: str) -> dict[str, Any]:
+    rec: dict[str, Any] = {
+        "id": fm.get("id"),
+        "source_path": fm.get("source"),
+        "kb_path": kb_path,
+        "sha256": fm.get("source_sha256"),
+        "source_type": fm.get("source_type"),
+        "extraction_method": fm.get("extraction_method"),
+        "tokens_estimated": fm.get("tokens_estimated", 0),
+        "warnings": fm.get("warnings", []) or [],
+    }
+    for key in _EXTRA_KEYS:
+        if key in fm:
+            rec[key] = fm[key]
+    return rec
+
+
 def collect_docs(kb_dir: Path) -> list[dict[str, Any]]:
     """Reads every kb/docs/*.md frontmatter and returns a list of dicts
-    suitable for manifest.documents."""
+    suitable for manifest.documents. A sharded doc (a `docs/<id>-<slug>/`
+    folder with an `_index.md` parent) collapses to ONE logical entry with a
+    `parts[]` list — never N entries — so `total_documents` counts the book
+    once and the count-drift invariant holds."""
     docs_dir = kb_dir / "docs"
     if not docs_dir.is_dir():
         return []
     out: list[dict[str, Any]] = []
+    # Flat docs (the top-level glob skips subfolders, so parts are not
+    # double-counted). Skip a flat doc shadowed by a sharded sibling folder —
+    # a stale re-extract left beside its shard folder must not count twice.
     for p in sorted(docs_dir.glob("*.md")):
+        sibling = docs_dir / p.stem / "_index.md"
+        if sibling.is_file() and read_frontmatter(sibling).get("sharded"):
+            continue
         fm = read_frontmatter(p)
         if not fm:
             continue
-        rec: dict[str, Any] = {
-            "id": fm.get("id"),
-            "source_path": fm.get("source"),
-            "kb_path": f"docs/{p.name}",
-            "sha256": fm.get("source_sha256"),
-            "source_type": fm.get("source_type"),
-            "extraction_method": fm.get("extraction_method"),
-            "tokens_estimated": fm.get("tokens_estimated", 0),
-            "warnings": fm.get("warnings", []) or [],
-        }
-        # Per-type extras.
-        for key in (
-            "pages", "slides", "has_notes", "notes_chars",
-            "inline_images", "has_tables", "has_equations",
-            "has_charts", "has_tracked_changes", "paragraphs",
-            "source_encoding", "headings",
-            "cells", "code_cells", "markdown_cells", "raw_cells",
-            "has_outputs", "language", "kernelspec_name",
-        ):
-            if key in fm:
-                rec[key] = fm[key]
+        out.append(_record_from(fm, f"docs/{p.name}"))
+    # Sharded docs: one entry per _index.md parent, carrying its parts.
+    for idx in sorted(docs_dir.glob("*/_index.md")):
+        fm = read_frontmatter(idx)
+        if not fm or not fm.get("sharded"):
+            continue
+        rec = _record_from(fm, f"docs/{idx.parent.name}/_index.md")
+        rec["sharded"] = True
+        rec["part_count"] = fm.get("part_count")
+        parts: list[dict[str, Any]] = []
+        for name in fm.get("parts") or []:
+            pf = read_frontmatter(idx.parent / name)
+            if not pf:
+                continue
+            parts.append({
+                "order": pf.get("part_order"),
+                "title": pf.get("part_title"),
+                "kb_path": f"docs/{idx.parent.name}/{name}",
+                "tokens_estimated": pf.get("tokens_estimated", 0),
+            })
+        rec["parts"] = parts
         out.append(rec)
     return out
 
@@ -251,12 +287,22 @@ def write_index_md(kb_dir: Path, manifest: dict[str, Any]) -> None:
                     bits.append(f"{d['inline_images']} img")
                 if d.get("tokens_estimated"):
                     bits.append(f"~{d['tokens_estimated']:,} tok")
+                if d.get("sharded"):
+                    bits.append(f"{d.get('part_count')} parts")
                 meta = ", ".join(bits) if bits else ""
                 title = d.get("source_path") or d.get("id")
                 lines.append(f"- [{title}]({d['kb_path']})"
                              + (f" — {meta}" if meta else ""))
+                if d.get("sharded"):
+                    # Sharded: link each part so a human/agent can jump straight
+                    # to a chapter (a search hit already cites the exact part).
+                    for part in d.get("parts") or []:
+                        ptok = part.get("tokens_estimated") or 0
+                        lines.append(
+                            f"  - [{part.get('title') or ('part %s' % part.get('order'))}]"
+                            f"({part['kb_path']}) — ~{ptok:,} tok")
                 headings = d.get("headings") or []
-                if headings:
+                if headings and not d.get("sharded"):
                     lines.append("  - " + " · ".join(str(h) for h in headings))
                 kw = index["keywords"].get(d.get("id")) if index else None
                 if kw:

@@ -186,12 +186,15 @@ def _scout(kb_root: Path, input_dir: Path, tier: Optional[str],
 
 
 def _extract(kb_root: Path, tier: Optional[str], *, timeout: Optional[int],
-             normalize: bool, always_popo: bool, quiet: bool) -> tuple[int, Optional[dict]]:
+             normalize: bool, shard: bool, always_popo: bool,
+             quiet: bool) -> tuple[int, Optional[dict]]:
     args = [str(kb_root)]
     if timeout is not None:
         args += ["--timeout", str(timeout)]
     if normalize:
         args.append("--normalize")
+    if shard:
+        args.append("--shard")
     if quiet:
         args.append("--quiet")
     env_note = ""
@@ -355,8 +358,8 @@ def _run_pipeline(args: argparse.Namespace) -> int:
         return resolved
 
     rc, summary = _extract(kb_root, tier, timeout=args.timeout,
-                           normalize=args.normalize, always_popo=args.always_popo,
-                           quiet=args.quiet)
+                           normalize=args.normalize, shard=args.shard,
+                           always_popo=args.always_popo, quiet=args.quiet)
     if rc == 2:
         return _fail((summary or {}).get("reason", "extract refused to start"))
 
@@ -389,6 +392,8 @@ def _add_pipeline_flags(p: argparse.ArgumentParser) -> None:
                    help="run MinerU→Popo stage 2 on every mineru doc (opt-in, heavy)")
     p.add_argument("--normalize", action="store_true",
                    help="run normalize_md after each extraction")
+    p.add_argument("--shard", action="store_true",
+                   help="split oversized docs (>24k tok) into per-chapter folders")
     p.add_argument("--no-index", action="store_true",
                    help="skip the Phase 5.5 BM25 search index (default: build it)")
     p.add_argument("--timeout", type=int, default=None,
@@ -422,6 +427,7 @@ def main() -> int:
     p_ext.add_argument("--tier", choices=["mineru"], default=None)
     p_ext.add_argument("--always-popo", action="store_true")
     p_ext.add_argument("--normalize", action="store_true")
+    p_ext.add_argument("--shard", action="store_true")
     p_ext.add_argument("--timeout", type=int, default=None)
     p_ext.add_argument("-q", "--quiet", action="store_true")
 
@@ -476,7 +482,7 @@ def main() -> int:
         if resolved is not None:
             return resolved
         rc, summary = _extract(kb_root, tier, timeout=args.timeout,
-                               normalize=args.normalize,
+                               normalize=args.normalize, shard=args.shard,
                                always_popo=args.always_popo, quiet=args.quiet)
         return _finish_extract(kb_root, rc, summary)
     if args.command == "manifest":

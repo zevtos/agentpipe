@@ -118,6 +118,7 @@ DISPATCH: dict[str, tuple[str, list[str]]] = {
     "passthrough-txt": ("extract_md_txt.py", ["--mode", "txt"]),
     "trafilatura":     ("extract_html.py", []),
     "ipynb":           ("extract_ipynb.py", []),
+    "epub":            ("extract_epub.py", []),
 }
 
 # Explicit "do not extract" outcomes already decided upstream (scout or Phase 3).
@@ -272,6 +273,9 @@ def main() -> int:
                     help=f"per-file extractor timeout in seconds (default {DEFAULT_TIMEOUT_SEC})")
     ap.add_argument("--normalize", action="store_true",
                     help="run normalize_md.py --write after each successful extraction (default off)")
+    ap.add_argument("--shard", action="store_true",
+                    help="after extraction, split oversized docs (>24k tok) into "
+                         "per-chapter folders via shard_doc.py (default off)")
     ap.add_argument("--quiet", action="store_true", help="suppress per-file stderr progress")
     args = ap.parse_args()
 
@@ -490,6 +494,19 @@ def main() -> int:
     if popo_targets:
         popo = _run_popo(kb_root, popo_targets, needs_attention, args.quiet)
 
+    # Opt-in Phase 4.5: split oversized docs into per-chapter folders. Runs once
+    # over the finished docs (not per-file) — a doc only shards if it exceeds the
+    # threshold and has usable structure; otherwise it stays flat. Non-fatal: a
+    # shard failure leaves the doc flat (mirrors --normalize's best-effort pass).
+    shard: dict | None = None
+    if args.shard:
+        try:
+            from shard_doc import shard_corpus  # noqa: E402  (lazy: only when opted in)
+            shard = shard_corpus(kb_root, quiet=args.quiet)
+        except Exception as e:  # noqa: BLE001 — sharding never aborts extraction
+            log(f"shard pass failed (non-fatal): {e}")
+            shard = {"ok": False, "reason": f"{type(e).__name__}: {e}"}
+
     # Write errors.json — overwrite even when empty so build_manifest never
     # reads a stale error list from a previous run.
     errors_path = logs_dir / "errors.json"
@@ -510,6 +527,7 @@ def main() -> int:
         "needs_attention": needs_attention,
         "unclassified_warnings": unclassified,
         "popo": popo,
+        "shard": shard,
         "errors_log": str(errors_path) if errors else None,
         "elapsed_seconds": round(time.time() - t0, 2),
         "driver": driver,
