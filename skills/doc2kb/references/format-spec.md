@@ -70,7 +70,7 @@ Emitted by `scout_corpus.py`. Schema:
       "raw_cells": int | null,               // ipynb
       "has_outputs": bool | null,            // ipynb
       "encoding": "utf-8" | "cp1251" | ... | null,
-      "extraction_strategy": "pymupdf4llm"|"mineru"|"mammoth"|"doc"|"rtf"|"python-pptx"|"passthrough-md"|"passthrough-txt"|"trafilatura"|"ipynb"|"needs_password"|"needs_ocr_or_vlm"|"not_in_mvp"|"skip",
+      "extraction_strategy": "pymupdf4llm"|"mineru"|"mammoth"|"doc"|"rtf"|"python-pptx"|"passthrough-md"|"passthrough-txt"|"trafilatura"|"ipynb"|"epub"|"needs_password"|"needs_ocr_or_vlm"|"not_in_mvp"|"skip",
       "estimated_tokens": int | null,
       "warnings": [string],
       "action_required": "ask_user_password_or_skip"|"ask_user_ocr_strategy"|"ask_user_proceed_huge"|"ask_user_skip_corrupt"|"ask_user_skip_unsupported" | null
@@ -98,7 +98,7 @@ Every extracted document has a YAML frontmatter block. Required fields:
 |---------------------|-------------|------------------|
 | `id`                | string      | scout-assigned doc-NNN |
 | `source`            | string      | relative path inside input corpus |
-| `source_type`       | string      | `pdf`/`docx`/`doc`/`pptx`/`ipynb`/`rtf`/`md`/`txt`/`html` |
+| `source_type`       | string      | `pdf`/`docx`/`doc`/`pptx`/`ipynb`/`rtf`/`epub`/`md`/`txt`/`html` |
 | `source_sha256`     | string      | sha256 of original bytes |
 | `extraction_method` | string      | `name@version` of the extractor used |
 | `extraction_date`   | string      | YYYY-MM-DD UTC |
@@ -219,6 +219,75 @@ renders as `![image N: ...]()`. Image outputs inside `.ipynb` code cells are
 collapsed into a single `*(image output omitted: N)*` placeholder per cell
 plus a warning surfaced in frontmatter.
 
+## Sharded documents (folder form)
+
+Emitted by the opt-in `shard_doc.py` pass (Phase 4.5, enabled with
+`extract_corpus.py --shard` / `dkb … --shard`). A doc whose body exceeds the
+shard trigger (**24,000 tokens** by default) AND exposes usable structure is
+replaced **in place**: the flat `docs/<id>-<slug>.md` becomes a folder
+
+```
+docs/<id>-<slug>/
+  _index.md          # parent — frontmatter + generated TOC, no source body
+  001-<part-slug>.md # part 1 (verbatim)
+  002-<part-slug>.md # part 2
+  ...
+```
+
+Split is **heading-first** (top Markdown heading level → deeper levels only
+inside an oversized unit → `[page N]` anchors for header-less PDFs → blank-line
+paragraph packing as the last resort). Token target is used **only** to pack
+small units together and to sub-divide a single unit above the cap, and even
+then the cut is on a block boundary — never mid-paragraph, never inside a code
+fence. Parts are balanced: every part lands roughly in `[min, cap]` (defaults
+**2,000 / 12,000** tokens, target **8,000**); the only part allowed past the cap
+is a single indivisible paragraph (flagged `part_oversize`). Docs at or below
+the trigger, or above it but lacking structure, stay flat and untouched.
+
+**Verbatim invariant** (Rule #1): concatenating the parts in `part_order`
+reproduces the original body byte-for-byte (modulo whitespace normalization and
+the asset-link depth rewrite below). `shard_doc.py` self-checks this before
+writing and **aborts to flat** on any mismatch — sharding can never lose content.
+
+**Asset links** in a part are one directory deeper than the flat doc, so
+`](../assets/…)` is rewritten to `](../../assets/…)` in part bodies (link
+targets only; body text untouched).
+
+Parent `_index.md` frontmatter:
+
+| key | meaning |
+|-----|---------|
+| `id` / `source` / `source_type` / `source_sha256` / `extraction_method` | inherited verbatim from the original flat doc (parts share the same `id` and `source_sha256`) |
+| `tokens_estimated` | sum over parts (== original body tokens) |
+| `headings` / `warnings` | the original doc-level values |
+| `sharded` | `true` |
+| `shard_version` | shard-pass schema version |
+| `shard_tool` | `doc2kb-shard@<VERSION>` |
+| `part_count` | number of parts |
+| `parts` | ordered list of part filenames |
+
+Each part `NNN-<slug>.md` frontmatter:
+
+| key | meaning |
+|-----|---------|
+| `id` / `source` / `source_type` / `source_sha256` | **same as parent** — citations resolve to the real source, provenance preserved |
+| `parent` | `_index.md` (relative link up) |
+| `part_order` | 1-based position |
+| `part_title` | the structural unit's heading (or `Part N`) |
+| `part_sha256` | sha256 of this part's verbatim body |
+| `tokens_estimated` | this part only |
+| `headings` | this part's headings |
+| `warnings` | `part_oversize: …` only if an indivisible paragraph exceeds the cap |
+
+**Consumers.** A sharded doc is ONE logical entry in `manifest.json`
+(`sharded: true` + `parts[]`, `kb_path` → `_index.md`) so `total_documents`
+counts the book once. The search index (`index_kb.py`) indexes the **part
+bodies** — all parts share the parent `doc_id`, so per-doc filters still match,
+while each chunk's `kb_path` cites the small part file an agent should open. The
+parent `_index.md` is navigation, not content: it is excluded from both the
+manifest document list and the search index. Idempotent: an already-sharded
+folder with a matching `source_sha256` is a no-op; a source change re-shards.
+
 ## `manifest.json`
 
 Emitted by `build_manifest.py`. Schema:
@@ -242,6 +311,15 @@ Emitted by `build_manifest.py`. Schema:
       "tokens_estimated": int,
       "warnings": [string],
       // ... copies relevant per-type fields from the doc's frontmatter
+      // Sharded docs (see "Sharded documents" below) add:
+      "sharded": true,                 // present + true only for a sharded doc
+      "part_count": int,               // number of part files
+      "kb_path": "docs/doc-NNN-slug/_index.md",   // points at the folder TOC
+      "parts": [                        // ordered, one per part file
+        { "order": int, "title": "string",
+          "kb_path": "docs/doc-NNN-slug/NNN-part-slug.md",
+          "tokens_estimated": int }
+      ]
     }
   ],
   "skipped": [

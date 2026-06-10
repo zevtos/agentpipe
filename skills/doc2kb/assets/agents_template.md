@@ -10,6 +10,13 @@ Read in this order:
    to the question at hand. Each has a YAML frontmatter block with `source`
    (original file path), `source_sha256`, `pages` or `slides`, `headings`,
    `tokens_estimated`, and any `warnings` from extraction.
+3. **`docs/<id>-<slug>/`** (a folder, not a file) — a large document that was
+   **sharded** into per-chapter parts. `_index.md` is its table of contents;
+   `NNN-*.md` are the verbatim parts in reading order. A search hit citing
+   `docs/<id>-<slug>/NNN-*.md` points at ONE small part — open that part, not
+   the whole folder, and never the parent book at once. Each part carries the
+   parent's `id` and `source_sha256`; concatenating the parts reproduces the
+   original verbatim.
 
 `manifest.json` (machine-readable: per-doc sha256, extraction_method, token
 estimates in JSON) and `llms.txt` (an llmstxt.org catalog for external tools)

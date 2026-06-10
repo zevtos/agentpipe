@@ -12,6 +12,10 @@ mammoth>=1.6.0,<2.0
 python-pptx>=0.6.23,<2.0
 openpyxl>=3.1.0,<4.0
 trafilatura>=1.12.0,<3.0
+# markdownify powers the HTML extractor's fallback AND the pure-Python EPUB
+# route (extract_epub.py walks the OPF spine via stdlib zipfile/ElementTree and
+# markdownifies each XHTML chapter). pandoc remains the preferred EPUB route
+# when on PATH; no new dependency is needed for the lightweight EPUB path.
 markdownify>=0.13.0,<2.0
 charset-normalizer>=3.3.0,<4.0
 # striprtf powers the pure-Python RTF fallback (extract_rtf.py) when pandoc is

@@ -51,6 +51,11 @@ from _common import (  # type: ignore
 # refined at extract time. Tuned to match the PDF sampling pattern (≤12).
 IPYNB_SCOUT_MAX_CELLS = 4000
 
+# Number of spine documents the EPUB scout samples for MathML before giving up
+# — math is usually flagged in the first chapters, and reading every chapter of
+# a large book is too slow for scout. Refined nothing downstream; informational.
+EPUB_SCOUT_MATH_SAMPLE = 12
+
 
 # Schema version of the scout JSON output. Bump on breaking changes.
 SCHEMA_VERSION = "1.0"
@@ -387,6 +392,58 @@ def ipynb_richness(path: Path) -> dict[str, Any]:
     return out
 
 
+def epub_richness(path: Path) -> dict[str, Any]:
+    """Parse the OPF package to count spine documents (chapters), images, and
+    detect MathML, plus pull dc:title/dc:creator. `xhtml_bytes` is the summed
+    uncompressed size of the spine documents — a real token proxy, unlike the
+    compressed `size_bytes` of the .epub zip itself."""
+    out: dict[str, Any] = {
+        "spine_documents": 0,
+        "images": 0,
+        "has_math": False,
+        "xhtml_bytes": 0,
+        "book_title": None,
+        "book_authors": None,
+    }
+    try:
+        import zipfile
+
+        from _common import parse_epub_structure  # type: ignore
+    except Exception as e:  # pragma: no cover - import guard
+        out["warnings"] = [f"epub scout unavailable: {str(e)[:200]}"]
+        return out
+    try:
+        with zipfile.ZipFile(path) as zf:
+            struct = parse_epub_structure(zf)
+            names = set(zf.namelist())
+            out["images"] = sum(
+                1 for _href, mt in struct["items"].values()
+                if mt.startswith("image/")
+            )
+            out["book_title"] = struct.get("title")
+            out["book_authors"] = struct.get("authors")
+            sampled = 0
+            for href in struct["spine"]:
+                if href not in names:
+                    continue
+                out["spine_documents"] += 1
+                try:
+                    out["xhtml_bytes"] += zf.getinfo(href).file_size
+                except KeyError:
+                    pass
+                if sampled < EPUB_SCOUT_MATH_SAMPLE and not out["has_math"]:
+                    try:
+                        chunk = zf.read(href)[:200_000].decode("utf-8", "ignore")
+                        if "<math" in chunk or "MathML" in chunk:
+                            out["has_math"] = True
+                    except Exception:
+                        pass
+                    sampled += 1
+    except Exception as e:
+        out["warnings"] = [f"epub scout failed: {str(e)[:200]}"]
+    return out
+
+
 def text_encoding(path: Path, sample_bytes: int = 65536) -> dict[str, Any]:
     out: dict[str, Any] = {"encoding": "utf-8"}
     try:
@@ -512,7 +569,15 @@ def set_strategy_and_tokens(info: dict[str, Any], *, enable_mineru: bool = False
         info["estimated_tokens"] = (
             max(cells * 80 + code_cells * 60, 200) if cells else None
         )
-    elif t in {"xlsx", "epub", "odt", "image"}:
+    elif t == "epub":
+        # Pandoc preferred (spine order + images + MathML→LaTeX); the
+        # zip+markdownify route is the pure-Python lightweight fallback, so
+        # epub always has a working path. Token proxy from summed uncompressed
+        # XHTML bytes (~6 chars/token), not the compressed .epub size.
+        info["extraction_strategy"] = "epub"
+        xhtml = info.get("xhtml_bytes") or 0
+        info["estimated_tokens"] = max(xhtml // 6, 100) if xhtml else None
+    elif t in {"xlsx", "odt", "image"}:
         info["extraction_strategy"] = "not_in_mvp"
         info["estimated_tokens"] = None
         warnings.append(f"{t}: not supported in MVP (follow-up release)")
@@ -529,7 +594,7 @@ def set_strategy_and_tokens(info: dict[str, Any], *, enable_mineru: bool = False
         warnings.append(f"large file: {info['size_bytes'] // (1024 * 1024)} MB")
         if info.get("extraction_strategy") in (
             "pymupdf4llm", "mammoth", "doc", "rtf", "python-pptx",
-            "passthrough-md", "passthrough-txt", "trafilatura", "ipynb",
+            "passthrough-md", "passthrough-txt", "trafilatura", "ipynb", "epub",
         ) and not info.get("action_required"):
             info["action_required"] = "ask_user_proceed_huge"
 
@@ -640,6 +705,8 @@ def scan_file(idx: int, path: Path, input_root: Path,
         info.update(pptx_richness(path))
     elif src_type == "ipynb":
         info.update(ipynb_richness(path))
+    elif src_type == "epub":
+        info.update(epub_richness(path))
     elif src_type in ("md", "txt"):
         info.update(text_encoding(path))
 
@@ -662,6 +729,12 @@ def scan_file(idx: int, path: Path, input_root: Path,
     info.setdefault("has_outputs", None)
     info.setdefault("language", None)
     info.setdefault("kernelspec_name", None)
+    info.setdefault("spine_documents", None)
+    info.setdefault("images", None)
+    info.setdefault("xhtml_bytes", None)
+    info.setdefault("has_math", None)
+    info.setdefault("book_title", None)
+    info.setdefault("book_authors", None)
     return info
 
 

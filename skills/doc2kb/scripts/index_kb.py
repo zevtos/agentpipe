@@ -52,16 +52,20 @@ import re
 import sqlite3
 import sys
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Optional
 
 from _common import (  # noqa: E402
+    FENCE_RE,
+    HEADING_RE,
     PAGE_ANCHOR_RE,
     count_tokens,
     read_body,
     read_frontmatter,
     sanitize_heading,
     split_body_by_page_anchors,
+    split_markdown_blocks as _split_blocks,
     tool_version_string,
     utc_now_iso,
 )
@@ -72,8 +76,6 @@ INDEX_SCHEMA_VERSION = "1"
 DEFAULT_TARGET_TOKENS = 400
 DEFAULT_MAX_TOKENS = 512
 
-HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
-FENCE_RE = re.compile(r"^\s*(```|~~~)")
 _TOKEN_RE = re.compile(r"[0-9A-Za-zÀ-ɏЀ-ӿ]+")
 _SENT_RE = re.compile(r"(?<=[.!?。;])\s+|\n")
 
@@ -100,40 +102,6 @@ def _doc_title(body: str, source_path: str) -> str:
             break
     stem = Path(source_path).stem if source_path else ""
     return sanitize_heading(stem, maxlen=120) or (source_path or "document")
-
-
-def _split_blocks(text: str) -> list[str]:
-    """Split text into blocks: paragraphs on blank lines, headings as their own
-    block, fenced code kept intact."""
-    blocks: list[str] = []
-    buf: list[str] = []
-    in_fence = False
-
-    def flush() -> None:
-        if buf:
-            joined = "\n".join(buf).rstrip()
-            if joined.strip():
-                blocks.append(joined)
-            buf.clear()
-
-    for line in text.split("\n"):
-        if FENCE_RE.match(line):
-            buf.append(line)
-            in_fence = not in_fence
-            continue
-        if in_fence:
-            buf.append(line)
-            continue
-        if not line.strip():
-            flush()
-            continue
-        if HEADING_RE.match(line):
-            flush()
-            blocks.append(line.rstrip())
-            continue
-        buf.append(line)
-    flush()
-    return blocks
 
 
 def _sentence_split(block: str, cap: int) -> list[str]:
@@ -276,11 +244,22 @@ def _tf(text: str) -> dict[str, int]:
 # ---------- index build ----------
 
 def _collect_docs(kb_dir: Path) -> list[dict[str, Any]]:
+    """One record per indexable Markdown file. Flat docs yield one record each;
+    a sharded doc (`docs/<id>-<slug>/`) yields one record PER PART, all sharing
+    the parent `doc_id` but each carrying its own `kb_path` so a search hit
+    cites the small part file. The parent `_index.md` is a TOC, not content —
+    skipped so the synthetic table never pollutes the passage index."""
     docs_dir = kb_dir / "docs"
     if not docs_dir.is_dir():
         return []
     out: list[dict[str, Any]] = []
+    # Flat docs at the top level. Skip a flat doc that has a sharded sibling
+    # folder (a stale re-extract left next to its shard folder) so the same
+    # content isn't indexed twice under one doc_id.
     for p in sorted(docs_dir.glob("*.md")):
+        sibling = docs_dir / p.stem / "_index.md"
+        if sibling.is_file() and read_frontmatter(sibling).get("sharded"):
+            continue
         fm = read_frontmatter(p)
         if not fm or not fm.get("id"):
             continue
@@ -293,6 +272,25 @@ def _collect_docs(kb_dir: Path) -> list[dict[str, Any]]:
             "tokens_estimated": fm.get("tokens_estimated") or 0,
             "body": read_body(p),
         })
+    # Sharded docs: one folder with an _index.md parent + numbered parts.
+    for idx in sorted(docs_dir.glob("*/_index.md")):
+        pfm = read_frontmatter(idx)
+        if not pfm or not pfm.get("id") or not pfm.get("sharded"):
+            continue
+        for name in pfm.get("parts") or []:
+            part = idx.parent / name
+            part_fm = read_frontmatter(part)
+            if not part_fm:
+                continue
+            out.append({
+                "doc_id": pfm.get("id"),                       # shared parent id
+                "source_path": pfm.get("source") or "",
+                "kb_path": f"docs/{idx.parent.name}/{name}",   # cite the part file
+                "source_type": pfm.get("source_type") or "unknown",
+                "sha256": pfm.get("source_sha256") or "",
+                "tokens_estimated": part_fm.get("tokens_estimated") or 0,
+                "body": read_body(part),
+            })
     return out
 
 
@@ -367,7 +365,8 @@ def build_index(kb_dir: Path, *, target: int = DEFAULT_TARGET_TOKENS,
         if write_launchers:
             _write_launchers(kb_dir)
         return {"ok": True, "status": "unchanged", "kb_dir": str(kb_dir),
-                "index": str(db_path), "documents": len(docs), "chunks": n_chunks}
+                "index": str(db_path), "documents": len({d["doc_id"] for d in docs}),
+                "chunks": n_chunks}
 
     # Build into a temp db, then atomically replace.
     tmp_path = kb_dir / ".index.build.db"
@@ -381,13 +380,27 @@ def build_index(kb_dir: Path, *, target: int = DEFAULT_TARGET_TOKENS,
         _write_schema(conn, fts)
 
         chunk_id = 0
-        per_doc_tf: list[dict[str, int]] = []
-        doc_chunk_counts: list[int] = []
         total_chunks = 0
+        # `docs` keyed by doc_id (a sharded doc contributes N part records that
+        # share one doc_id — they collapse to ONE `docs` row here while their
+        # chunks all land in `chunks` with their own per-part kb_path). Ordered
+        # so the docs table preserves first-seen order.
+        doc_rows: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
         for d in docs:
             title, chs = chunk_doc(d["body"], d["source_path"], target=target, cap=cap)
-            tf: dict[str, int] = {}
-            for ordn, ch in enumerate(chs):
+            rec = doc_rows.get(d["doc_id"])
+            if rec is None:
+                # For a sharded doc the per-part kb_path is `docs/<folder>/<part>`;
+                # the doc-level row points at the folder's `_index.md` map.
+                kbp = d["kb_path"]
+                if kbp.count("/") >= 2:
+                    kbp = kbp.rsplit("/", 1)[0] + "/_index.md"
+                rec = {"source_path": d["source_path"], "kb_path": kbp,
+                       "source_type": d["source_type"], "sha256": d["sha256"],
+                       "tokens": 0, "n_chunks": 0, "ord": 0, "tf": {}}
+                doc_rows[d["doc_id"]] = rec
+            rec["tokens"] += d.get("tokens_estimated") or 0
+            for ch in chs:
                 chunk_id += 1
                 ctx = _context_header(title, ch["heading"], ch["page"])
                 conn.execute(
@@ -395,25 +408,28 @@ def build_index(kb_dir: Path, *, target: int = DEFAULT_TARGET_TOKENS,
                     "source_type, page, heading, ord, tokens, context, body) "
                     "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                     (chunk_id, d["doc_id"], d["source_path"], d["kb_path"],
-                     d["source_type"], ch["page"], ch["heading"] or None, ordn,
+                     d["source_type"], ch["page"], ch["heading"] or None, rec["ord"],
                      ch["tokens"], ctx, ch["body"]))
+                rec["ord"] += 1
                 if keywords:
                     # Keywords come from the verbatim body only — never the
                     # synthetic context header (which would inject "page", the
                     # doc title, etc. as spurious terms).
                     for term, freq in _tf(ch["body"]).items():
-                        tf[term] = tf.get(term, 0) + freq
-            per_doc_tf.append(tf)
-            doc_chunk_counts.append(len(chs))
+                        rec["tf"][term] = rec["tf"].get(term, 0) + freq
+            rec["n_chunks"] += len(chs)
             total_chunks += len(chs)
 
-        kw_lists = _keywords(per_doc_tf) if keywords else [[] for _ in docs]
-        for d, n_ch, kw in zip(docs, doc_chunk_counts, kw_lists):
+        doc_ids = list(doc_rows.keys())
+        kw_lists = (_keywords([doc_rows[i]["tf"] for i in doc_ids])
+                    if keywords else [[] for _ in doc_ids])
+        for doc_id, kw in zip(doc_ids, kw_lists):
+            rec = doc_rows[doc_id]
             conn.execute(
                 "INSERT INTO docs(doc_id, source_path, kb_path, source_type, "
                 "sha256, tokens_estimated, n_chunks, keywords) VALUES(?,?,?,?,?,?,?,?)",
-                (d["doc_id"], d["source_path"], d["kb_path"], d["source_type"],
-                 d["sha256"], d["tokens_estimated"], n_ch, ", ".join(kw)))
+                (doc_id, rec["source_path"], rec["kb_path"], rec["source_type"],
+                 rec["sha256"], rec["tokens"], rec["n_chunks"], ", ".join(kw)))
 
         if fts:
             conn.execute(
@@ -428,7 +444,7 @@ def build_index(kb_dir: Path, *, target: int = DEFAULT_TARGET_TOKENS,
             "fts": "1" if fts else "0",
             "chunk_target_tokens": str(target),
             "chunk_max_tokens": str(cap),
-            "documents": str(len(docs)),
+            "documents": str(len(doc_rows)),
             "chunks": str(total_chunks),
         }
         conn.executemany("INSERT INTO meta(key, value) VALUES(?,?)", list(meta.items()))
@@ -441,7 +457,7 @@ def build_index(kb_dir: Path, *, target: int = DEFAULT_TARGET_TOKENS,
         _write_launchers(kb_dir)
     return {"ok": True, "status": "built", "kb_dir": str(kb_dir),
             "index": str(db_path), "backend": "fts5" if fts else "python-bm25",
-            "documents": len(docs), "chunks": total_chunks}
+            "documents": len(doc_rows), "chunks": total_chunks}
 
 
 # ---------- portable launchers ----------

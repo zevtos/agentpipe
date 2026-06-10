@@ -90,10 +90,11 @@ assert payload["ok"]
 | `passthrough-txt`   | `extract_md_txt.py --mode txt`  | `<input> <output> --doc-id <id> --source-rel <rel> --mode txt` |
 | `trafilatura`       | `extract_html.py`               | `<input> <output> --doc-id <id> --source-rel <rel>` |
 | `ipynb`             | `extract_ipynb.py`              | `<input> <output> --doc-id <id> --source-rel <rel>` |
+| `epub`              | `extract_epub.py`               | `<input> <output> --doc-id <id> --source-rel <rel>` (pandoc when on PATH — honours OPF spine order, preserves tables/images, converts EPUB3 MathML → `$...$` LaTeX; else pure-Python `zip`+`markdownify` → images become `![image N]()` placeholders and MathML is dropped. Force the fallback with `--force-fallback`. Auto image extraction to `<kb_dir>/assets/`; same `--assets-dir`/`--assets-rel`/`--no-extract-images` flags) |
 | `skip`              | (none — file is skipped) | — |
 | `needs_password`    | (Phase 3 user decision; if password given, re-classify and use `pymupdf4llm`) | — |
 | `needs_ocr_or_vlm`  | (Phase 3 user decision; pick `vlm_mlx` to route through `mineru` strategy — requires opt-in tier; default behaviour is `skip`) | — |
-| `not_in_mvp`        | (XLSX/EPUB/ODT/image — Phase 3 user decision; skip in MVP) | — |
+| `not_in_mvp`        | (XLSX/ODT/image — Phase 3 user decision; skip in MVP) | — |
 
 ## Opt-in MinerU tier
 

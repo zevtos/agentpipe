@@ -83,6 +83,7 @@ from pathlib import Path
 
 from _common import (  # noqa: E402
     classify_pdf_warning,
+    format_page_list,
     kb_doc_filename,
     log as _common_log,
     read_body,
@@ -118,6 +119,7 @@ DISPATCH: dict[str, tuple[str, list[str]]] = {
     "passthrough-txt": ("extract_md_txt.py", ["--mode", "txt"]),
     "trafilatura":     ("extract_html.py", []),
     "ipynb":           ("extract_ipynb.py", []),
+    "epub":            ("extract_epub.py", []),
 }
 
 # Explicit "do not extract" outcomes already decided upstream (scout or Phase 3).
@@ -262,6 +264,108 @@ def _normalize(out_path: Path, timeout: int) -> None:
         log(f"normalize failed for {out_path.name}: {e}")
 
 
+# mineru VLM runs ~10 s/page; give a warning-patch a generous ceiling above the
+# per-file extractor timeout (a dropped_pictures doc may span dozens of pages).
+PATCH_TIMEOUT_SEC = 3600
+
+
+def _patch_warnings(kb_root: Path, input_root: Path, needs_attention: list[dict],
+                    timeout: int, quiet: bool) -> dict:
+    """Opt-in `--patch-warnings`: mineru page-patch every `dropped_pictures_residual`
+    PDF surfaced in needs_attention[] (it carries the exact `pages` list). Gated —
+    the mineru extractor exits 2 when the heavy tier isn't installed; we record
+    that as `tier_missing` and stop (never auto-installs the ~3 GB ML tier, per
+    the heavy-deps-opt-in rule). `visual_transcription` docs have no page list, so
+    `--patch-into` (which requires `--pages`) can't target them — they are listed,
+    not patched. Strictly non-fatal: a patch failure never changes the file's
+    already-`extracted` state."""
+    kb_root = kb_root.resolve()
+    input_root = input_root.resolve()
+    scratch = kb_root / "_logs" / ".mineru-patch-scratch.md"
+    patch_timeout = max(timeout, PATCH_TIMEOUT_SEC)
+    results: list[dict] = []
+    tier_missing = False
+    targets = [n for n in needs_attention
+               if n.get("reason") == "dropped_pictures_residual" and n.get("pages")]
+    skipped_visual = [n.get("doc") for n in needs_attention
+                      if n.get("reason") == "visual_transcription"]
+
+    for n in targets:
+        doc_rel = n.get("doc")
+        doc_id = n.get("id")
+        raw_rel = n.get("source_path")
+        try:
+            source_rel = validate_source_rel(raw_rel) if isinstance(raw_rel, str) else ""
+        except ValueError:
+            source_rel = ""
+        if not (doc_rel and doc_id and source_rel):
+            results.append({"doc": doc_rel, "ok": False, "reason": "incomplete needs_attention entry"})
+            continue
+        in_pdf = (input_root / source_rel).resolve()
+        target = (kb_root / doc_rel).resolve()
+        docs_dir = (kb_root / "docs").resolve()
+        if in_pdf != input_root and input_root not in in_pdf.parents:
+            results.append({"doc": doc_rel, "ok": False, "reason": "source escapes input_root"})
+            continue
+        if docs_dir not in target.parents:
+            results.append({"doc": doc_rel, "ok": False, "reason": "doc escapes docs/"})
+            continue
+        if not in_pdf.is_file() or not target.is_file():
+            results.append({"doc": doc_rel, "ok": False, "reason": "source pdf or doc missing"})
+            continue
+
+        pages = format_page_list(n["pages"])
+        if not quiet:
+            log(f"patch-warnings: mineru page-patch {doc_rel} (pages {pages})")
+        argv = [
+            sys.executable, str(ENSURE_ENV), "extract_pdf_mineru.py",
+            str(in_pdf), str(scratch),
+            "--doc-id", doc_id, "--source-rel", source_rel,
+            "--pages", pages, "--patch-into", str(target), "--lang", "cyrillic",
+        ]
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True, timeout=patch_timeout)
+            rc, parsed, stderr_tail = (proc.returncode,
+                                       _parse_last_json_line(proc.stdout or ""),
+                                       (proc.stderr or "").strip())
+        except subprocess.TimeoutExpired:
+            results.append({"doc": doc_rel, "ok": False, "reason": f"timeout after {patch_timeout}s"})
+            continue
+
+        if rc == 2:
+            tier_missing = True
+            hint = (parsed or {}).get("reason") or stderr_tail or "run ensure_env.py --tier mineru"
+            results.append({"doc": doc_rel, "ok": False, "reason": "mineru tier not installed",
+                            "install_hint": hint})
+            break  # every remaining patch would fail identically — stop early
+        ok = rc == 0 and isinstance(parsed, dict) and parsed.get("ok") is True
+        results.append({
+            "doc": doc_rel, "ok": ok, "pages": pages,
+            "patched_pages": (parsed or {}).get("mineru_patched_pages") if isinstance(parsed, dict) else None,
+            "reason": None if ok else ((parsed or {}).get("reason") if isinstance(parsed, dict) else None)
+            or stderr_tail or f"exit {rc}",
+        })
+
+    try:
+        scratch.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+    note = None
+    if skipped_visual:
+        note = (f"{len(skipped_visual)} visual_transcription doc(s) NOT auto-patched "
+                "(no page list — mineru --patch-into requires --pages); run full "
+                "mineru re-extract or Read-tool transcription manually")
+    return {
+        "ran": True,
+        "patched": [r for r in results if r.get("ok")],
+        "failed": [r for r in results if not r.get("ok")],
+        "tier_missing": tier_missing,
+        "skipped_visual_transcription": skipped_visual,
+        "note": note,
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Deterministic Phase-4 batch dispatcher: extract every "
@@ -272,6 +376,15 @@ def main() -> int:
                     help=f"per-file extractor timeout in seconds (default {DEFAULT_TIMEOUT_SEC})")
     ap.add_argument("--normalize", action="store_true",
                     help="run normalize_md.py --write after each successful extraction (default off)")
+    ap.add_argument("--shard", action="store_true",
+                    help="after extraction, split oversized docs (>24k tok) into "
+                         "per-chapter folders via shard_doc.py (default off)")
+    ap.add_argument("--patch-warnings", action="store_true",
+                    help="after extraction, run mineru page-patch on every "
+                         "`dropped_pictures_residual` PDF in needs_attention[] "
+                         "(opt-in heavy tier must already be installed; never "
+                         "auto-installs). visual_transcription docs are surfaced, "
+                         "not auto-patched (no page list).")
     ap.add_argument("--quiet", action="store_true", help="suppress per-file stderr progress")
     args = ap.parse_args()
 
@@ -490,6 +603,31 @@ def main() -> int:
     if popo_targets:
         popo = _run_popo(kb_root, popo_targets, needs_attention, args.quiet)
 
+    # Opt-in `--patch-warnings`: mineru page-patch the dropped_pictures PDFs that
+    # the lightweight extractor flagged. Runs BEFORE sharding so a sharded doc
+    # reflects the patched body. Non-fatal and tier-gated (never auto-installs).
+    patch: dict | None = None
+    if args.patch_warnings:
+        try:
+            patch = _patch_warnings(kb_root, input_root, needs_attention,
+                                    args.timeout, args.quiet)
+        except Exception as e:  # noqa: BLE001 — patching never aborts extraction
+            log(f"patch-warnings pass failed (non-fatal): {e}")
+            patch = {"ran": True, "ok": False, "reason": f"{type(e).__name__}: {e}"}
+
+    # Opt-in Phase 4.5: split oversized docs into per-chapter folders. Runs once
+    # over the finished docs (not per-file) — a doc only shards if it exceeds the
+    # threshold and has usable structure; otherwise it stays flat. Non-fatal: a
+    # shard failure leaves the doc flat (mirrors --normalize's best-effort pass).
+    shard: dict | None = None
+    if args.shard:
+        try:
+            from shard_doc import shard_corpus  # noqa: E402  (lazy: only when opted in)
+            shard = shard_corpus(kb_root, quiet=args.quiet)
+        except Exception as e:  # noqa: BLE001 — sharding never aborts extraction
+            log(f"shard pass failed (non-fatal): {e}")
+            shard = {"ok": False, "reason": f"{type(e).__name__}: {e}"}
+
     # Write errors.json — overwrite even when empty so build_manifest never
     # reads a stale error list from a previous run.
     errors_path = logs_dir / "errors.json"
@@ -510,6 +648,8 @@ def main() -> int:
         "needs_attention": needs_attention,
         "unclassified_warnings": unclassified,
         "popo": popo,
+        "patch": patch,
+        "shard": shard,
         "errors_log": str(errors_path) if errors else None,
         "elapsed_seconds": round(time.time() - t0, 2),
         "driver": driver,

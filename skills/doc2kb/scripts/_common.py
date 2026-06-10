@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import posixpath
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import unicodedata
+import urllib.parse
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -309,6 +312,53 @@ def clean_whitespace(text: str) -> str:
     text = _TRAILING_WS.sub("", text)
     text = _MULTI_BLANK_LINES.sub("\n\n", text)
     return text.strip() + "\n"
+
+
+# ---------- markdown structure (shared by index_kb + shard_doc) ----------
+#
+# One definition of "a heading", "a fence", and "a block" so the search
+# chunker (index_kb) and the doc sharder (shard_doc) never drift on where a
+# verbatim split is allowed. Both split ONLY on these boundaries — blank-line
+# paragraph breaks, heading lines, and fenced-code toggles — so no split ever
+# lands inside a paragraph or a code block.
+
+HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
+FENCE_RE = re.compile(r"^\s*(```|~~~)")
+
+
+def split_markdown_blocks(text: str) -> list[str]:
+    """Split text into blocks: paragraphs on blank lines, headings as their own
+    block, fenced code kept intact. The atomic unit every structure-aware pass
+    treats as unsplittable."""
+    blocks: list[str] = []
+    buf: list[str] = []
+    in_fence = False
+
+    def flush() -> None:
+        if buf:
+            joined = "\n".join(buf).rstrip()
+            if joined.strip():
+                blocks.append(joined)
+            buf.clear()
+
+    for line in text.split("\n"):
+        if FENCE_RE.match(line):
+            buf.append(line)
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            buf.append(line)
+            continue
+        if not line.strip():
+            flush()
+            continue
+        if HEADING_RE.match(line):
+            flush()
+            blocks.append(line.rstrip())
+            continue
+        buf.append(line)
+    flush()
+    return blocks
 
 
 # ---------- ligature recovery ----------
@@ -1328,3 +1378,104 @@ def _rewrite_pandoc_media(
 
     new_body = _PANDOC_IMG_RE.sub(_repl, body)
     return new_body, assets, warnings
+
+
+# ---------- epub structure ----------
+#
+# An EPUB is a ZIP whose reading order lives in an OPF "spine" (a list of
+# itemref/@idref pointing into the OPF "manifest"). The pure-Python EPUB
+# extractor and the scout probe both need the same spine resolution, so it
+# lives here once. Namespaces vary across EPUB 2/3 and authoring tools, so we
+# match elements by local tag name rather than a fixed namespace map.
+
+_EPUB_CONTAINER = "META-INF/container.xml"
+
+
+def _xml_local(tag: str) -> str:
+    """Local tag name with any `{namespace}` prefix stripped."""
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else tag
+
+
+def _xml_find(elem, name: str):
+    if elem is None:
+        return None
+    for e in elem.iter():
+        if _xml_local(e.tag) == name:
+            return e
+    return None
+
+
+def _xml_findall(elem, name: str) -> list:
+    if elem is None:
+        return []
+    return [e for e in elem.iter() if _xml_local(e.tag) == name]
+
+
+def epub_opf_path(zf) -> str:
+    """Read META-INF/container.xml and return the OPF package path (the first
+    rootfile/@full-path). Raises ValueError if the container is malformed."""
+    try:
+        root = ET.fromstring(zf.read(_EPUB_CONTAINER))
+    except KeyError as e:
+        raise ValueError(f"not an EPUB: missing {_EPUB_CONTAINER}") from e
+    for rf in _xml_findall(root, "rootfile"):
+        full = rf.get("full-path")
+        if full:
+            return full
+    raise ValueError("EPUB container.xml has no rootfile/@full-path")
+
+
+def _epub_resolve(opf_dir: str, href: str) -> str:
+    """Resolve a manifest href (relative to the OPF dir, possibly %-encoded and
+    fragment-suffixed) to a normalized ZIP entry name with forward slashes."""
+    href = urllib.parse.unquote(href.split("#", 1)[0])
+    joined = posixpath.join(opf_dir, href) if opf_dir else href
+    return posixpath.normpath(joined).lstrip("/")
+
+
+def parse_epub_structure(zf) -> dict:
+    """Parse an EPUB's OPF package into reading order + metadata.
+
+    Returns a dict with:
+      - ``opf_dir``: directory of the OPF (prefix for resolving hrefs)
+      - ``items``:  {manifest_id: (resolved_zip_path, media_type_lower)}
+      - ``spine``:  [resolved_zip_path, ...] in reading order (linear and
+                    non-linear itemrefs both kept — doc2kb never drops content)
+      - ``title``:  dc:title text or None
+      - ``authors``: dc:creator text or None
+
+    Raises ValueError / ET.ParseError on a malformed container or OPF so the
+    caller can fall back or surface the failure.
+    """
+    opf_path = epub_opf_path(zf)
+    opf_dir = posixpath.dirname(opf_path)
+    opf = ET.fromstring(zf.read(opf_path))
+    manifest_el = _xml_find(opf, "manifest")
+    spine_el = _xml_find(opf, "spine")
+    metadata_el = _xml_find(opf, "metadata")
+
+    items: dict[str, tuple[str, str]] = {}
+    for it in _xml_findall(manifest_el, "item"):
+        iid = it.get("id")
+        href = it.get("href")
+        if iid and href:
+            items[iid] = (_epub_resolve(opf_dir, href),
+                          (it.get("media-type") or "").strip().lower())
+
+    spine: list[str] = []
+    for ref in _xml_findall(spine_el, "itemref"):
+        idref = ref.get("idref")
+        if idref in items:
+            spine.append(items[idref][0])
+
+    title = authors = None
+    if metadata_el is not None:
+        t = _xml_find(metadata_el, "title")
+        c = _xml_find(metadata_el, "creator")
+        if t is not None and (t.text or "").strip():
+            title = t.text.strip()
+        if c is not None and (c.text or "").strip():
+            authors = c.text.strip()
+
+    return {"opf_dir": opf_dir, "items": items, "spine": spine,
+            "title": title, "authors": authors}
