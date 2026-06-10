@@ -215,7 +215,7 @@ def _extract(kb_root: Path, tier: Optional[str], *, timeout: Optional[int],
 
 def _index(kb_root: Path, tier: Optional[str], *,
            force: bool = False) -> tuple[int, Optional[dict]]:
-    """Phase 5.5 — build the BM25 search index (_index.db + portable query.sh).
+    """Phase 4.5 — build the BM25 search index (_index.db + portable query.sh).
     Pure stdlib + tiktoken; never pulls a heavy tier."""
     args = [str(kb_root)]
     if force:
@@ -404,7 +404,7 @@ def _add_pipeline_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument("--patch-warnings", action="store_true",
                    help="mineru page-patch dropped_pictures PDFs (needs --tier mineru)")
     p.add_argument("--no-index", action="store_true",
-                   help="skip the Phase 5.5 BM25 search index (default: build it)")
+                   help="skip the Phase 4.5 BM25 search index (default: build it)")
     p.add_argument("--timeout", type=int, default=None,
                    help="per-file extractor timeout in seconds")
     p.add_argument("--workers", type=int, default=None,
@@ -449,7 +449,7 @@ def main() -> int:
     p_man.add_argument("output_dir", help="kb directory")
     p_man.add_argument("--tier", choices=["mineru"], default=None)
 
-    p_idx = sub.add_parser("index", help="Phase 5.5 only — (re)build the BM25 search index")
+    p_idx = sub.add_parser("index", help="Phase 4.5 only — (re)build the BM25 search index")
     p_idx.add_argument("output_dir", help="kb directory with docs/")
     p_idx.add_argument("--force", action="store_true",
                        help="rebuild even if the corpus signature is unchanged")

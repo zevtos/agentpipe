@@ -96,7 +96,7 @@ def _open_db(kb_dir: Path) -> sqlite3.Connection:
     if not db_path.is_file():
         raise FileNotFoundError(
             f"no {INDEX_DB_NAME} in {kb_dir} — build it with "
-            f"`ensure_env.py index_kb.py {kb_dir}` (doc2kb Phase 5.5)"
+            f"`ensure_env.py index_kb.py {kb_dir}` (doc2kb Phase 4.5)"
         )
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row

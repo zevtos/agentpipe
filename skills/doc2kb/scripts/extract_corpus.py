@@ -705,7 +705,7 @@ def main() -> int:
             log(f"patch-warnings pass failed (non-fatal): {e}")
             patch = {"ran": True, "ok": False, "reason": f"{type(e).__name__}: {e}"}
 
-    # Opt-in Phase 4.5: split oversized docs into per-chapter folders. Runs once
+    # Opt-in Phase-4 shard sub-pass: split oversized docs into per-chapter folders. Runs once
     # over the finished docs (not per-file) — a doc only shards if it exceeds the
     # threshold and has usable structure; otherwise it stays flat. Non-fatal: a
     # shard failure leaves the doc flat (mirrors --normalize's best-effort pass).

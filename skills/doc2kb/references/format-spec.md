@@ -4,6 +4,13 @@ This document is the source of truth for every artefact `doc2kb` produces.
 Scripts read and write to these schemas; downstream agents read them in the
 second session.
 
+Contents: [File layout](#file-layout) · [`_scout.json`](#_scoutjson) ·
+[doc frontmatter](#docsid-slugmd-frontmatter) · [Markdown body](#markdown-body) ·
+[Sharded documents](#sharded-documents-folder-form) · [`manifest.json`](#manifestjson) ·
+[`INDEX.md`](#indexmd) · [`llms.txt`](#llmstxt) · [`AGENTS.md`](#agentsmd) ·
+[extractor stdout JSON](#stdout-json-from-each-extract_py) ·
+[dispatcher stdout JSON](#stdout-json-from-extract_corpuspy-phase-4-dispatcher)
+
 ## File layout
 
 ```
@@ -15,6 +22,7 @@ second session.
 ├── _scout.json            # scout output, kept for debugging
 ├── _logs/
 │   └── errors.json        # extraction failures, if any
+├── assets/                # extracted embedded images: <doc-id>-pageNN-imgM.<ext>
 └── docs/
     ├── <doc-id>-<slug>.md
     └── ...

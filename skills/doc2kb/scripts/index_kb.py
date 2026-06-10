@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-index_kb.py — Phase 5.5: build a queryable retrieval index over a doc2kb KB.
+index_kb.py — Phase 4.5: build a queryable retrieval index over a doc2kb KB.
 
 The scout→extract→manifest pipeline turns a corpus into per-document Markdown +
 an INDEX.md catalog. That catalog lists *headings*, so a second-session agent
@@ -494,7 +494,7 @@ def _write_launchers(kb_dir: Path) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(
         prog="index_kb",
-        description="Phase 5.5 — build a queryable BM25 retrieval index over a "
+        description="Phase 4.5 — build a queryable BM25 retrieval index over a "
                     "doc2kb KB.")
     ap.add_argument("kb_dir")
     ap.add_argument("--target", type=int, default=DEFAULT_TARGET_TOKENS,

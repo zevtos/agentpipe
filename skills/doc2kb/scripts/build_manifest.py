@@ -185,7 +185,7 @@ def build_manifest(kb_dir: Path) -> dict[str, Any]:
 
 
 def load_index_summary(kb_dir: Path) -> dict[str, Any] | None:
-    """Read `<kb_dir>/_index.db` (built by index_kb.py, Phase 5.5) if present.
+    """Read `<kb_dir>/_index.db` (built by index_kb.py, Phase 4.5) if present.
     Returns {backend, chunks, keywords: {doc_id: str}} or None when there is no
     index — INDEX.md degrades gracefully to heading/grep navigation."""
     db_path = kb_dir / "_index.db"

@@ -27,9 +27,9 @@ description: 'Converts a heterogeneous corpus of raw documents (PDF, DOCX, DOC, 
 - RAG-векторизации с эмбеддингами (skill не строит vector store, только корпус для in-context-окна);
 - кодовых репозиториев (используй `repomix` / `gitingest`).
 
-## Workflow (5 phases)
+## Workflow (phases 1→5)
 
-**Canonical invocation pattern.** Every script in `<skill_dir>/scripts/` is run through `ensure_env.py` as a wrapper. It handles venv bootstrap on first call (idempotent, ~30 ms on warm runs) and execs the target script inside the skill's `.venv`:
+**Canonical invocation pattern.** Every script in `<skill_dir>/scripts/` is run through `ensure_env.py` as a wrapper. It handles venv bootstrap on first call (idempotent, ~30 ms on warm runs) and execs the target script inside the skill's venv (живёт в глобальном state-dir, ADR-008 — не внутри папки скилла):
 
 ```bash
 python3 <skill_dir>/scripts/ensure_env.py <target_script.py> [args ...]
@@ -43,7 +43,7 @@ python3 <skill_dir>/scripts/ensure_env.py <target_script.py> [args ...]
 python3 <skill_dir>/scripts/ensure_env.py
 ```
 
-(No target script → bootstrap only, prints venv-python path.) Creates the venv in a global state dir outside the code (ADR-008 — `$DOC2KB_HOME` or `${XDG_DATA_HOME:-~/.local/share}/agentpipe/doc2kb/venv`) and installs the lightweight tier: pymupdf4llm, pdfplumber, pypdf, pikepdf, python-magic, python-docx, mammoth, python-pptx, openpyxl, trafilatura, markdownify, charset-normalizer, striprtf, tiktoken.
+(No target script → bootstrap only, prints venv-python path.) Creates the venv in a global state dir outside the code (ADR-008 — `$DOC2KB_HOME` or `${XDG_DATA_HOME:-~/.local/share}/agentpipe/doc2kb/venv`) and installs the lightweight tier: pymupdf4llm, pdfplumber, pypdf, pikepdf, python-magic, python-docx, mammoth, python-pptx, openpyxl, trafilatura, markdownify, charset-normalizer, striprtf, tiktoken, Pillow, lxml (полный список — `scripts/requirements.txt`).
 
 **Системные зависимости (macOS):** `brew install libmagic` — обязательно, иначе python-magic не импортируется. На Linux: `apt install libmagic1`. На WSL то же. Без libmagic scout всё равно работает (fallback на расширение файла), но `mime_confidence` будет всегда `"high"` без перекрёстной проверки.
 
@@ -118,12 +118,12 @@ python3 <skill_dir>/scripts/ensure_env.py apply_overrides.py <kb_dir> [--dry-run
 python3 <skill_dir>/scripts/ensure_env.py extract_corpus.py <kb_dir>
 # опции: --timeout 600 (на файл), --normalize (прогнать normalize_md после каждого),
 #        --patch-warnings (авто mineru page-patch dropped_pictures PDF, нужен tier),
-#        --shard (Phase 4.5: крупные доки → папки по главам), --quiet,
+#        --shard (шард-подпроход Phase 4: крупные доки → папки по главам), --quiet,
 #        --workers 4 (параллельные лёгкие извлечения; 1 = последовательно;
 #        mineru всегда последовательно — VLM-tier memory-bound)
 ```
 
-**Опционально (`--shard`) — Phase 4.5: шардинг крупных документов.** Большая книга/PDF извлекается в один `docs/<id>-<slug>.md` на 50k–500k токенов; после search-хита агент, открывающий этот файл для контекста, переполняет окно. `--shard` запускает `shard_doc.py` пост-проходом: документ выше порога (**24k токенов** по умолчанию) и со структурой режется **in place** в папку `docs/<id>-<slug>/` (`_index.md` TOC + `NNN-*.md` главы, ~8k токенов каждая). Деление heading-first (по главам/заголовкам, токены — только под-делитель на границе абзаца, никогда посреди мысли), части сбалансированы (band `[2k, 12k]`), verbatim гарантирован self-check'ом (reassembly mismatch → откат к плоскому файлу). Поиск (`index_kb`) индексит части → цитата указывает на маленький файл главы, а не на всю книгу. Мелкие доки остаются плоскими. Подробности — `references/format-spec.md` («Sharded documents»).
+**Опционально (`--shard`) — шард-подпроход Phase 4: шардинг крупных документов.** Большая книга/PDF извлекается в один `docs/<id>-<slug>.md` на 50k–500k токенов; после search-хита агент, открывающий этот файл для контекста, переполняет окно. `--shard` запускает `shard_doc.py` пост-проходом: документ выше порога (**24k токенов** по умолчанию) и со структурой режется **in place** в папку `docs/<id>-<slug>/` (`_index.md` TOC + `NNN-*.md` главы, ~8k токенов каждая). Деление heading-first (по главам/заголовкам, токены — только под-делитель на границе абзаца, никогда посреди мысли), части сбалансированы (band `[2k, 12k]`), verbatim гарантирован self-check'ом (reassembly mismatch → откат к плоскому файлу). Поиск (`index_kb`) индексит части → цитата указывает на маленький файл главы, а не на всю книгу. Мелкие доки остаются плоскими. Подробности — `references/format-spec.md` («Sharded documents»).
 
 Exit codes: `0` — все файлы дошли до терминального состояния (`needs_attention` это НЕ ошибка); `2` — отказ старта (нет `_scout.json`, либо у какого-то файла остался непустой `action_required` — вернитесь в Phase 3); `3` — был хотя бы один файл в `error`-бакете (см. `_logs/errors.json`).
 
@@ -162,22 +162,9 @@ python3 <skill_dir>/scripts/ensure_env.py extract_pdf_pymupdf4llm.py \
 
 Каждый extract-скрипт пишет один `.md` в `<kb_dir>/docs/` и возвращает JSON `{ok, out, tokens_estimated, warnings, ...}` в stdout (диспетчер парсит его за вас). `warnings` непустые означают, что extraction прошёл с deficiency (пустой результат, charts dropped, и т.д.).
 
-**DOCX с математикой (автоматический pandoc-маршрут).** Если scout пометил DOCX как `has_equations: true` и `pandoc` есть на `PATH`, `extract_docx.py` автоматически переключается с mammoth на pandoc — он сохраняет OOXML math (`<m:oMath>`) как `$...$`/`$$...$$` LaTeX. Mammoth по-тихому дропает math элементы, и body после него ссылается на "формулу (1)", у которой нет содержимого. JSON `extractor` поле сообщит, какой маршрут был использован (`pandoc` или `mammoth+markdownify`). Если pandoc недоступен на машине с math-документом — будет warning с инструкцией установить (`brew install pandoc` / `apt install pandoc`).
+**Авто-восстановление внутри extractor'ов** — происходит само, вмешательства не требует: pandoc-маршрут для DOCX с математикой (OOXML math → `$...$` LaTeX; mammoth формулы молча дропает), починка поломанных лигатур `fi`/`ff`/`fl` у pymupdf4llm (warning `ligatures_recovered: N`), удаление footer-номеров страниц, извлечение встроенных картинок в `<kb_dir>/assets/` с заменой `picture intentionally omitted` плейсхолдеров на Markdown-ссылки. Детали, флаги (`--no-extract-images`, `--assets-dir`) и расширение таблицы лигатур — `references/extraction-recipes.md` («Auto-recovery»); читайте её, когда warning выглядит незнакомо или нужно подкрутить поведение.
 
-**PDF с поломанными лигатурами `fi` / `ff` / `fl` (автоматическое восстановление).** pymupdf4llm ≤ 1.27.x теряет одну букву из ASCII-смаппленных лигатур в его spans→markdown сборке, давая `Ofcial` вместо `Official`, `fexible` вместо `flexible`, `trafc` вместо `traffic`, `Diffculty` вместо `Difficulty`, `quantifers` вместо `quantifiers`, и т.д. Raw `pymupdf.Page.get_text` отдаёт буквы корректно — баг локален в pymupdf4llm. `extract_pdf_pymupdf4llm.py` автоматически прогоняет `recover_ligatures` из `_common.py` на body и эмитит warning `ligatures_recovered: N word(s) ...` с количеством исправлений. `recover_ligatures` идемпотентен (повторный вызов даёт 0 правок), регистр первой буквы сохраняется (`Ofcial` → `Official`, `ofcial` → `official`). Если в новом корпусе встретится незнакомый broken pattern, эмитится дополнительный warning `ligature_residual: ...` с sample — расширьте `_LIGATURE_FIXES` в `scripts/_common.py`. Восстановление безопасно: lookbehind `(?<![A-Za-z])` срабатывает даже когда broken слово обёрнуто в markdown italic (`_fnd_` → `_find_`), а lookahead отказывается над legit префиксами (`different` остаётся `different`, не превращается в `diffierent`).
-
-**Footer page numbers PDF (автоматическое удаление).** PDF-страницы часто кончаются голым номером страницы перед маркером следующей страницы (`...текст...\n\n1\n\n[page 2]`). `detect_recurring_lines` из `normalize_md` не ловит их, потому что каждый номер уникален (1, 2, …, N). `strip_page_footer_numbers` из `_common.py` ловит позиционно: standalone число между двумя `[page N]` маркерами или в самом конце тела. Маркеры `[page N]` сохраняются — они нужны второму агенту для навигации. Вызывается из `extract_pdf_pymupdf4llm.py` сразу после `recover_ligatures` и эмитит count в stderr (без warning, потому что behavior всегда корректное).
-
-**PDF с встроенными картинками (автоматическое извлечение в `assets/`).** Когда pymupdf4llm эмиттит `==> picture [WxH] intentionally omitted <==` плейсхолдеры (формулы, матрицы, диаграммы, нарисованные как изображения), `extract_pdf_pymupdf4llm.py` теперь автоматически:
-1. Извлекает встроенные изображения через `pymupdf` в `<kb_dir>/assets/`.
-2. Заменяет плейсхолдеры на Markdown image links `![page N, image M](../assets/<doc_id>-pageNN-imgM.<ext>)`.
-3. Подавляет `dropped_pictures` warning для тех плейсхолдеров, которые удалось заменить.
-
-Дефолтное место для assets — `<output_md>.parent.parent / "assets"`, что соответствует стандартному layout `<kb_dir>/docs/*.md` → `<kb_dir>/assets/<file>`. Override: `--assets-dir <abs>` и `--assets-rel <prefix>`. Отключить: `--no-extract-images` (вернёт исходное поведение с loud warning).
-
-**Warnings `mangled_visual_layout` / `dropped_pictures` (PDF only).** Это два варианта одной и той же поломки — PDF использует визуальный layout для математики (формулы набраны позиционно: дроби как стек символов, штрихи отдельными glyph'ами). pymupdf4llm не может это восстановить и либо рассыпает выражения в `<br>`-цепочки одиночных символов внутри markdown-таблиц (`mangled_visual_layout`), либо выкидывает математические участки как `==> picture [WxH] intentionally omitted <==` плейсхолдеры (`dropped_pictures`). На лабораторных методичках, курсовых и научных статьях с формулами оба варианта частые; иногда в одном PDF встречаются оба сразу.
-
-Авто-восстановление для `dropped_pictures` (default): extract-скрипт сначала пытается извлечь встроенные изображения через pymupdf и заменить плейсхолдеры на ссылки в `assets/`. Warning остаётся только для тех плейсхолдеров, которые не удалось заменить (картинка отсутствует в PDF stream — что редко). Для `mangled_visual_layout` авто-восстановления нет — формулы там вообще нет ни как текста, ни как picture-объекта.
+**Warnings `mangled_visual_layout` / `dropped_pictures` (PDF only)** — два варианта одной поломки: PDF набирает математику позиционно, pymupdf4llm либо рассыпает её в `<br>`-цепочки внутри markdown-таблиц (`mangled_visual_layout`), либо выкидывает участки picture-плейсхолдерами (`dropped_pictures`). Для `dropped` сначала срабатывает авто-извлечение картинок (warning остаётся только на незаменённые плейсхолдеры); для `mangled` авто-восстановления нет — формулы нет ни как текста, ни как картинки. Оба частые на методичках и статьях с формулами.
 
 Что делать, если warning всё-таки появился:
 
@@ -314,6 +301,7 @@ command, **citation-first**:
 ./query.sh "<question>" --show               # full passage text, not snippets
 ./query.sh "<question>" --json -k 5          # machine-readable, top 5
 ./query.sh "<question>" --type pdf --doc doc-002   # filter by source type / doc
+./query.sh "<question>" --page 12            # filter by page anchor
 ./query.sh "<question>" --and                # require ALL terms (default: OR + BM25)
 ./query.sh --info                            # index stats + which backend is live
 
@@ -369,7 +357,7 @@ heading catalog alone is fine; the index earns its keep from dozens of docs up.
 | `extract_ipynb.py`           | Jupyter notebook (.ipynb) → Markdown; per-cell anchors, text outputs preserved, base64 images dropped |
 | `extract_md_txt.py`          | normalize Markdown/text, encoding-aware |
 | `extract_html.py`            | HTML → Markdown via trafilatura (boilerplate removal) |
-| `shard_doc.py`               | Phase 4.5 opt-in (`extract_corpus --shard`) — splits oversized docs (>24k tok) into `docs/<id>-<slug>/` folders (`_index.md` TOC + balanced per-chapter `NNN-*.md` parts). Heading-first split, verbatim self-check (abort-to-flat on mismatch), idempotent by `source_sha256` |
+| `shard_doc.py`               | Phase 4 shard sub-pass, opt-in (`extract_corpus --shard`) — splits oversized docs (>24k tok) into `docs/<id>-<slug>/` folders (`_index.md` TOC + balanced per-chapter `NNN-*.md` parts). Heading-first split, verbatim self-check (abort-to-flat on mismatch), idempotent by `source_sha256` |
 | `normalize_md.py`            | structural cleanup pass (idempotent, never summarizes) |
 | `postprocess_popo.py`        | **opt-in stage 2** — runs upstream opendatalab/MinerU-Popo over cached mineru outputs to rebuild document trees (heading hierarchy, cross-page table merging, paragraph truncation repair). Resolves the Popo repo from `--popo-repo` > `$DOC2KB_POPO_REPO` > the `bootstrap_popo.py` auto-default; PATH-injects the bootstrapped env (sentinel `.doc2kb-popo-python`); `--auto-setup` runs `bootstrap_popo.py` when unconfigured. |
 | `bootstrap_popo.py`          | **opt-in** auto-setup of the Popo stage-2 env — clone repo → create env (uv→conda→venv, py3.10) → install deps (upstream CUDA reqs on Linux, `requirements-popo-mac.txt` MPS set on macOS) → download the ~16 GB model (resumable, completeness-checked) → patch `POPO_MODEL_PATH` default; on macOS also pins `device_map`→MPS (verified ~22 tok/s, else accelerate disk-offloads). Never runs in the default pipeline; invoked directly or via `postprocess_popo.py --auto-setup` (gated by `DOC2KB_POPO_AUTO`). |
@@ -426,6 +414,10 @@ deterministically via `apply_overrides.py` (it never hand-edits `_scout.json`).
 - `--tier mineru` — install the opt-in heavy tier before running.
 - `--always-popo` — run the MinerU→Popo stage 2 on every mineru doc (opt-in, heavy).
 - `--normalize` — run `normalize_md` after each extraction.
+- `--shard` — split oversized docs (>24k tok) into per-chapter folders (the
+  Phase-4 shard sub-pass).
+- `--patch-warnings` — mineru page-patch every `dropped_pictures_residual` PDF
+  (needs `--tier mineru`; surfaces `tier_missing` instead of installing).
 - `--no-index` — skip the Phase 4.5 BM25 search index (default: build it; pure
   stdlib + tiktoken, so it never pulls a heavy tier).
 - `--timeout N` — per-file extractor timeout. `-q/--quiet` — terse progress.
@@ -519,7 +511,7 @@ python3 <skill_dir>/scripts/ensure_env.py scout_corpus.py <in> <kb> --enable-min
 
 Опциональный stage 2 — [MinerU-Popo](https://github.com/opendatalab/MinerU-Popo) (4B-модель, реконструкция дерева документа): только если иерархия длинного документа всё ещё кривая после MinerU.
 
-**Полная настройка** (бэкенды `vlm`/`hybrid`/`pipeline`, бенчмарки по железу, тюнинг env, page-targeted `--pages … --patch-into …`, установка и авто-bootstrap Popo, env-роутинг `DOC2KB_ALWAYS_POPO` / `DOC2KB_POPO_AUTO`) — в **`references/mineru.md`**. Инвариант heavy-deps-opt-in: ничего тяжёлого не ставится и не качается молча.
+**Полная настройка** (бэкенды `vlm`/`hybrid`/`pipeline`, бенчмарки по железу, тюнинг env, page-targeted `--pages … --patch-into …`, установка и авто-bootstrap Popo, env-роутинг `DOC2KB_ALWAYS_POPO` / `DOC2KB_POPO_AUTO`) — в **`references/mineru.md`**.
 
 ## Что доступно out-of-the-box vs follow-up
 

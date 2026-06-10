@@ -55,7 +55,8 @@ the right tool for **ad-hoc** single-file work (mineru page-patch, manual
 re-extraction). Don't use them to replace the dispatcher for a whole corpus.
 
 The canonical invocation uses `ensure_env.py` as a wrapper — it bootstraps
-the venv on first call and execs the target script through `.venv/bin/python`:
+the venv on first call (global state dir, ADR-008) and execs the target script
+through the venv python:
 
 ```python
 import json, subprocess
@@ -208,3 +209,65 @@ collected errors. `build_manifest.py` will pick it up and surface it in
 on the same source file, compare its sha256 against the existing doc; if
 unchanged, you can skip re-extraction. (build_manifest does NOT enforce
 this — the loop logic lives in agent code.)
+
+## Auto-recovery (built into the extractors)
+
+Эти проходы происходят автоматически внутри extract-скриптов — вмешательство
+агента не требуется. Сюда заглядывают, когда warning выглядит незнакомо или
+нужно подкрутить поведение.
+
+### DOCX с математикой — pandoc-маршрут
+
+Если scout пометил DOCX как `has_equations: true` и `pandoc` есть на `PATH`,
+`extract_docx.py` автоматически переключается с mammoth на pandoc — он сохраняет
+OOXML math (`<m:oMath>`) как `$...$`/`$$...$$` LaTeX. Mammoth по-тихому дропает
+math-элементы, и body после него ссылается на «формулу (1)», у которой нет
+содержимого. JSON-поле `extractor` сообщает, какой маршрут был использован
+(`pandoc` или `mammoth+markdownify`). Если pandoc недоступен на машине с
+math-документом — warning с инструкцией установить (`brew install pandoc` /
+`apt install pandoc`).
+
+### Поломанные лигатуры `fi` / `ff` / `fl` (PDF)
+
+pymupdf4llm ≤ 1.27.x теряет одну букву из ASCII-смаппленных лигатур в его
+spans→markdown сборке: `Ofcial` вместо `Official`, `fexible` вместо `flexible`,
+`trafc` вместо `traffic`, `Diffculty`, `quantifers`, и т.д. Raw
+`pymupdf.Page.get_text` отдаёт буквы корректно — баг локален в pymupdf4llm.
+`extract_pdf_pymupdf4llm.py` автоматически прогоняет `recover_ligatures` из
+`_common.py` на body и эмитит warning `ligatures_recovered: N word(s) ...`.
+
+- Идемпотентно (повторный вызов даёт 0 правок); регистр первой буквы
+  сохраняется (`Ofcial` → `Official`, `ofcial` → `official`).
+- Незнакомый broken pattern → дополнительный warning `ligature_residual: ...`
+  с sample. Расширьте `_LIGATURE_FIXES` в `scripts/_common.py`.
+- Безопасность: lookbehind `(?<![A-Za-z])` срабатывает и когда broken-слово
+  обёрнуто в markdown italic (`_fnd_` → `_find_`); lookahead отказывается над
+  legit-префиксами (`different` не превращается в `diffierent`).
+
+### Footer-номера страниц (PDF)
+
+PDF-страницы часто кончаются голым номером страницы перед маркером следующей
+(`...текст...\n\n1\n\n[page 2]`). `detect_recurring_lines` из `normalize_md` их
+не ловит (каждый номер уникален: 1, 2, …, N). `strip_page_footer_numbers` из
+`_common.py` ловит позиционно: standalone-число между двумя `[page N]` маркерами
+или в самом конце тела. Маркеры `[page N]` сохраняются — они нужны второму
+агенту для навигации. Вызывается из `extract_pdf_pymupdf4llm.py` сразу после
+`recover_ligatures`, count идёт в stderr (без warning — поведение всегда
+корректное).
+
+### Встроенные картинки → `assets/` (PDF)
+
+Когда pymupdf4llm эмитит `==> picture [WxH] intentionally omitted <==`
+плейсхолдеры (формулы, матрицы, диаграммы, нарисованные картинками),
+`extract_pdf_pymupdf4llm.py` автоматически:
+
+1. Извлекает встроенные изображения через `pymupdf` в `<kb_dir>/assets/`.
+2. Заменяет плейсхолдеры на Markdown-ссылки
+   `![page N, image M](../assets/<doc_id>-pageNN-imgM.<ext>)`.
+3. Подавляет `dropped_pictures` warning для заменённых плейсхолдеров —
+   warning остаётся только на те, где картинки нет в PDF-stream (редко).
+
+Дефолтное место — `<output_md>.parent.parent / "assets"` (= стандартный layout
+`<kb_dir>/docs/*.md` → `<kb_dir>/assets/<file>`). Override: `--assets-dir <abs>`
+и `--assets-rel <prefix>`. Отключить: `--no-extract-images` (вернёт исходное
+поведение с loud warning).

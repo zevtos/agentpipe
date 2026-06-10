@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-shard_doc.py — Phase 4.5 (opt-in): split oversized extracted docs into folders.
+shard_doc.py — Phase 4 shard sub-pass (opt-in): split oversized extracted docs into folders.
 
 CLI:
     shard_doc.py <kb_dir> [--threshold 24000] [--target 8000]
@@ -436,7 +436,7 @@ def shard_corpus(kb_dir: Path, *, trigger: int = DEFAULT_TRIGGER,
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Phase 4.5 (opt-in) — split oversized extracted docs into "
+        description="Phase 4 shard sub-pass (opt-in) — split oversized extracted docs into "
                     "per-chapter folders for Read-friendly citations.")
     ap.add_argument("kb_dir")
     ap.add_argument("--threshold", type=int, default=DEFAULT_TRIGGER,

@@ -1,6 +1,6 @@
 ---
 name: gost-report
-description: Generate Russian academic reports (.docx) formatted to GOST 7.32 — лабораторные, отчёты по практике, курсовые, ВКР, домашние задания для любого российского вуза (ИТМО, МГУ, СПбГУ, МФТИ, Бауманка, и т.д.). Use whenever the user asks for a report по ГОСТ, лабораторную, отчёт по практике, курсовой, ВКР, или любую Russian-language student paper needing proper title page, headings, page numbers, figure/table captions. Triggers even when only "лабораторная" or "отчёт" is mentioned — Russian-language context (ИТМО / МГУ / СПбГУ / университет / ГОСТ) is enough. ITMO is the default profile; other universities via UniversityProfile.
+description: Generate Russian academic reports (.docx) formatted to GOST 7.32 — лабораторные, отчёты по практике, курсовые, ВКР, домашние задания для любого российского вуза (ИТМО, МГУ, СПбГУ, МФТИ, Бауманка, и т.д.). Use whenever the user asks for a report по ГОСТ 7.32, лабораторную, отчёт по практике, курсовой, ВКР, реферат, РГР, пояснительную записку, домашку, или любую Russian-language student paper needing proper title page, headings, page numbers, figure/table captions. Triggers even when only "лабораторная" or "отчёт" is mentioned — Russian-language context (ИТМО / МГУ / СПбГУ / университет / ГОСТ) is enough. ITMO is the default profile; other universities via UniversityProfile.
 ---
 
 # GOST report generator
@@ -54,6 +54,7 @@ GOST_REPORT_YEAR="2026"
 - Значение с токеном `ЗАПОЛНИ` = незаполнено → первый `r.save()` падает с `ValueError` (в тексте — путь конфига). Так юзер не отправит отчёт с плейсхолдером на титуле.
 - Под предмет — свой `.gost-report.env` рядом с проектом курса (ищется вверх от build.py): обычно только преподаватель/кафедра.
 - Приоритет (первый непустой): env-переменные → `<курс>/.gost-report.env` → глобальный конфиг → `TitleConfig(...)` в build.py. Env побеждает build.py.
+- Путь глобального конфига можно перенести: `GOST_REPORT_CONFIG=/path/to/config` (когда `~/.config` недоступен на запись).
 
 ## Командная работа
 
@@ -92,7 +93,7 @@ r = Report(TitleConfig(
 Project root определяется автоматически (обход вверх до первого маркера: `.git/` → `Makefile` → `pyproject.toml` → `.gost-report/` → `.claude/`). Из этого выводятся:
 - `r.figure("name.png", ...)` — резолвится от `<project>/docs/figures/`
 - `r.save()` без аргумента — кладёт в `<project>/docs/report.docx`
-- `paths()` — `(root, docs, figures, tables, out, tex)` если нужен явный доступ
+- `p = paths()` — явный доступ к путям через атрибуты: `p.root`, `p.docs`, `p.figures`, `p.tables`, `p.out`, `p.tex` (frozen dataclass, НЕ кортеж — распаковка `root, docs, ... = paths()` упадёт). Импортируется оттуда же: `from gost_report import Report, TitleConfig, paths`
 
 Готовый скелет: `references/templates/build.py`.
 
@@ -170,7 +171,7 @@ r.save("draft.docx")
 | `r.numbered(items)`, `r.bullet(items)` | Списки. Каждый вызов стартует с 1 заново. |
 | `r.page_break()` | Принудительный разрыв (редко нужен — h1 сам ставит). |
 | `r.save(path=None)` | Сохранить .docx. Без аргумента → `<project>/docs/report.docx`. Относительный путь → от `<project>/docs/`. Возвращает абсолютный `Path`. |
-| `paths(start=None) → ProjectPaths` | `(root, docs, figures, tables, out, tex)`. По умолчанию резолвит от __file__ caller'а. |
+| `paths(start=None) → ProjectPaths` | Frozen dataclass с полями `root/docs/figures/tables/out/tex` — атрибутный доступ (`p.figures`), не распаковка. По умолчанию резолвит от __file__ caller'а. Импорт: `from gost_report import paths`. |
 
 ### `TitleConfig` — часто переопределяемые поля
 
@@ -251,9 +252,11 @@ r.diagram('''digraph { rankdir=TB
 переопределяют дефолты. Опции: `engine=` (dot/neato/fdp/circo/twopi), `font=`,
 `rankdir=`. Детерминизм — best-effort (зависит от версии dot).
 
-Новые модули штампуются скриптом `scripts/new_module.py <namespace> [--visual]`.
-Эталонный пример модуля — `gost_report_math/` (формулы вынесены из ядра без
-изменения поведения). Архитектура подробно — `research/19_gost_report_module_architecture.md`.
+Новые модули штампуются скриптом `scripts/new_module.py <namespace> [--visual] [--extra NAME]`
+(`--extra` создаёт `requirements.d/<NAME>.txt` для тира; скрипт печатает строку
+для `registry._BUILTIN`, которую нужно добавить руками). Эталонный пример модуля —
+`gost_report_math/` (формулы вынесены из ядра без изменения поведения).
+Архитектура подробно — `research/19_gost_report_module_architecture.md`.
 
 ## Список литературы и ссылки (модули bib, ref)
 
@@ -328,6 +331,24 @@ r.numbered([r"Коэффициент $k$ найден", "Второй пункт
   образцов»; не «Доля», а «Доля, %». Если величина имеет единицу — указывай её
   в заголовке столбца: «Масса, г», «Время, с», «Точность, %».
 - **Ссылки — словом + номер** через `r.ref.*` (см. выше), не голой цифрой `(N)`.
+
+## Когда что-то падает
+
+**`r.save()` бросил `GostValidationError` / Stop-хук заблокировал ход** (`{"decision":"block"}`) — валидатор нашёл FAIL-нарушения. Контракт восстановления: исправь именно названную причину и снова `r.save()`; не подавляй исключение и не обходи валидатор. Коды FAIL:
+
+| Код | Причина | Починка |
+|---|---|---|
+| `dashes` | длинное/среднее тире в прозе или ячейках таблиц | перепиши без тире (правило №1) |
+| `bare-latex` | LaTeX-команды голым текстом вне `$...$` | оберни в `$...$` или передай в `r.formula` |
+| `figure-no-caption` / `figure-numbering` | картинка без «Рисунок N — …» или дырка в нумерации | вставляй картинки только через `r.figure(..., caption)` |
+| `table-no-caption` / `table-numbering` | таблица без «Таблица N — …» или дырка в нумерации | только через `r.table(rows, caption)` |
+| `missing-deps` / `read-failed` | python-docx недоступен / битый .docx | прогони `gr` (бутстрапит venv); пересобери файл |
+
+WARN-коды (`placeholder-name`, `ai-tone`, `caption-short`) не блокируют, но чини и их.
+
+- **Первый `r.save()` в свежей среде** ставит зависимости в venv — это минуты, не зависание. Тёплые запуски ~30 мс.
+- **`gr` без аргумента не нашёл build.py** — печатает короткую инструкцию; создай `<project>/.gost-report/build.py` (скелет: `references/templates/build.py`).
+- **`r.diagram` упал «dot not found»** — поставь системный Graphviz: `brew install graphviz` / `sudo apt install graphviz`.
 
 ## Подробности — see references/
 
