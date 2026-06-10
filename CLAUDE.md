@@ -69,7 +69,7 @@ model:        opus (for architect, security) or sonnet (all others)
 
 Tool scoping by role:
 - Read-only + web research: `Read, Grep, Glob, WebFetch, WebSearch` (architect, pm)
-- Read + diagnostic bash: `Read, Grep, Glob, Bash` (dba, reviewer, security)
+- Read + diagnostic bash: `Read, Grep, Glob, Bash` (dba, refactorer, reviewer, security)
 - Full write access: `Read, Write, Edit, Bash, Glob, Grep` (devops, tester, docs)
 
 Body structure:
@@ -96,7 +96,7 @@ Body structure:
 - Agent invocation: `Run the [name] agent:` followed by prompt in quotes
 
 Commands without argument-hint: next, onboard, deploy.
-Commands that run agents in parallel: review (reviewer + security), feature step 5.
+Commands that run agents in parallel: review (reviewer + security), feature step 5, deploy step 2 (devops + security), sprint phase 5 (reviewer + security).
 
 ## Skill Format (skills/<name>/)
 

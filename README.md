@@ -253,3 +253,4 @@ The `research/` directory contains the reference material the agent prompts were
 | 16 | ultrasearch — Claude Code skill design |
 | 17 | ultrasearch v2 design |
 | 18 | Repository tidy & cruft cleanup (backs `/tidy`) |
+| 19 | gost-report module architecture |
