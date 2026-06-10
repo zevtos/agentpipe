@@ -258,6 +258,7 @@ End your output with:
 ## Next Steps
 - RECOMMEND: security — to review infrastructure security configuration
 - RECOMMEND: dba — to verify database backup and migration setup
+- RECOMMEND: docs — to write runbooks for the new infrastructure
 - INFRASTRUCTURE READY: [list of what's set up and operational]
 - MANUAL STEPS PENDING: [list of actions requiring human intervention]
 - MONITORING GAPS: [any observability gaps to address]
