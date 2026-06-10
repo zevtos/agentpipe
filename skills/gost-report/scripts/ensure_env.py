@@ -158,10 +158,22 @@ def site_packages_dir() -> Path | None:
     """Спрашиваем у самого venv-питона, где у него purelib. Не хардкодим
     `lib/pythonX.Y/site-packages` — Windows, conda и future-Python отличаются.
     Возвращаем None, если запрос упал (тогда вызывающий должен залогировать
-    и продолжить — .pth не критичен, есть PYTHONPATH-страховка)."""
+    и продолжить — .pth не критичен, есть PYTHONPATH-страховка).
+
+    Результат кэшируется в <venv>/.purelib: subprocess-запрос стоит ~16ms и
+    раньше платился на каждом тёплом bootstrap(). Кэш живёт внутри VENV_DIR,
+    так что пересоздание venv уносит его вместе с собой; stale-путь отсекает
+    is_dir()-проверка."""
     py = venv_python()
     if not py.exists():
         return None
+    cache = VENV_DIR / ".purelib"
+    try:
+        cached = cache.read_text(encoding="utf-8").strip()
+        if cached and Path(cached).is_dir():
+            return Path(cached)
+    except OSError:
+        pass
     try:
         out = subprocess.run(
             [str(py), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
@@ -171,6 +183,10 @@ def site_packages_dir() -> Path | None:
         return None
     if not out:
         return None
+    try:
+        cache.write_text(out + "\n", encoding="utf-8")
+    except OSError:
+        pass
     return Path(out)
 
 

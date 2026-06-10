@@ -172,9 +172,19 @@ def create_venv() -> None:
 
 
 def site_packages_dir() -> Path | None:
+    # Cached in <venv>/.purelib: the subprocess probe costs ~18ms and is paid
+    # on every dispatch (extract_corpus runs ensure_env once per file). The
+    # cache dies with VENV_DIR on rebuild; is_dir() rejects a stale path.
     py = venv_python()
     if not py.exists():
         return None
+    cache = VENV_DIR / ".purelib"
+    try:
+        cached = cache.read_text(encoding="utf-8").strip()
+        if cached and Path(cached).is_dir():
+            return Path(cached)
+    except OSError:
+        pass
     try:
         out = subprocess.run(
             [str(py), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
@@ -184,6 +194,10 @@ def site_packages_dir() -> Path | None:
         return None
     if not out:
         return None
+    try:
+        cache.write_text(out + "\n", encoding="utf-8")
+    except OSError:
+        pass
     return Path(out)
 
 

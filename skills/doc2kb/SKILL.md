@@ -118,7 +118,9 @@ python3 <skill_dir>/scripts/ensure_env.py apply_overrides.py <kb_dir> [--dry-run
 python3 <skill_dir>/scripts/ensure_env.py extract_corpus.py <kb_dir>
 # опции: --timeout 600 (на файл), --normalize (прогнать normalize_md после каждого),
 #        --patch-warnings (авто mineru page-patch dropped_pictures PDF, нужен tier),
-#        --shard (Phase 4.5: крупные доки → папки по главам), --quiet
+#        --shard (Phase 4.5: крупные доки → папки по главам), --quiet,
+#        --workers 4 (параллельные лёгкие извлечения; 1 = последовательно;
+#        mineru всегда последовательно — VLM-tier memory-bound)
 ```
 
 **Опционально (`--shard`) — Phase 4.5: шардинг крупных документов.** Большая книга/PDF извлекается в один `docs/<id>-<slug>.md` на 50k–500k токенов; после search-хита агент, открывающий этот файл для контекста, переполняет окно. `--shard` запускает `shard_doc.py` пост-проходом: документ выше порога (**24k токенов** по умолчанию) и со структурой режется **in place** в папку `docs/<id>-<slug>/` (`_index.md` TOC + `NNN-*.md` главы, ~8k токенов каждая). Деление heading-first (по главам/заголовкам, токены — только под-делитель на границе абзаца, никогда посреди мысли), части сбалансированы (band `[2k, 12k]`), verbatim гарантирован self-check'ом (reassembly mismatch → откат к плоскому файлу). Поиск (`index_kb`) индексит части → цитата указывает на маленький файл главы, а не на всю книгу. Мелкие доки остаются плоскими. Подробности — `references/format-spec.md` («Sharded documents»).
@@ -427,6 +429,8 @@ deterministically via `apply_overrides.py` (it never hand-edits `_scout.json`).
 - `--no-index` — skip the Phase 4.5 BM25 search index (default: build it; pure
   stdlib + tiktoken, so it never pulls a heavy tier).
 - `--timeout N` — per-file extractor timeout. `-q/--quiet` — terse progress.
+- `--workers N` — parallel lightweight extractions (default 4; 1 = serial;
+  mineru always runs serially — the VLM tier is memory-bound).
 
 The **heavy-deps-opt-in invariant holds**: MinerU/Popo are reached only via these
 explicit flags — `dkb` never installs or routes through them silently (the search

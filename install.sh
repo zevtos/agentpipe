@@ -1091,7 +1091,9 @@ do_thinking_summaries_dry() {
 # first checks cwd is under a project root (skips $HOME / "/" outright), then
 # walks DOWN with a depth cap (HOOK_GLOB_MAX_DEPTH) skipping node_modules/.git/
 # etc — so it never traverses a whole filesystem subtree. In projects without
-# gost-report there are no sentinels and the hook is a fast no-op.
+# gost-report there are no sentinels and the hook is a fast no-op (~10ms:
+# python-docx import is deferred until sentinels are actually found, so the
+# no-op path is pure stdlib).
 #
 # Codex target skips this validation layer. The validate.py script
 # still ships in the codex skill .zip and works in CLI mode (--check) for

@@ -79,6 +79,7 @@ import re
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from _common import (  # noqa: E402
@@ -124,6 +125,13 @@ DISPATCH: dict[str, tuple[str, list[str]]] = {
 
 # Explicit "do not extract" outcomes already decided upstream (scout or Phase 3).
 NON_RUNNABLE = {"skip", "not_in_mvp", "needs_ocr_or_vlm", "needs_password"}
+
+# Strategies that must NEVER run concurrently: the opt-in mineru VLM tier is
+# multi-GB and memory-bound — parallel runs would OOM. Every other strategy is
+# lightweight and embarrassingly parallel (independent files, the actual work
+# happens in child processes; threads only herd them).
+HEAVY_STRATEGIES = {"mineru"}
+DEFAULT_WORKERS = 4
 
 _LANG_RE = re.compile(r"^[a-z]{2,}$")
 # Popo (and its optional auto-bootstrap) are heavy: VLM inference on a 4B model
@@ -205,6 +213,103 @@ def _run_extractor(strategy: str, in_path: Path, out_path: Path,
     except subprocess.TimeoutExpired:
         return "timeout", None, f"timeout after {timeout}s"
     return proc.returncode, _parse_last_json_line(proc.stdout or ""), (proc.stderr or "").strip()
+
+
+def _classify_result(job: dict, rc, parsed, stderr_tail: str, kb_root: Path) -> dict:
+    """Turn one extractor result into an outcome row. Pure w.r.t. shared state —
+    pass 3 folds rows in original file order, so counts / errors.json /
+    needs_attention[] stay deterministic regardless of completion order."""
+    source_rel = job["source_rel"]
+    doc_id = job["doc_id"]
+    out = {"bucket": "error", "error_row": None, "na_row": None,
+           "unclassified_row": None, "flagged": False, "popo_target": None,
+           "log": None}
+
+    if rc == "timeout":
+        out["error_row"] = {"source_path": source_rel, "error": stderr_tail}
+        out["log"] = f"error {source_rel}: {stderr_tail}"
+        return out
+
+    if rc == 2:
+        # Child exit 2 == "needs install" — NEVER the driver's own exit 2,
+        # and never an error/corrupt classification.
+        install_hint = (parsed or {}).get("reason") or stderr_tail or "needs install (converter/CLI absent)"
+        out["bucket"] = "needs_attention"
+        out["na_row"] = {
+            "id": doc_id, "source_path": source_rel, "reason": "needs_install",
+            "doc": None, "extracted_but_flagged": False, "install_hint": install_hint,
+        }
+        out["log"] = f"needs_install {source_rel}"
+        return out
+
+    ok = rc == 0 and isinstance(parsed, dict) and parsed.get("ok") is True
+    if not ok:
+        reason = parsed.get("reason") if isinstance(parsed, dict) else None
+        if not reason:
+            reason = (f"exit {rc}: {stderr_tail[:200]}" if stderr_tail
+                      else f"exit {rc}: unparseable extractor output")
+        out["error_row"] = {"source_path": source_rel, "error": reason}
+        out["log"] = f"error {source_rel}: {reason}"
+        return out
+
+    # --- ok:true ---
+    warns = [w for w in (parsed.get("warnings") or []) if isinstance(w, str)]
+    mangled = [w for w in warns if classify_pdf_warning(w) == "visual_transcription"]
+    dropped = [w for w in warns if classify_pdf_warning(w) == "dropped_pictures_residual"]
+    unknown = [w for w in warns if classify_pdf_warning(w) is None]
+    rel_doc = str(job["out_path"].relative_to(kb_root))
+
+    if unknown:
+        out["unclassified_row"] = {"id": doc_id, "source_path": source_rel, "warnings": unknown}
+
+    if mangled:
+        # mangled supersedes dropped: manual transcription covers both.
+        out["na_row"] = {
+            "id": doc_id, "source_path": source_rel, "reason": "visual_transcription",
+            "doc": rel_doc, "extracted_but_flagged": True,
+            "warning": "; ".join(mangled + dropped),
+        }
+        out["flagged"] = True
+    elif dropped:
+        pages = residual_picture_pages(read_body(job["out_path"]))
+        out["na_row"] = {
+            "id": doc_id, "source_path": source_rel, "reason": "dropped_pictures_residual",
+            "doc": rel_doc, "extracted_but_flagged": True,
+            "pages": pages, "warning": "; ".join(dropped),
+        }
+        out["flagged"] = True
+
+    out["bucket"] = "extracted"
+    if job["popo_in_effect"]:
+        out["popo_target"] = doc_id
+    out["log"] = f"extracted {source_rel}" + (" [needs_attention]" if (mangled or dropped) else "")
+    return out
+
+
+def _execute_job(job: dict, args, kb_root: Path) -> dict:
+    """Worker body for one runnable file: extractor subprocess → classify →
+    optional normalize. Returns an outcome row and logs its own progress line
+    live, so a long parallel batch still shows movement on stderr."""
+    try:
+        rc, parsed, stderr_tail = _run_extractor(
+            job["strategy"], job["in_path"], job["out_path"],
+            job["doc_id"], job["source_rel"], args.timeout,
+            extra_flags=job["extra_flags"])
+        outcome = _classify_result(job, rc, parsed, stderr_tail, kb_root)
+        if outcome["bucket"] == "extracted" and args.normalize:
+            _normalize(job["out_path"], args.timeout)
+    except Exception as e:  # noqa: BLE001 — one crashed job must never abort the batch
+        outcome = {
+            "bucket": "error",
+            "error_row": {"source_path": job["source_rel"],
+                          "error": f"dispatch crashed: {type(e).__name__}: {e}"},
+            "na_row": None, "unclassified_row": None, "flagged": False,
+            "popo_target": None,
+            "log": f"error {job['source_rel']}: dispatch crashed: {e}",
+        }
+    if not args.quiet and outcome.get("log"):
+        log(outcome["log"])
+    return outcome
 
 
 def _invoke_popo(kb_root: Path, doc_id: str, auto_setup: bool):
@@ -385,6 +490,11 @@ def main() -> int:
                          "(opt-in heavy tier must already be installed; never "
                          "auto-installs). visual_transcription docs are surfaced, "
                          "not auto-patched (no page list).")
+    ap.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
+                    help=f"parallel lightweight extractions (default: {DEFAULT_WORKERS}; "
+                         "1 = serial). Each worker is an extractor child process, so "
+                         "memory grows ~linearly. mineru always runs serially — the "
+                         "opt-in VLM tier is memory-bound and must never run concurrently.")
     ap.add_argument("--quiet", action="store_true", help="suppress per-file stderr progress")
     args = ap.parse_args()
 
@@ -436,6 +546,12 @@ def main() -> int:
     popo_targets: list[str] = []
 
     t0 = time.time()
+
+    # ---- Pass 1 (serial, cheap): validate scout fields, resolve paths, decide
+    # idempotency/popo/mineru-flags. Terminal files (errors, skips, unchanged)
+    # are counted here in file order exactly as before; runnable files become
+    # jobs for pass 2. No subprocess runs in this pass.
+    jobs: list[dict] = []
     for f in files:
         raw_id = f.get("id")
         raw_rel = f.get("source_path")
@@ -516,85 +632,59 @@ def main() -> int:
                 for w in fwarns:
                     log(f"{source_rel}: {w}")
 
-            rc, parsed, stderr_tail = _run_extractor(
-                strategy, in_path, out_path, doc_id, source_rel, args.timeout,
-                extra_flags=extra_flags)
-
-            if rc == "timeout":
-                counts["error"] += 1
-                errors.append({"source_path": source_rel, "error": stderr_tail})
-                if not args.quiet:
-                    log(f"error {source_rel}: {stderr_tail}")
-                continue
-
-            if rc == 2:
-                # Child exit 2 == "needs install" — NEVER the driver's own exit
-                # 2, and never an error/corrupt classification.
-                install_hint = (parsed or {}).get("reason") or stderr_tail or "needs install (converter/CLI absent)"
-                needs_attention.append({
-                    "id": doc_id, "source_path": source_rel, "reason": "needs_install",
-                    "doc": None, "extracted_but_flagged": False, "install_hint": install_hint,
-                })
-                counts["needs_attention"] += 1
-                if not args.quiet:
-                    log(f"needs_install {source_rel}")
-                continue
-
-            ok = rc == 0 and isinstance(parsed, dict) and parsed.get("ok") is True
-            if not ok:
-                reason = parsed.get("reason") if isinstance(parsed, dict) else None
-                if not reason:
-                    reason = (f"exit {rc}: {stderr_tail[:200]}" if stderr_tail
-                              else f"exit {rc}: unparseable extractor output")
-                counts["error"] += 1
-                errors.append({"source_path": source_rel, "error": reason})
-                if not args.quiet:
-                    log(f"error {source_rel}: {reason}")
-                continue
-
-            # --- ok:true ---
-            warns = [w for w in (parsed.get("warnings") or []) if isinstance(w, str)]
-            mangled = [w for w in warns if classify_pdf_warning(w) == "visual_transcription"]
-            dropped = [w for w in warns if classify_pdf_warning(w) == "dropped_pictures_residual"]
-            unknown = [w for w in warns if classify_pdf_warning(w) is None]
-            rel_doc = str(out_path.relative_to(kb_root))
-
-            if unknown:
-                unclassified.append({"id": doc_id, "source_path": source_rel, "warnings": unknown})
-
-            if mangled:
-                # mangled supersedes dropped: manual transcription covers both.
-                needs_attention.append({
-                    "id": doc_id, "source_path": source_rel, "reason": "visual_transcription",
-                    "doc": rel_doc, "extracted_but_flagged": True,
-                    "warning": "; ".join(mangled + dropped),
-                })
-                extracted_but_flagged += 1
-            elif dropped:
-                pages = residual_picture_pages(read_body(out_path))
-                needs_attention.append({
-                    "id": doc_id, "source_path": source_rel, "reason": "dropped_pictures_residual",
-                    "doc": rel_doc, "extracted_but_flagged": True,
-                    "pages": pages, "warning": "; ".join(dropped),
-                })
-                extracted_but_flagged += 1
-
-            # Count extracted last — after classification — so an unexpected
-            # throw above routes to the error bucket without double-counting.
-            counts["extracted"] += 1
-            if popo_in_effect:
-                popo_targets.append(doc_id)
-            if args.normalize:
-                _normalize(out_path, args.timeout)
-            if not args.quiet:
-                flag = " [needs_attention]" if (mangled or dropped) else ""
-                log(f"extracted {source_rel}{flag}")
+            jobs.append({
+                "seq": len(jobs), "doc_id": doc_id, "source_rel": source_rel,
+                "strategy": strategy, "in_path": in_path, "out_path": out_path,
+                "extra_flags": extra_flags, "popo_in_effect": popo_in_effect,
+            })
         except Exception as e:  # noqa: BLE001 — one malformed entry must never abort the batch
             counts["error"] += 1
             errors.append({"source_path": label, "error": f"dispatch crashed: {type(e).__name__}: {e}"})
             if not args.quiet:
                 log(f"error {label}: dispatch crashed: {e}")
             continue
+
+    # ---- Pass 2: run the extractor subprocesses. Lightweight strategies go
+    # through a thread pool (work happens in child processes; threads only herd
+    # them). mineru stays STRICTLY serial — see HEAVY_STRATEGIES. Outcome rows
+    # are only collected here; pass 3 owns all shared-state mutation.
+    light = [j for j in jobs if j["strategy"] not in HEAVY_STRATEGIES]
+    heavy = [j for j in jobs if j["strategy"] in HEAVY_STRATEGIES]
+    outcomes: dict[int, dict] = {}
+    workers = max(1, int(args.workers))
+    if workers > 1 and len(light) > 1:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = {pool.submit(_execute_job, j, args, kb_root): j["seq"] for j in light}
+            for fut in as_completed(futs):
+                outcomes[futs[fut]] = fut.result()  # _execute_job never raises
+    else:
+        for j in light:
+            outcomes[j["seq"]] = _execute_job(j, args, kb_root)
+    for j in heavy:
+        outcomes[j["seq"]] = _execute_job(j, args, kb_root)
+
+    # ---- Pass 3 (serial, original file order): fold outcome rows into the
+    # shared accumulators. Completion order varies run-to-run; folding in file
+    # order keeps counts / errors.json / needs_attention[] deterministic.
+    for j in jobs:
+        o = outcomes.get(j["seq"]) or {
+            "bucket": "error",
+            "error_row": {"source_path": j["source_rel"],
+                          "error": "worker returned no result (driver bug)"},
+            "na_row": None, "unclassified_row": None, "flagged": False,
+            "popo_target": None,
+        }
+        counts[o["bucket"]] += 1
+        if o["error_row"]:
+            errors.append(o["error_row"])
+        if o["na_row"]:
+            needs_attention.append(o["na_row"])
+        if o["unclassified_row"]:
+            unclassified.append(o["unclassified_row"])
+        if o["flagged"]:
+            extracted_but_flagged += 1
+        if o["popo_target"]:
+            popo_targets.append(o["popo_target"])
 
     # Env-gated stage 2: route every mineru-extracted doc through Popo. Runs
     # only when DOC2KB_ALWAYS_POPO (or a per-file popo=true) put docs in the

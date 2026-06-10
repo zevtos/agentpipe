@@ -19,26 +19,47 @@ import argparse
 import json
 import os
 import re
-import subprocess
 import sys
-import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
-try:
-    from docx import Document
-    from docx.oxml.ns import qn
-    HAS_DOCX = True
-except ImportError:
-    Document = None
-    qn = None
-    HAS_DOCX = False
+# python-docx импортируется ЛЕНИВО (~17ms + lxml): Stop-хук дёргает этот
+# скрипт на каждом завершении хода Claude, и в проекте без gost-отчётов
+# импорт до early-exit-гейта был чистым налогом (~45ms → ~10ms no-op).
+Document = None
+qn = None
+HAS_DOCX: Optional[bool] = None  # None = ещё не пробовали импортировать
+
+
+def _load_docx() -> bool:
+    """Импортирует python-docx при первом обращении. True = доступен."""
+    global Document, qn, HAS_DOCX
+    if HAS_DOCX is None:
+        try:
+            from docx import Document as _Document
+            from docx.oxml.ns import qn as _qn
+        except ImportError:
+            HAS_DOCX = False
+        else:
+            Document, qn = _Document, _qn
+            HAS_DOCX = True
+    return HAS_DOCX
 
 
 def _venv_python() -> Optional[Path]:
-    """Путь к скилл-venv питону, если он есть рядом."""
+    """Путь к скилл-venv питону, если он есть. Venv живёт в глобальном
+    state-каталоге (ADR-008) — резолвим через ensure_env (единственный
+    источник правды о layout'е); legacy in-skill .venv оставлен fallback'ом
+    для не-мигрировавших установок."""
+    try:
+        import ensure_env
+        candidate = ensure_env.venv_python()
+        if candidate.exists():
+            return candidate
+    except Exception:
+        pass
     skill_dir = Path(__file__).resolve().parent.parent
     if os.name == "nt":
         candidate = skill_dir / ".venv" / "Scripts" / "python.exe"
@@ -57,7 +78,7 @@ def _maybe_reexec_in_venv(argv: List[str]) -> None:
     управление; CLI решит сам, что делать (--hook silently exit 0, --check
     прокинет missing-deps Violation).
     """
-    if HAS_DOCX:
+    if _load_docx():
         return
     venv_py = _venv_python()
     if venv_py is None:
@@ -70,6 +91,7 @@ def _maybe_reexec_in_venv(argv: List[str]) -> None:
         return
     script = str(Path(__file__).resolve())
     if os.name == "nt":
+        import subprocess
         rc = subprocess.run([str(venv_py), script, *argv]).returncode
         sys.exit(rc)
     os.execv(str(venv_py), [str(venv_py), script, *argv])
@@ -457,7 +479,7 @@ def _safe_run_check(check, doc) -> List[Violation]:
 
 
 def validate_docx(path: Path) -> List[Violation]:
-    if not HAS_DOCX:
+    if not _load_docx():
         return [Violation(
             tier=TIER_FAIL, code="missing-deps",
             message=("python-docx не установлен; не могу прочитать .docx. "
@@ -552,12 +574,15 @@ def _scan_sentinels(cwd: Path, max_depth: int = HOOK_GLOB_MAX_DEPTH) -> List[Pat
     return out
 
 
-def _hook_main(cwd: Path) -> int:
+def _hook_main(cwd: Path, argv: Optional[List[str]] = None) -> int:
     """Stop-хук: сканирует cwd на sentinel'ы, валидирует docx, печатает
     decision-block JSON если есть FAIL'ы. Hook всегда exit 0 — лучше тихо
-    промолчать, чем уронить Stop-pipeline."""
-    if not HAS_DOCX:
-        return 0
+    промолчать, чем уронить Stop-pipeline.
+
+    Порядок гейтов важен: дешёвые stdlib-проверки (project root, sentinel-скан)
+    идут ПЕРВЫМИ; python-docx импортируется — и re-exec в venv происходит —
+    только когда sentinel'ы реально найдены. No-op путь хука платит ~10ms
+    вместо ~45ms, а re-exec не случается в проектах без отчётов вовсе."""
     if not _under_project_root(cwd):
         return 0
     try:
@@ -566,6 +591,11 @@ def _hook_main(cwd: Path) -> int:
         return 0
 
     if not sentinels:
+        return 0
+
+    if not _load_docx():
+        # execv не возвращается, если venv найден; иначе тихо молчим (exit 0).
+        _maybe_reexec_in_venv(list(argv) if argv is not None else ["--hook"])
         return 0
 
     by_doc: dict = {}
@@ -616,7 +646,6 @@ def _check_main(path_str: str) -> int:
 
 def main(argv: Optional[List[str]] = None) -> int:
     parsed_argv = list(sys.argv[1:]) if argv is None else list(argv)
-    _maybe_reexec_in_venv(parsed_argv)
 
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--hook", action="store_true",
@@ -627,14 +656,19 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     try:
         if args.hook:
-            return _hook_main(Path.cwd())
+            # re-exec отложен внутрь _hook_main — случается только при
+            # найденных sentinel'ах, не на каждом Stop.
+            return _hook_main(Path.cwd(), parsed_argv)
         if args.check:
+            if not _load_docx():
+                _maybe_reexec_in_venv(parsed_argv)
             return _check_main(args.check)
         parser.print_help()
         return 2
     except Exception:
         if args.hook:
             return 0
+        import traceback
         traceback.print_exc()
         return 2
 

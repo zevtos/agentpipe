@@ -23,7 +23,7 @@ returns one JSON summary:
 
 ```bash
 python3 <skill_dir>/scripts/ensure_env.py extract_corpus.py <kb_dir> \
-    [--timeout 600] [--normalize] [--quiet]
+    [--timeout 600] [--normalize] [--quiet] [--workers 4]
 ```
 
 Summary shape (last stdout line):

@@ -27,6 +27,7 @@ import argparse
 import asyncio
 import json
 import os
+import random
 import sys
 from typing import Any, Iterable, Literal, TypedDict
 
@@ -159,13 +160,17 @@ async def _retry_get(client: httpx.AsyncClient, url: str, *, params: dict | None
             r = await client.get(url, params=params, headers=headers, timeout=HTTP_TIMEOUT)
         except httpx.HTTPError as e:
             log(f"{source}: http error {type(e).__name__} attempt {attempt}/{MAX_RETRIES}: {e}")
-            await asyncio.sleep(delay)
+            # Jittered backoff: all 6 sources retry concurrently — lockstep
+            # delays re-collide on shared 429 pools (thundering herd).
+            await asyncio.sleep(delay * (0.5 + random.random()))
             delay = min(delay * 2, 32.0)
             continue
         last = r
         if r.status_code == 429 or 500 <= r.status_code < 600:
             log(f"{source}: HTTP {r.status_code} attempt {attempt}/{MAX_RETRIES}")
-            await asyncio.sleep(delay)
+            # Jittered backoff: all 6 sources retry concurrently — lockstep
+            # delays re-collide on shared 429 pools (thundering herd).
+            await asyncio.sleep(delay * (0.5 + random.random()))
             delay = min(delay * 2, 32.0)
             continue
         return r

@@ -62,6 +62,7 @@ import translate as _translate
 PARSE_SCRIPT = Path(__file__).resolve().parent / "parse.py"
 PARSE_TIMEOUT_S = 180
 DEFAULT_PARSE_CONCURRENCY = 4
+DEFAULT_FETCH_CONCURRENCY = 8
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -101,6 +102,10 @@ def _build_parser() -> argparse.ArgumentParser:
                    help=f"parallel parse subprocesses (default: {DEFAULT_PARSE_CONCURRENCY}); "
                         "1 = serial. Each subprocess loads pymupdf4llm (+docling if "
                         "triggered), so memory grows ~linearly with this value.")
+    p.add_argument("--fetch-concurrency", type=int, default=DEFAULT_FETCH_CONCURRENCY,
+                   help=f"parallel PDF downloads (default: {DEFAULT_FETCH_CONCURRENCY}). "
+                        "Downloads spread across many hosts (arxiv, publisher CDNs, "
+                        "zenodo), so this is the main wall-clock lever of the fetch stage.")
     p.add_argument("--sources", default=None,
                    help="comma-separated subset of "
                         "{openalex,s2,arxiv,crossref,europepmc,core,datacite,hf}")
@@ -266,7 +271,8 @@ async def _stage_fetch_parse_index(args, con,
         log(_fetch.GREY_DISCLAIMER, prefix="ultrasearch")
 
     t0 = time.monotonic()
-    fetches = await _fetch.fetch_many(candidates, concurrency=4, grey=args.grey)
+    fetches = await _fetch.fetch_many(
+        candidates, concurrency=max(1, int(args.fetch_concurrency)), grey=args.grey)
     stats["fetch"] = {
         "n_attempted": len(candidates),
         "n_ok":        sum(1 for f in fetches if f.get("ok")),
