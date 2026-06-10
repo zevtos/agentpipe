@@ -32,7 +32,7 @@ The installer supports two targets via `--target`:
 ```
 ~/.claude/
   agents/                 <- 9 specialist agents (.md files)
-  commands/               <- 16 orchestration commands (.md files)
+  commands/               <- 17 orchestration commands (.md files)
   skills/                 <- skill folders (each contains SKILL.md + optional scripts/references)
     gost-report/
 ```

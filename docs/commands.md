@@ -21,6 +21,22 @@ Best for: starting a new project from scratch.
 
 ---
 
+### `/backlog` — Spec → Sprint-Ready Issues
+> Turn specs and architecture into a GitHub backlog: epics, milestones, atomic issues.
+
+**Usage**: `/backlog [optional: path to spec/architecture docs, or a scope like 'MVP']`
+
+The bridge between `/kickoff` (which ends with specs and a scaffold) and `/sprint` (which starts from existing issues):
+1. **PM agent** — decomposes specs into epics and atomic issues with Given/When/Then acceptance criteria, MoSCoW priority, and size
+2. **Architect agent** — dependency ordering, milestone grouping (walking skeleton first), spike flags
+3. Gated `gh` creation — labels, milestones, issues with self-contained bodies; unblocked issues get `ready`
+
+Hands off to `/sprint label:ready`. Dedupes against existing open issues, so re-running after a spec change is safe.
+
+Best for: right after `/kickoff`, or any project with specs but an empty issue tracker.
+
+---
+
 ### `/next` — Strategic Advisor
 > Analyzes full project state and recommends the most impactful next steps.
 

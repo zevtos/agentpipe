@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Gated pipeline orchestration for Claude Code and Codex CLI.</strong><br>
-  9 specialist agents, 16 multi-agent workflows, multi-vendor skills — installed globally in 30 seconds.
+  9 specialist agents, 17 multi-agent workflows, multi-vendor skills — installed globally in 30 seconds.
 </p>
 
 <p align="center">
@@ -53,7 +53,7 @@ Vanilla Claude Code already ships agents, commands, and skills — but they're *
 | | Vanilla Claude Code | + agentpipe |
 |---|---|---|
 | Agents | meta/utility (`general-purpose`, `Explore`, `Plan`, `claude-code-guide`, `statusline-setup`) — generic helpers | **9 domain specialists** with role-bounded tool access (architect, dba, devops, docs, pm, refactorer, reviewer, security, tester) — e.g. reviewer = Read+Grep only, can't accidentally edit |
-| Slash commands | session/config (`/init`, `/clear`, `/agents`, `/mcp`, `/model`, `/config`, ...) | **16 gated multi-agent workflows** (`/feature`, `/sprint`, `/audit`, `/release`, `/refactor`, ...) with conditional steps and parallel gates |
+| Slash commands | session/config (`/init`, `/clear`, `/agents`, `/mcp`, `/model`, `/config`, ...) | **17 gated multi-agent workflows** (`/feature`, `/sprint`, `/audit`, `/release`, `/refactor`, ...) with conditional steps and parallel gates |
 | Skills | dev-tooling utilities (`claude-api`, `loop`, `schedule`, `update-config`, ...) — for power-users of Claude Code | **end-user domain skills** — `gost-report` (Russian academic .docx), `doc2kb` (heterogeneous document corpus → LLM-optimized knowledge base) |
 | Per-agent model selection | global / manual | **auto** — opus for high-reasoning roles (architect, security), sonnet for the rest. Override at install: `--model-profile opus` / `sonnet` / `mixed` (default), persisted across updates. |
 | Multi-vendor distribution | Claude Code only | **same skills** in Codex CLI via `bash install.sh --target codex` |
@@ -81,6 +81,7 @@ Vanilla Claude Code already ships agents, commands, and skills — but they're *
 |---------|---------|-------------|
 | `/next` | What should I work on? Strategic project analysis | architect |
 | `/kickoff` | Bootstrap a new project from an idea | pm + architect + dba + devops |
+| `/backlog` | Turn specs into a sprint-ready GitHub backlog | pm + architect |
 | `/plan` | Architecture planning (design only, no code) | architect |
 | `/feature` | End-to-end feature development | pm + architect + reviewer + security + tester + docs |
 | `/fix` | Bug investigation and fix | reviewer + tester |
@@ -137,7 +138,7 @@ If you use both clients, run the installer twice — once per target. The instal
 ```
 agentpipe/
   agents/                9 specialist agent definitions
-  commands/              16 orchestration commands
+  commands/              17 orchestration commands
   skills/                Domain-specific skills (folders with SKILL.md + assets)
   research/              19 reference documents
   tests/                 Agent eval scenarios — empty by default, see docs/eval.md
