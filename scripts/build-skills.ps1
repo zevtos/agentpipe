@@ -40,7 +40,26 @@ Get-ChildItem $SkillsSrc -Directory | ForEach-Object {
 
     $out = Join-Path $Dist "$($_.Name).zip"
     if (Test-Path $out) { Remove-Item $out }
-    Compress-Archive -Path $_.FullName -DestinationPath $out -Force
+
+    # Stage to a temp dir and strip dev cruft (venv, runtime data) so the zip
+    # never ships local state. Mirrors the -x exclusions in build-skills.sh.
+    $stage = Join-Path ([System.IO.Path]::GetTempPath()) "agentpipe-build-$([System.IO.Path]::GetRandomFileName())"
+    New-Item -ItemType Directory -Path $stage | Out-Null
+    try {
+        Copy-Item $_.FullName -Destination (Join-Path $stage $_.Name) -Recurse
+        $staged = Join-Path $stage $_.Name
+        foreach ($cruft in @(".venv", ".venv.lock", ".installed_hash",
+                             "data\corpus.db", "data\corpus.db-wal", "data\corpus.db-shm",
+                             "data\cache", "data\retraction_watch.csv",
+                             "data\retraction_watch.csv.tmp", "data\_logs")) {
+            Remove-Item -Path (Join-Path $staged $cruft) -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        Get-ChildItem $staged -Recurse -Force -Include "__pycache__", "*.pyc", ".DS_Store" |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        Compress-Archive -Path $staged -DestinationPath $out -Force
+    } finally {
+        Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+    }
     Write-Host "  dist/$($_.Name).zip" -ForegroundColor Green
     $count++
 }

@@ -615,7 +615,7 @@ do_attribution_dry() {
     echo "Attribution-fix:"
     local settings="$BASE/settings.json"
     # Check the modern key (attribution.commit="") as the source of truth.
-    if [[ -f "$settings" ]] && python3 -c "import json,sys; d=json.load(open('$settings')); sys.exit(0 if d.get('attribution',{}).get('commit')=='' else 1)" 2>/dev/null; then
+    if [[ -f "$settings" ]] && python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get('attribution',{}).get('commit')=='' else 1)" "$settings" 2>/dev/null; then
         echo "  = settings/attribution=hidden (already set)"
     else
         info "  + settings/attribution=hidden + includeCoAuthoredBy=false"
