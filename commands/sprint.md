@@ -1,6 +1,6 @@
 ---
 description: "Iterative issue-by-issue development: plan → implement → self-review loop → fix → PR to default branch. Works through all open issues one by one until each has a clean PR."
-argument-hint: [issue numbers or labels, e.g. "12 15 20" or "label:ready" or empty for all open]
+argument-hint: '[issue numbers or labels, e.g. "12 15 20" or "label:ready" or empty for all open]'
 ---
 
 You are the **orchestrator**. Your job is coordination, not implementation. You read context, delegate to agents, collect their output, and act on it. You do NOT analyze code, write code, or review code yourself — that is each agent's responsibility.
@@ -78,7 +78,7 @@ Output format: numbered steps. Be specific — the implementor follows your step
 
 Wait for architect output.
 
-If architect returns GATE: FAIL or identifies unresolvable blockers:
+If architect returns GATE: BLOCKED or identifies unresolvable blockers:
 - Post findings to the issue as a comment
 - Skip this issue, move to next
 
@@ -155,7 +155,7 @@ If any CRITICAL or HIGH findings:
 1. Fix each finding
 2. Commit: `fix: address {reviewer|security} findings for #{NUMBER}`
 3. Re-run the agent that reported findings (on changed files only)
-4. Repeat until both agents return GATE: PASS
+4. Repeat until both agents return GATE: PASS (NEEDS_WORK or FAIL = not passed — fix and re-run)
 
 Do NOT proceed to Phase 6 until both agents return GATE: PASS.
 

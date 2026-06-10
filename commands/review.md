@@ -1,6 +1,6 @@
 ---
 description: "Comprehensive multi-agent code review: parallel reviewer + security audit on all changes, with actionable fix list and quality gate."
-argument-hint: [optional: specific files or area to review]
+argument-hint: "[optional: specific files or area to review]"
 ---
 
 You are orchestrating a comprehensive code review using multiple specialist agents in parallel. This is the quality gate before merging.
@@ -13,8 +13,8 @@ $ARGUMENTS
 
 ## Auto-context
 - Status: !`git status --short`
-- Changed files: !`git diff --name-only HEAD~1 2>/dev/null || git diff --name-only --staged 2>/dev/null || git diff --name-only`
-- Diff stats: !`git diff --stat HEAD~1 2>/dev/null || git diff --stat --staged 2>/dev/null || git diff --stat`
+- Changed files: !`if [ -n "$(git status --porcelain -uno)" ]; then git diff --name-only HEAD; else git diff --name-only HEAD~1..HEAD 2>/dev/null; fi`
+- Diff stats: !`if [ -n "$(git status --porcelain -uno)" ]; then git diff --stat HEAD; else git diff --stat HEAD~1..HEAD 2>/dev/null; fi`
 
 ## Pipeline
 

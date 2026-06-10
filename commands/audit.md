@@ -1,6 +1,6 @@
 ---
 description: "Full security audit of the project or a specific area. Runs threat modeling, code audit, dependency scan, and produces a prioritized findings report."
-argument-hint: [optional: specific area like 'auth', 'payments', 'api', or 'crypto']
+argument-hint: "[optional: specific area like 'auth', 'payments', 'api', or 'crypto']"
 ---
 
 You are orchestrating a comprehensive security audit. This goes deeper than a code review — it includes threat modeling, architecture-level analysis, and dependency auditing.
@@ -55,7 +55,8 @@ Cross-reference findings with:
 
 ### Step 4: Architecture Review (Architect Agent — security focus)
 Run the `architect` agent:
-"Review this system architecture from a SECURITY perspective only:
+"Review this system architecture from a SECURITY perspective only.
+Do NOT repeat the STRIDE/code-level findings from the security audit — focus on structural concerns:
 - Are trust boundaries correctly placed?
 - Are service-to-service communications authenticated (mTLS, API keys)?
 - Is the principle of least privilege followed for database access?

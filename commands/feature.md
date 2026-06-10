@@ -72,16 +72,17 @@ Run BOTH agents in parallel:
 **Reviewer agent:**
 "Review the implementation of: $ARGUMENTS
 Focus on: correctness, error handling, edge cases, performance, convention compliance.
-Check the diff of all changes made."
+Check the diff of all changes made.
+Skip the test coverage assessment — tests are written in the next step by the tester agent."
 
 **Security agent:**
 "Review the security of the implementation for: $ARGUMENTS
 Focus on: input validation, authentication/authorization, injection risks, data exposure, error information leakage."
 
-Collect findings from both agents. If either returns GATE: FAIL:
+Collect findings from both agents. If either returns a gate other than PASS (NEEDS_WORK or FAIL):
 - Fix ALL critical and high findings
 - Re-run the failing agent on the specific fixes
-- Repeat until GATE: PASS
+- Repeat until both agents return GATE: PASS
 
 ### Step 6: Tests (Tester Agent)
 Run the `tester` agent:
