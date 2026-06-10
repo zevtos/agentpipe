@@ -23,7 +23,12 @@ gh issue list --state open --assignee @me --json number,title,body,labels
 
 If $ARGUMENTS specifies issue numbers (e.g. "12 15 20"), filter to those.
 If $ARGUMENTS is a label (e.g. "label:bugs"), filter by label.
-If $ARGUMENTS is empty, list all open and ask: "Which issues should I work through?"
+If $ARGUMENTS is empty and a `ready` label exists (`/backlog` marks unblocked issues with it), default to `label:ready`.
+Otherwise list all open and ask: "Which issues should I work through?"
+
+Order the queue by dependencies: if an issue body declares `Blocked by #N`, the blocker comes first.
+
+Require a clean working tree (`git status --porcelain` empty). If dirty, stop: "Commit or stash first — the sprint loop switches branches constantly." Do not proceed.
 
 Detect the repository's default branch:
 
@@ -47,6 +52,10 @@ gh issue view {NUMBER} --json number,title,body,comments,labels
 ```
 
 Collect: title, body, referenced files, labels. Do not interpret or plan — just gather facts.
+
+Skip checks (skip with a one-line note, move to the next issue):
+- An open PR already references this issue (`gh pr list --state open --search "#{NUMBER} in:body"`)
+- The body declares `Blocked by #N` and #N is still open — comment "Blocked by #N — will pick up after it closes"
 
 If the issue is ambiguous or missing acceptance criteria, post a comment asking for clarification and pause until resolved.
 
@@ -99,6 +108,8 @@ git checkout $DEFAULT_BRANCH && git pull origin $DEFAULT_BRANCH
 git checkout -b issue/{NUMBER}-{kebab-slug-max-5-words}
 ```
 
+If the branch already exists from a previous attempt, reuse it: check it out and rebase onto $DEFAULT_BRANCH instead of creating a duplicate.
+
 ---
 
 ### Phase 4: Implement
@@ -107,10 +118,10 @@ You implement following the architect's ordered steps — **literally and comple
 - Do exactly what the architect specified, no more, no less
 - No scope creep, no adjacent fixes, no refactoring unrelated code
 - If architect's plan is unclear, stop and re-run architect with a clarifying prompt
-- Commit atomically per logical change:
+- Commit atomically per logical change, type derived from the issue (feature → `feat`, bug → `fix`, else `chore`/`docs`):
 
 ```
-git commit -m "fix(scope): description
+git commit -m "{feat|fix|chore|docs}(scope): description
 
 Implements #{NUMBER}"
 ```
@@ -125,8 +136,7 @@ Prompt to `reviewer` agent:
 ```
 Code review for issue #{NUMBER}: {TITLE}
 
-Diff to review:
-[run: git diff $DEFAULT_BRANCH...HEAD and paste output]
+Diff to review: run `git diff $DEFAULT_BRANCH...HEAD` yourself; read changed files in full where the diff lacks context.
 
 Architect's implementation plan was:
 [paste architect's ordered steps]
@@ -140,8 +150,7 @@ Prompt to `security` agent:
 ```
 Security review for issue #{NUMBER}: {TITLE}
 
-Diff to review:
-[run: git diff $DEFAULT_BRANCH...HEAD and paste output]
+Diff to review: run `git diff $DEFAULT_BRANCH...HEAD` yourself; read changed files in full where the diff lacks context.
 
 Check: injection risks, auth/authz, input validation, data exposure, error leakage, OWASP Top 10:2025, OWASP API Top 10:2023.
 ```
@@ -159,6 +168,8 @@ If any CRITICAL or HIGH findings:
 
 Do NOT proceed to Phase 6 until both agents return GATE: PASS.
 
+Escape hatch: if an agent still hasn't returned PASS after 3 fix rounds, stop fighting — comment the remaining findings on the issue, label it `blocked`, reset to $DEFAULT_BRANCH, and move to the next issue. An infinite review loop on one issue kills the sprint.
+
 ---
 
 ### Phase 6: Tests — TESTER AGENT
@@ -169,8 +180,7 @@ Prompt to `tester` agent:
 ```
 Issue #{NUMBER} is implemented and passed review.
 
-Diff of changes:
-[run: git diff $DEFAULT_BRANCH...HEAD and paste output]
+Diff of changes: run `git diff $DEFAULT_BRANCH...HEAD` yourself; read the changed files for context.
 
 Architect's risk assessment was:
 [paste risk section from architect output]
@@ -189,6 +199,7 @@ After tester writes tests, run the full suite:
 ```
 
 If tests fail — fix the failure, do not proceed until green.
+If a test failure forced a non-trivial implementation change, re-run Phase 5 on the new diff before opening the PR — reviewed code and shipped code must be the same code.
 
 ---
 
@@ -197,7 +208,7 @@ If tests fail — fix the failure, do not proceed until green.
 ```
 gh pr create \
   --base $DEFAULT_BRANCH \
-  --title "fix(scope): {ISSUE_TITLE} (closes #{NUMBER})" \
+  --title "{feat|fix|chore|docs}(scope): {ISSUE_TITLE} (closes #{NUMBER})" \
   --body "$(cat <<'EOF'
 ## Summary
 Closes #{NUMBER}
