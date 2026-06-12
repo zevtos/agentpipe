@@ -1388,11 +1388,19 @@ do_caveman() {
     case "$reply" in
         y|Y|yes|YES)
             info "Installing caveman..."
-            if curl -fsSL "$CAVEMAN_INSTALL_URL" | bash; then
+            local _cav_tmp _cav_mask
+            _cav_tmp=$(mktemp /tmp/caveman_install.XXXXXX.sh)
+            _cav_mask=$(mktemp -d /tmp/caveman_mask.XXXXXX)
+            # Mask `gemini` CLI so caveman skips its Gemini install step (reads /dev/tty, hangs)
+            printf '#!/bin/sh\n' > "$_cav_mask/gemini"
+            chmod +x "$_cav_mask/gemini"
+            if curl -fsSL "$CAVEMAN_INSTALL_URL" -o "$_cav_tmp" \
+               && PATH="$_cav_mask:$PATH" bash "$_cav_tmp"; then
                 log "caveman installed"
             else
                 warn "caveman install failed — run later: curl -fsSL $CAVEMAN_INSTALL_URL | bash"
             fi
+            rm -f "$_cav_tmp"; rm -rf "$_cav_mask"
             ;;
         *)
             info "caveman declined."
