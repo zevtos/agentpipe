@@ -173,7 +173,7 @@ Each gate must pass before proceeding. Agents have bounded tool access (reviewer
 | attribution-fix · CLAUDE.md baseline · gost-validation hook | — | ✅ | ✅ | ✅ | — |
 | Stop sound hook | — | — | ✅ | ✅ | ✅ |
 | thinking summaries | — | — | ✅ | ✅ | — |
-| env defaults (`CLAUDE_CODE_EFFORT_LEVEL=xhigh` + disable adaptive thinking + non-essential traffic) | — | — | ✅ | ✅ | — |
+| settings defaults (`effortLevel=xhigh` + disable non-essential traffic env) | — | — | ✅ | ✅ | — |
 | ccstatusline (`statusLine`, install-if-missing) | — | — | — | ✅ | — |
 | caveman (third-party, pinned SHA + sha256-verified, gated) | — | — | — | ✅ | — |
 | MinerU pre-warm (~3 GB, gated) | — | — | — | ✅ | — |
@@ -202,7 +202,7 @@ Per-layer override flags: `--with-mineru` / `--no-mineru`, `--with-env-defaults`
 - **Opt-in personal preferences**: `--with-sound-hooks` (Stop sound hook only — one beep when Claude or Codex finishes a turn, OS auto-detected), `--with-notification-sound` (Claude-only Notification sound hook — beep on permission prompts and "waiting for input"), `--with-thinking-summaries` (`showThinkingSummaries: true`). Passing both sound flags is allowed but warns on Claude: Notification often fires right after Stop, producing two beeps in sequence. Use `--clean-sound-hooks` (`-CleanSoundHooks` on PowerShell) to strip every sound hook from `settings.json`/`hooks.json` without touching unrelated hooks (gost-validation, user customs).
 - **Skills-only updates**: `--skills-only` (`-SkillsOnly` on PowerShell) copies only `skills/*` and skips agents, commands, and every `settings.json`/hook layer. Works with both targets and composes with `--dry` / `--diff` / `--pull` / `--uninstall`. Handy for fast iteration on a single skill: `bash install.sh --skills-only` re-syncs `~/.claude/skills/` without re-running the full settings merge.
 - **Per-agent model profile**: `--model-profile opus` puts every agent on opus, `--model-profile sonnet` downgrades all to sonnet, default is `mixed` (canonical opus-for-architect+security, sonnet-for-the-rest). Choice is persisted to `settings.json` so `update.sh` re-uses it. Source files are never modified — rewrite happens at copy time. See [docs/installation.md](docs/installation.md#per-agent-model-profile---model-profile).
-- **Optional shell env vars**: `scripts/agentpipe.env.example` documents reasoning-effort, adaptive-thinking, and telemetry-bundle vars. Not auto-installed — copy what you want into your shell rc. The `senior`/`god` presets (or `--with-env-defaults`) merge a maxed non-secret subset (`CLAUDE_CODE_EFFORT_LEVEL=xhigh` + disable adaptive thinking + non-essential traffic) into `settings.json` `"env"` instead of your rc. See [docs/installation.md](docs/installation.md#optional-shell-environment-variables).
+- **Optional shell env vars**: `scripts/agentpipe.env.example` documents reasoning-effort, adaptive-thinking, and telemetry-bundle vars. Not auto-installed — copy what you want into your shell rc. The `senior`/`god` presets (or `--with-env-defaults`) merge maxed non-secret defaults into `settings.json` instead of your rc: top-level `effortLevel: "xhigh"` (the same key `/effort` writes; explicit effort disables adaptive thinking) plus `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` in `"env"`. See [docs/installation.md](docs/installation.md#optional-shell-environment-variables).
 - **Update entry point**: `bash update.sh` (or `.\update.ps1`) — pulls latest and re-installs. Same thing as `install.sh --update`, just a clearer entry point.
 
 ## Building Release Archives

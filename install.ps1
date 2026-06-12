@@ -25,7 +25,7 @@
     .\install.ps1 -WithNotificationSound   # opt-in: Claude Notification sound hook only
     .\install.ps1 -WithThinkingSummaries   # opt-in: showThinkingSummaries=true
     .\install.ps1 -Preset god              # bundle: everything + extras + opus + MinerU (gated)
-    .\install.ps1 -Preset senior           # bundle: default + Stop sound + thinking + maxed env
+    .\install.ps1 -Preset senior           # bundle: default + Stop sound + thinking + maxed settings
     .\install.ps1 -Preset minimum          # bundle: tools + safety only, no global git/hook mutation
     .\install.ps1 -WithMineru              # pre-warm doc2kb MinerU tier (gated, ~3 GB)
     .\install.ps1 -WithEnvDefaults         # merge maxed perf/privacy env into settings.json
@@ -39,7 +39,7 @@
     manifest prints before install and under -Dry.
       minimum     tools + safety only (no attribution-fix / claude-md / gost-validation)
       default     the no-flag baseline
-      senior      default + Stop sound + thinking + maxed env defaults (xhigh)
+      senior      default + Stop sound + thinking + maxed settings defaults (effortLevel=xhigh)
       god         senior + ccstatusline + caveman + gh + claude-skip alias +
                   playwright-cli + opus + MinerU (caveman/gh/playwright/MinerU/alias
                   each gated by an interactive y/N)
@@ -947,8 +947,10 @@ function Do-GostValidationDry {
 }
 
 # --- Env-defaults layer (claude target only, opt-in; senior/god) ---
-# Merges a maxed perf/privacy block into settings.json "env". No secrets shipped.
-# xhigh raises per-turn reasoning AND quota. Mirror of install.sh do_env_defaults.
+# Merges maxed perf/privacy defaults into settings.json: top-level effortLevel
+# (the key /effort writes — explicit effort disables adaptive thinking) plus a
+# privacy env var. No secrets shipped. xhigh raises per-turn reasoning AND quota.
+# Mirror of install.sh do_env_defaults.
 
 function Do-EnvDefaults {
     if (-not (Test-EnvDefaultsActive)) { return }
@@ -959,19 +961,18 @@ function Do-EnvDefaults {
     if ($base.ContainsKey("env") -and $base["env"]) {
         $base["env"].PSObject.Properties | ForEach-Object { $envMap[$_.Name] = $_.Value }
     }
-    $envMap["CLAUDE_CODE_EFFORT_LEVEL"] = "xhigh"
-    $envMap["CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING"] = "1"
     $envMap["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
     $base["env"] = $envMap
+    $base["effortLevel"] = "xhigh"
     if (Write-SettingsJson $base) {
-        Write-Ok "settings/env merged (CLAUDE_CODE_EFFORT_LEVEL=xhigh + disable adaptive thinking + non-essential traffic)"
+        Write-Ok "settings merged (effortLevel=xhigh + disable non-essential traffic)"
     }
 }
 
 function Do-EnvDefaultsDry {
     if (-not (Test-EnvDefaultsActive)) { return }
     Write-Host "Env defaults:"
-    Write-Info "+ settings/env += CLAUDE_CODE_EFFORT_LEVEL=xhigh, DISABLE_ADAPTIVE_THINKING=1, DISABLE_NONESSENTIAL_TRAFFIC=1"
+    Write-Info "+ settings += effortLevel=xhigh; env += CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"
     Write-Host ""
 }
 

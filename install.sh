@@ -19,7 +19,7 @@ set -euo pipefail
 #   bash install.sh --with-sound-hooks         # opt-in: Stop sound hook only
 #   bash install.sh --with-notification-sound  # opt-in: Claude Notification sound hook only
 #   bash install.sh --preset god          # bundle: everything + extras + opus + MinerU (gated)
-#   bash install.sh --preset senior       # bundle: default + Stop sound + thinking + maxed env
+#   bash install.sh --preset senior       # bundle: default + Stop sound + thinking + maxed settings
 #   bash install.sh --preset minimum      # bundle: tools + safety only, no global git/hook mutation
 #   bash install.sh --with-mineru         # pre-warm doc2kb MinerU tier (gated, ~3 GB)
 #   bash install.sh --model-profile opus  # all agents on opus (default: mixed)
@@ -31,9 +31,9 @@ set -euo pipefail
 #                (security deny-list) + gost-config. OFF: attribution-fix, claude-md,
 #                gost-validation (no global git / settings-hook mutation).
 #   default    — the no-flag baseline (every default-on layer), named so it prints.
-#   senior     — default + Stop sound + thinking summaries + maxed env defaults
-#                (CLAUDE_CODE_EFFORT_LEVEL=xhigh, disable adaptive thinking + non-
-#                essential traffic, merged into settings.json "env"). Still sonnet/mixed.
+#   senior     — default + Stop sound + thinking summaries + maxed settings defaults
+#                (effortLevel=xhigh top-level + disable non-essential traffic env,
+#                merged into settings.json). Still sonnet/mixed.
 #   god        — senior + ccstatusline + caveman + gh (if missing) + claude-skip
 #                alias + playwright-cli + --model-profile opus + MinerU pre-warm.
 #                External/dangerous steps (caveman, gh, playwright, MinerU, the
@@ -232,9 +232,9 @@ Presets (--preset <name>): one bundle instead of stacking flags. A preset sets
               (security deny-list) + gost-config. OFF: attribution-fix, claude-md,
               gost-validation — no global git / settings-hook mutation.
   default     The no-flag baseline (every default-on layer), named so it prints.
-  senior      default + Stop sound + thinking summaries + maxed env defaults
-              (CLAUDE_CODE_EFFORT_LEVEL=xhigh + disable adaptive thinking + disable
-              non-essential traffic, merged into settings.json "env"). Stays mixed.
+  senior      default + Stop sound + thinking summaries + maxed settings defaults
+              (effortLevel=xhigh top-level + disable non-essential traffic env,
+              merged into settings.json). Stays mixed.
   god         senior + ccstatusline + caveman + gh (if missing) + claude-skip
               alias + playwright-cli + --model-profile opus + MinerU pre-warm.
               caveman, gh, playwright, MinerU and the alias are each gated by an
@@ -244,9 +244,9 @@ Presets (--preset <name>): one bundle instead of stacking flags. A preset sets
 
 Options:
   --preset <name>           Apply a preset bundle (minimum|default|senior|god|codex-full).
-  --with-env-defaults       Merge maxed perf/privacy env vars into settings.json "env":
-                            CLAUDE_CODE_EFFORT_LEVEL=xhigh, DISABLE_ADAPTIVE_THINKING=1,
-                            DISABLE_NONESSENTIAL_TRAFFIC=1. No secrets. senior/god imply it.
+  --with-env-defaults       Merge maxed perf/privacy defaults into settings.json:
+                            effortLevel=xhigh (top-level) + env
+                            CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1. No secrets. senior/god imply it.
                             Note: xhigh raises per-turn reasoning (and quota use).
   --no-env-defaults         Skip the env-defaults merge (overrides a preset).
   --with-ccstatusline       Add a ccstatusline statusLine to settings.json (runs
@@ -725,11 +725,12 @@ do_config_defaults_unfix() {
 
 # --- Env-defaults layer (claude target only, opt-in; senior/god) ---
 #
-# Merges a maxed perf/privacy block into settings.json "env". settings.json env
-# is injected into every session, so no shell-rc mutation. No secrets shipped
+# Merges maxed perf/privacy defaults into settings.json: top-level effortLevel
+# (the key /effort writes — explicit effort already disables adaptive thinking)
+# plus a privacy env var. No shell-rc mutation. No secrets shipped
 # (ultrasearch API keys stay manual). xhigh raises per-turn reasoning AND quota.
 
-ENV_DEFAULTS_PAYLOAD='{"env": {"CLAUDE_CODE_EFFORT_LEVEL": "xhigh", "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}}'
+ENV_DEFAULTS_PAYLOAD='{"effortLevel": "xhigh", "env": {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}}'
 
 env_defaults_active() {
     [[ "$TARGET" == "claude" && "$ENV_DEFAULTS" -eq 1 ]]
@@ -743,7 +744,7 @@ do_env_defaults() {
     fi
     local settings="$BASE/settings.json"
     if python3 "$JSON_MERGE" "$settings" "$ENV_DEFAULTS_PAYLOAD" 2>/dev/null; then
-        log "settings/env merged (CLAUDE_CODE_EFFORT_LEVEL=xhigh + disable adaptive thinking + non-essential traffic)"
+        log "settings merged (effortLevel=xhigh + disable non-essential traffic)"
     else
         warn "settings.json env-defaults merge failed"
     fi
@@ -752,7 +753,7 @@ do_env_defaults() {
 do_env_defaults_dry() {
     env_defaults_active || return 0
     echo "Env defaults:"
-    info "  + settings/env += CLAUDE_CODE_EFFORT_LEVEL=xhigh, DISABLE_ADAPTIVE_THINKING=1, DISABLE_NONESSENTIAL_TRAFFIC=1"
+    info "  + settings += effortLevel=xhigh; env += CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"
     echo ""
 }
 
@@ -2008,7 +2009,7 @@ do_uninstall() {
     # the user's package managers; settings.json env/hooks may be user-merged).
     echo ""
     info "Left in place (remove manually if you no longer want them):"
-    info "  settings.json env/hooks keys (env xhigh, sound, gost-validation) — edit ~/.claude/settings.json"
+    info "  settings.json keys (effortLevel=xhigh, env, sound, gost-validation hooks) — edit ~/.claude/settings.json"
     info "  caveman    — see github.com/JuliusBrussee/caveman for removal"
     info "  gh         — your package manager (brew uninstall gh / apt remove gh / …)"
     info "  @playwright/cli — npm uninstall -g @playwright/cli"

@@ -134,7 +134,7 @@ So `--preset god --no-caveman --no-mineru` gives you the full god bundle minus t
 | attribution-fix · CLAUDE.md baseline · gost-validation hook | — | ✅ | ✅ | ✅ | — |
 | Stop sound hook | — | — | ✅ | ✅ | ✅ |
 | thinking summaries | — | — | ✅ | ✅ | — |
-| env defaults (`CLAUDE_CODE_EFFORT_LEVEL=xhigh` + disable adaptive thinking + non-essential traffic) | — | — | ✅ | ✅ | — |
+| settings defaults (`effortLevel=xhigh` + disable non-essential traffic env) | — | — | ✅ | ✅ | — |
 | ccstatusline (`statusLine`, install-if-missing) | — | — | — | ✅ | — |
 | caveman (third-party `curl\|bash`, gated) | — | — | — | ✅ | — |
 | MinerU pre-warm (~3 GB, gated) | — | — | — | ✅ | — |
@@ -145,7 +145,7 @@ So `--preset god --no-caveman --no-mineru` gives you the full god bundle minus t
 
 - **`minimum`** — tools + safety only. Installs the agents/commands/skills, the launchers, the security deny-list, and the gost-report persona template, and nothing that mutates your global git config or installs a session hook. Good first install if you want to keep your environment untouched.
 - **`default`** — exactly the no-flag `bash install.sh` behavior, named so `--preset default --dry` documents the baseline.
-- **`senior`** — `default` plus Stop sound, thinking summaries, and a maxed non-secret env block merged into `settings.json` `"env"` (`CLAUDE_CODE_EFFORT_LEVEL=xhigh` raises per-turn reasoning **and** quota use). No API keys are ever shipped — ultrasearch's OpenAlex/Unpaywall/S2 keys stay manual (see [Optional: Shell Environment Variables](#optional-shell-environment-variables)).
+- **`senior`** — `default` plus Stop sound, thinking summaries, and maxed non-secret defaults merged into `settings.json`: top-level `effortLevel: "xhigh"` (the key `/effort` writes — raises per-turn reasoning **and** quota use) plus `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` in `"env"`. No API keys are ever shipped — ultrasearch's OpenAlex/Unpaywall/S2 keys stay manual (see [Optional: Shell Environment Variables](#optional-shell-environment-variables)).
 - **`god`** — everything, on the opus model profile (~5× the per-session cost). Notification sound is deliberately left **off** (it duplicates the Stop beep). The external/dangerous steps are each **gated** — interactive `y/N` (default **N**), skipped in non-interactive shells (CI, piped installs) with a pointer to run them later:
   - **caveman** is third-party code. agentpipe fetches a **pinned commit SHA** (never the moving `main`), **verifies its sha256 before running it**, and refuses on mismatch — so an `y` authorizes the exact bytes the maintainer reviewed, not whatever upstream HEAD is at install time. Needs node≥18.
   - **MinerU** pre-warms doc2kb's ~3 GB tier. Heavy/third-party code is never auto-installed.
