@@ -7,6 +7,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- **`x-signal-research` skill:** a read-only public X/Twitter research workflow for already-configured Xquik access, covering recent post search, trend checks, monitor planning, and explicit primary-source verification gaps.
+
 ### Changed
 - **`gost-report`: default build-script location moved to tool-neutral `<project>/.gost-report/build.py`** (was `<project>/.claude/gost-report/build.py`). The `.claude/` prefix both branded every report as Claude-made and was wrong for Codex users (`install.sh --target codex`), who may have no `.claude/` directory. `gr` (no-arg) now walks up the tree preferring `.gost-report/build.py` at each level and **still resolves the legacy `.claude/gost-report/build.py`** with a one-line stderr deprecation notice — zero breakage for existing projects; the legacy fallback stays until the next major. Project-root marker set gains `.gost-report` ahead of `.claude` (`.git → Makefile → pyproject.toml → .gost-report → .claude`), kept in sync across `_paths.py` and `validate.py`. Docs/template/SKILL.md updated to the new path; `.claude` retained as a legacy marker.
 
