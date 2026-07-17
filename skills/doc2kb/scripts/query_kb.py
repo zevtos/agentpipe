@@ -71,10 +71,19 @@ _TOKEN_RE = re.compile(r"[0-9A-Za-zÀ-ɏЀ-ӿ]+")
 
 
 def _fold(s: str) -> str:
-    """Lowercase + strip combining diacritics (mirrors FTS5 unicode61
-    remove_diacritics on the fallback path so both backends tokenize alike)."""
-    s = unicodedata.normalize("NFKD", s.lower())
-    return "".join(c for c in s if not unicodedata.combining(c))
+    """Lowercase + strip diacritics from LATIN characters only (mirrors FTS5
+    unicode61 remove_diacritics, which never touches non-Latin scripts).
+    Blanket NFKD-stripping would corrupt Cyrillic: й decomposes to и+breve
+    and ё to е+diaeresis, so a folded query word ("неиро…") can never match
+    the intact indexed token ("нейро…")."""
+    out = []
+    for ch in s.lower():
+        d = unicodedata.normalize("NFKD", ch)
+        if d != ch and d[:1].isascii():
+            out.append("".join(c for c in d if not unicodedata.combining(c)))
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 def _tokenize(text: str) -> list[str]:
