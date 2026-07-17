@@ -63,7 +63,7 @@ Emitted by `scout_corpus.py`. Schema:
       "size_bytes": int,
       "mime": "application/pdf" | null,
       "mime_confidence": "high" | "low",     // low if magic ↔ ext disagree
-      "source_type": "pdf"|"docx"|"doc"|"pptx"|"xlsx"|"md"|"txt"|"html"|"ipynb"|"epub"|"rtf"|"odt"|"image"|"unknown",
+      "source_type": "pdf"|"docx"|"doc"|"pptx"|"xlsx"|"md"|"txt"|"html"|"xml"|"ipynb"|"epub"|"rtf"|"odt"|"image"|"unknown",
       "pdf_class": "text"|"image_only"|"mixed"|"encrypted"|"corrupt" | null,
       "pages": int | null,
       "slides": int | null,
@@ -78,7 +78,7 @@ Emitted by `scout_corpus.py`. Schema:
       "raw_cells": int | null,               // ipynb
       "has_outputs": bool | null,            // ipynb
       "encoding": "utf-8" | "cp1251" | ... | null,
-      "extraction_strategy": "pymupdf4llm"|"mineru"|"mammoth"|"doc"|"rtf"|"python-pptx"|"passthrough-md"|"passthrough-txt"|"trafilatura"|"ipynb"|"epub"|"needs_password"|"needs_ocr_or_vlm"|"not_in_mvp"|"skip",
+      "extraction_strategy": "pymupdf4llm"|"mineru"|"mammoth"|"doc"|"rtf"|"python-pptx"|"passthrough-md"|"passthrough-txt"|"trafilatura"|"xml"|"ipynb"|"epub"|"needs_password"|"needs_ocr_or_vlm"|"not_in_mvp"|"skip",
       "estimated_tokens": int | null,
       "warnings": [string],
       "action_required": "ask_user_password_or_skip"|"ask_user_ocr_strategy"|"ask_user_proceed_huge"|"ask_user_skip_corrupt"|"ask_user_skip_unsupported" | null
@@ -106,7 +106,7 @@ Every extracted document has a YAML frontmatter block. Required fields:
 |---------------------|-------------|------------------|
 | `id`                | string      | scout-assigned doc-NNN |
 | `source`            | string      | relative path inside input corpus |
-| `source_type`       | string      | `pdf`/`docx`/`doc`/`pptx`/`ipynb`/`rtf`/`epub`/`md`/`txt`/`html` |
+| `source_type`       | string      | `pdf`/`docx`/`doc`/`pptx`/`ipynb`/`rtf`/`epub`/`md`/`txt`/`html`/`xml` |
 | `source_sha256`     | string      | sha256 of original bytes |
 | `extraction_method` | string      | `name@version` of the extractor used |
 | `extraction_date`   | string      | YYYY-MM-DD UTC |
@@ -127,7 +127,7 @@ Per-type optional fields:
 | `has_charts`       | pptx       | bool — chart shapes present |
 | `has_tracked_changes` | docx/doc | bool — `w:ins`/`w:del` present |
 | `paragraphs`       | docx/doc   | total paragraph count |
-| `source_encoding`  | md/txt/html | detected source encoding |
+| `source_encoding`  | md/txt/html/xml | detected source encoding |
 | `cells`            | ipynb      | total cell count |
 | `code_cells`       | ipynb      | code-cell count |
 | `markdown_cells`   | ipynb      | markdown-cell count |
@@ -156,7 +156,10 @@ Per-type optional fields:
   fallback.
 - `python-pptx@<ver>` — PPTX extractor.
 - `passthrough-md@<ver>` / `passthrough-txt@<ver>` — plain text/markdown.
-- `trafilatura@<ver>` — HTML extractor.
+- `trafilatura@<ver>` — HTML extractor. Also the XHTML route inside
+  `extract_xml.py` (with `markdownify@<ver>` as its fallback).
+- `lxml-xml@<ver>` — generic XML extractor (text blocks, tags stripped);
+  `raw-text@<ver>` — its passthrough fallback when the XML doesn't parse.
 - `ipynb@<ver>` — Jupyter notebook extractor.
 - `claude-pagewise-manual@1` — reserved for manual Read-tool transcription
   used to recover content that the automated extractors lost (`mangled_visual_layout`

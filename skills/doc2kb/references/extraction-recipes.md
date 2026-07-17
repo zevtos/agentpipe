@@ -90,6 +90,7 @@ assert payload["ok"]
 | `passthrough-md`    | `extract_md_txt.py --mode md`   | `<input> <output> --doc-id <id> --source-rel <rel> --mode md` |
 | `passthrough-txt`   | `extract_md_txt.py --mode txt`  | `<input> <output> --doc-id <id> --source-rel <rel> --mode txt` |
 | `trafilatura`       | `extract_html.py`               | `<input> <output> --doc-id <id> --source-rel <rel>` |
+| `xml`               | `extract_xml.py`                | `<input> <output> --doc-id <id> --source-rel <rel>` (lxml parse, `recover=True`, entity resolution off. XHTML root → the HTML route: trafilatura → markdownify fallback. Generic XML → text blocks in document order, tags/attributes stripped with a warning; attribute-value salvage pass when the text yield is tiny. Malformed XML → raw-text passthrough, never fails) |
 | `ipynb`             | `extract_ipynb.py`              | `<input> <output> --doc-id <id> --source-rel <rel>` |
 | `epub`              | `extract_epub.py`               | `<input> <output> --doc-id <id> --source-rel <rel>` (pandoc when on PATH — honours OPF spine order, preserves tables/images, converts EPUB3 MathML → `$...$` LaTeX; else pure-Python `zip`+`markdownify` → images become `![image N]()` placeholders and MathML is dropped. Force the fallback with `--force-fallback`. Auto image extraction to `<kb_dir>/assets/`; same `--assets-dir`/`--assets-rel`/`--no-extract-images` flags) |
 | `skip`              | (none — file is skipped) | — |

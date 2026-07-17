@@ -1,6 +1,6 @@
 ---
 name: doc2kb
-description: 'Converts a heterogeneous corpus of raw documents (PDF, DOCX, DOC, PPTX, IPYNB, RTF, EPUB, MD, TXT, HTML, etc.) into a structured, LLM-optimized knowledge base — per-source Markdown + manifest.json + INDEX.md + AGENTS.md + a built-in BM25 search index (`query.sh`, citation-first), ready for ingestion in a separate Claude / Codex session. USE WHEN the user asks to ingest, index, preprocess, search, or build a knowledge base from a folder of mixed documents; "feed files to Claude", "prepare a corpus", "make my documents searchable", "build a doc index", "RAG prep", "convert documents to markdown", "ingest Jupyter notebooks". RU triggers: "обработай папку с документами", "сделай базу знаний из папки", "подготовь корпус для LLM", "найди в моих документах", "извлеки markdown из файлов". Output is for AI agents, not human reading. For single-file PDF use Anthropic''s `pdf` skill.'
+description: 'Converts a heterogeneous corpus of raw documents (PDF, DOCX, DOC, PPTX, IPYNB, RTF, EPUB, MD, TXT, HTML, XML, etc.) into a structured, LLM-optimized knowledge base — per-source Markdown + manifest.json + INDEX.md + AGENTS.md + a built-in BM25 search index (`query.sh`, citation-first), ready for ingestion in a separate Claude / Codex session. USE WHEN the user asks to ingest, index, preprocess, search, or build a knowledge base from a folder of mixed documents; "feed files to Claude", "prepare a corpus", "make my documents searchable", "build a doc index", "RAG prep", "convert documents to markdown", "ingest Jupyter notebooks". RU triggers: "обработай папку с документами", "сделай базу знаний из папки", "подготовь корпус для LLM", "найди в моих документах", "извлеки markdown из файлов". Output is for AI agents, not human reading. For single-file PDF use Anthropic''s `pdf` skill.'
 ---
 
 # doc2kb — Document Corpus → LLM Knowledge Base
@@ -357,6 +357,7 @@ heading catalog alone is fine; the index earns its keep from dozens of docs up.
 | `extract_ipynb.py`           | Jupyter notebook (.ipynb) → Markdown; per-cell anchors, text outputs preserved, base64 images dropped |
 | `extract_md_txt.py`          | normalize Markdown/text, encoding-aware |
 | `extract_html.py`            | HTML → Markdown via trafilatura (boilerplate removal) |
+| `extract_xml.py`             | XML → Markdown/text via lxml; XHTML root reuses the HTML route (trafilatura → markdownify), generic XML flattens to text blocks (tags stripped, attribute-value salvage), malformed XML → raw-text passthrough |
 | `shard_doc.py`               | Phase 4 shard sub-pass, opt-in (`extract_corpus --shard`) — splits oversized docs (>24k tok) into `docs/<id>-<slug>/` folders (`_index.md` TOC + balanced per-chapter `NNN-*.md` parts). Heading-first split, verbatim self-check (abort-to-flat on mismatch), idempotent by `source_sha256` |
 | `normalize_md.py`            | structural cleanup pass (idempotent, never summarizes) |
 | `postprocess_popo.py`        | **opt-in stage 2** — runs upstream opendatalab/MinerU-Popo over cached mineru outputs to rebuild document trees (heading hierarchy, cross-page table merging, paragraph truncation repair). Resolves the Popo repo from `--popo-repo` > `$DOC2KB_POPO_REPO` > the `bootstrap_popo.py` auto-default; PATH-injects the bootstrapped env (sentinel `.doc2kb-popo-python`); `--auto-setup` runs `bootstrap_popo.py` when unconfigured. |
@@ -518,12 +519,15 @@ python3 <skill_dir>/scripts/ensure_env.py scout_corpus.py <in> <kb> --enable-min
 **MVP lightweight tier (всегда установлен):**
 - PDF (text-layer), DOCX, PPTX (с speaker notes), IPYNB (Jupyter notebook —
   source + text outputs, base64-картинки заменяются placeholder),
-  RTF, EPUB, MD, TXT, HTML.
+  RTF, EPUB, MD, TXT, HTML, XML.
 - `.ipynb` парсится stdlib `json` — никаких jupyter/nbformat в venv.
 - `.rtf` — pure-Python `striprtf` всегда доступен; pandoc (если на PATH)
   даёт более качественный маршрут с таблицами/картинками.
 - `.epub` — pure-Python `zip`+`markdownify` (spine-порядок) всегда доступен;
   pandoc (если на PATH) даёт картинки + EPUB3 MathML → LaTeX.
+- `.xml` — XHTML идёт через HTML-маршрут (trafilatura); generic XML
+  flatten'ится в текстовые блоки (теги/атрибуты отбрасываются, warning в
+  frontmatter); malformed XML падает в raw-text passthrough — никогда не fail.
 - `.doc` (legacy binary Word) — поддержан через системный конвертер
   (`soffice`/`libreoffice`, macOS `textutil`, или `antiword`). Конвертер
   НЕ ставится в venv; без него `extract_doc.py` выходит с install-hint.

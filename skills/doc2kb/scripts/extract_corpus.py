@@ -121,6 +121,7 @@ DISPATCH: dict[str, tuple[str, list[str]]] = {
     "trafilatura":     ("extract_html.py", []),
     "ipynb":           ("extract_ipynb.py", []),
     "epub":            ("extract_epub.py", []),
+    "xml":             ("extract_xml.py", []),
 }
 
 # Explicit "do not extract" outcomes already decided upstream (scout or Phase 3).

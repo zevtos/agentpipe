@@ -89,6 +89,8 @@ EXT_TO_TYPE = {
     ".txt": "txt",
     ".html": "html",
     ".htm": "html",
+    ".xhtml": "html",
+    ".xml": "xml",
     ".ipynb": "ipynb",
     ".epub": "epub",
     ".rtf": "rtf",
@@ -154,6 +156,10 @@ def detect_source_type(path: Path, mime: str | None) -> tuple[str, str]:
             mime_type = "md"
         elif mime.startswith("text/html"):
             mime_type = "html"
+        elif mime in ("application/xhtml+xml",):
+            mime_type = "html"
+        elif mime in ("text/xml", "application/xml"):
+            mime_type = "xml"
         elif mime in ("application/x-ipynb+json",):
             mime_type = "ipynb"
         elif mime in ("application/epub+zip",):
@@ -561,6 +567,11 @@ def set_strategy_and_tokens(info: dict[str, Any], *, enable_mineru: bool = False
     elif t == "html":
         info["extraction_strategy"] = "trafilatura"
         info["estimated_tokens"] = max(info.get("size_bytes", 0) // 6, 100)
+    elif t == "xml":
+        # Tag overhead ≈ html; XHTML routes through trafilatura inside the
+        # extractor, generic XML flattens to text blocks.
+        info["extraction_strategy"] = "xml"
+        info["estimated_tokens"] = max(info.get("size_bytes", 0) // 6, 100)
     elif t == "ipynb":
         cells = info.get("cells") or 0
         code_cells = info.get("code_cells") or 0
@@ -595,6 +606,7 @@ def set_strategy_and_tokens(info: dict[str, Any], *, enable_mineru: bool = False
         if info.get("extraction_strategy") in (
             "pymupdf4llm", "mammoth", "doc", "rtf", "python-pptx",
             "passthrough-md", "passthrough-txt", "trafilatura", "ipynb", "epub",
+            "xml",
         ) and not info.get("action_required"):
             info["action_required"] = "ask_user_proceed_huge"
 
@@ -707,7 +719,7 @@ def scan_file(idx: int, path: Path, input_root: Path,
         info.update(ipynb_richness(path))
     elif src_type == "epub":
         info.update(epub_richness(path))
-    elif src_type in ("md", "txt"):
+    elif src_type in ("md", "txt", "xml"):
         info.update(text_encoding(path))
 
     set_strategy_and_tokens(info, enable_mineru=enable_mineru)
