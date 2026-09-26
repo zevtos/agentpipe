@@ -358,7 +358,7 @@ heading catalog alone is fine; the index earns its keep from dozens of docs up.
 | `extract_md_txt.py`          | normalize Markdown/text, encoding-aware |
 | `extract_html.py`            | HTML → Markdown via trafilatura (boilerplate removal) |
 | `extract_xml.py`             | XML → Markdown/text via lxml; XHTML root reuses the HTML route (trafilatura → markdownify), generic XML flattens to text blocks (tags stripped, attribute-value salvage), malformed XML → raw-text passthrough |
-| `extract_xlsx.py`            | XLSX → Markdown via openpyxl (read-only, `data_only`: formula results, not formulas) parsing through defusedxml (refuses to run without it); zip-bomb pre-check on the central directory (member count, per-member/total uncompressed size, compression ratio, encrypted members) → `refused`; `## <sheet>` + pipe table per sheet (row numbers, column letters, ISO dates); sheet/row/cell caps truncate with an explicit `> **[truncated]**` line and `"truncated": true` |
+| `extract_xlsx.py`            | XLSX → Markdown via openpyxl (read-only, `data_only`: formula results, not formulas) parsing through defusedxml (refuses to run without it). Pre-check before parsing → `refused`: zip bomb (member count, per-member/total/sharedStrings uncompressed size, compression ratio, encrypted members), any `<!DOCTYPE`/`<!ENTITY`, non-UTF-8 XML, a row past 16384 cells, a text run past Excel's cell limits. `## <sheet>` + pipe table (row numbers, column letters, ISO dates); a sheet wider than 64 columns renders sparse (`row N: A=…; XFD=…`). Sheet/row/cell/output caps and cells cut at 2000 chars truncate with an explicit `> **[truncated]**` line and `"truncated": true` |
 | `shard_doc.py`               | Phase 4 shard sub-pass, opt-in (`extract_corpus --shard`) — splits oversized docs (>24k tok) into `docs/<id>-<slug>/` folders (`_index.md` TOC + balanced per-chapter `NNN-*.md` parts). Heading-first split, verbatim self-check (abort-to-flat on mismatch), idempotent by `source_sha256` |
 | `normalize_md.py`            | structural cleanup pass (idempotent, never summarizes) |
 | `postprocess_popo.py`        | **opt-in stage 2** — runs upstream opendatalab/MinerU-Popo over cached mineru outputs to rebuild document trees (heading hierarchy, cross-page table merging, paragraph truncation repair). Resolves the Popo repo from `--popo-repo` > `$DOC2KB_POPO_REPO` > the `bootstrap_popo.py` auto-default; PATH-injects the bootstrapped env (sentinel `.doc2kb-popo-python`); `--auto-setup` runs `bootstrap_popo.py` when unconfigured. |
@@ -531,11 +531,15 @@ python3 <skill_dir>/scripts/ensure_env.py scout_corpus.py <in> <kb> --enable-min
   flatten'ится в текстовые блоки (теги/атрибуты отбрасываются, warning в
   frontmatter); malformed XML падает в raw-text passthrough — никогда не fail.
 - `.xlsx` — openpyxl в read-only режиме через defusedxml (без него
-  extractor отказывается работать); zip-бомба (члены архива, распакованный
-  размер, степень сжатия) — `refused` до парсинга; лист — `## <имя>` и
-  pipe-таблица с номерами строк и буквами колонок, даты ISO, формулы —
-  закэшированным значением. Лимиты листов/строк/ячеек обрезают с явной
-  строкой `> **[truncated]**` и флагом `truncated` в JSON — не молча.
+  extractor отказывается работать); до парсинга — `refused` на zip-бомбу
+  (члены архива, распакованный размер, степень сжатия, sharedStrings >
+  32 MiB), любой `<!DOCTYPE`/`<!ENTITY`, не-UTF-8 XML, строку > 16384
+  ячеек, текст длиннее лимитов Excel; лист — `## <имя>` и pipe-таблица с
+  номерами строк и буквами колонок (шире 64 колонок — разреженно:
+  `row N: A=…; XFD=…`), даты ISO, формулы — закэшированным значением.
+  Лимиты листов/строк/ячеек/объёма (8 MiB) и ячейки длиннее 2000 символов
+  обрезают с явной строкой `> **[truncated]**` и флагом `truncated` в JSON
+  — не молча.
 - `.doc` (legacy binary Word) — поддержан через системный конвертер
   (`soffice`/`libreoffice`, macOS `textutil`, или `antiword`). Конвертер
   НЕ ставится в venv; без него `extract_doc.py` выходит с install-hint.

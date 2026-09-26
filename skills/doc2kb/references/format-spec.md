@@ -129,7 +129,7 @@ Per-type optional fields:
 | `has_charts`       | pptx       | bool — chart shapes present |
 | `sheets`           | xlsx       | worksheets in the workbook |
 | `rows`             | xlsx       | non-empty rows written |
-| `truncated`        | xlsx       | bool — a sheet/row/cell or work cap cut the body (the cut is marked `> **[truncated]** …` in the body and listed in `warnings`) |
+| `truncated`        | xlsx       | bool — a sheet/row/cell/scan/time/output cap cut the body, or a cell was cut at 2000 characters (each cut is marked `> **[truncated]** …` in the body and listed in `warnings` as `truncated: <kind>: …`) |
 | `has_tracked_changes` | docx/doc | bool — `w:ins`/`w:del` present |
 | `paragraphs`       | docx/doc   | total paragraph count |
 | `source_encoding`  | md/txt/html/xml | detected source encoding |
