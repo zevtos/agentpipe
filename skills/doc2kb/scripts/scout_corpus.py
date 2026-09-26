@@ -398,6 +398,28 @@ def ipynb_richness(path: Path) -> dict[str, Any]:
     return out
 
 
+def xlsx_richness(path: Path) -> dict[str, Any]:
+    """Count worksheets and sum the uncompressed size of the worksheet parts and
+    sharedStrings.xml — the token proxy, unlike the compressed `size_bytes`.
+    Central directory only (stdlib zipfile): nothing is inflated or parsed, the
+    zip-bomb checks belong to extract_xlsx.py."""
+    out: dict[str, Any] = {"sheets": 0, "xlsx_xml_bytes": 0}
+    try:
+        import zipfile
+
+        with zipfile.ZipFile(path) as zf:
+            for info in zf.infolist():
+                name = info.filename
+                if re.fullmatch(r"xl/worksheets/[^/]+\.xml", name):
+                    out["sheets"] += 1
+                    out["xlsx_xml_bytes"] += info.file_size
+                elif name == "xl/sharedStrings.xml":
+                    out["xlsx_xml_bytes"] += info.file_size
+    except Exception:
+        pass  # not a readable zip: the extractor reports why
+    return out
+
+
 def epub_richness(path: Path) -> dict[str, Any]:
     """Parse the OPF package to count spine documents (chapters), images, and
     detect MathML, plus pull dc:title/dc:creator. `xhtml_bytes` is the summed
@@ -588,7 +610,15 @@ def set_strategy_and_tokens(info: dict[str, Any], *, enable_mineru: bool = False
         info["extraction_strategy"] = "epub"
         xhtml = info.get("xhtml_bytes") or 0
         info["estimated_tokens"] = max(xhtml // 6, 100) if xhtml else None
-    elif t in {"xlsx", "odt", "image"}:
+    elif t == "xlsx":
+        # openpyxl read-only through defusedxml; zip-bomb pre-check and
+        # sheet/row/cell caps (explicit truncation marker) live in the
+        # extractor. Token proxy from the uncompressed sheet XML: most of it
+        # is tag overhead (~12 bytes per token of cell text).
+        info["extraction_strategy"] = "xlsx"
+        xml_bytes = info.get("xlsx_xml_bytes") or 0
+        info["estimated_tokens"] = max(xml_bytes // 12, 100) if xml_bytes else None
+    elif t in {"odt", "image"}:
         info["extraction_strategy"] = "not_in_mvp"
         info["estimated_tokens"] = None
         warnings.append(f"{t}: not supported in MVP (follow-up release)")
@@ -606,7 +636,7 @@ def set_strategy_and_tokens(info: dict[str, Any], *, enable_mineru: bool = False
         if info.get("extraction_strategy") in (
             "pymupdf4llm", "mammoth", "doc", "rtf", "python-pptx",
             "passthrough-md", "passthrough-txt", "trafilatura", "ipynb", "epub",
-            "xml",
+            "xml", "xlsx",
         ) and not info.get("action_required"):
             info["action_required"] = "ask_user_proceed_huge"
 
@@ -719,6 +749,8 @@ def scan_file(idx: int, path: Path, input_root: Path,
         info.update(ipynb_richness(path))
     elif src_type == "epub":
         info.update(epub_richness(path))
+    elif src_type == "xlsx":
+        info.update(xlsx_richness(path))
     elif src_type in ("md", "txt", "xml"):
         info.update(text_encoding(path))
 
@@ -727,6 +759,7 @@ def scan_file(idx: int, path: Path, input_root: Path,
     # Normalize: ensure known keys present even when None — keeps schema stable.
     info.setdefault("pages", None)
     info.setdefault("slides", None)
+    info.setdefault("sheets", None)
     info.setdefault("has_notes", None)
     info.setdefault("notes_chars", 0)
     info.setdefault("inline_images", 0)

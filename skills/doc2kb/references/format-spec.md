@@ -67,6 +67,8 @@ Emitted by `scout_corpus.py`. Schema:
       "pdf_class": "text"|"image_only"|"mixed"|"encrypted"|"corrupt" | null,
       "pages": int | null,
       "slides": int | null,
+      "sheets": int | null,                  // xlsx: worksheet parts
+      "xlsx_xml_bytes": int | null,          // xlsx: uncompressed sheet + shared-string XML (token proxy)
       "has_notes": bool | null,              // pptx
       "notes_chars": int,
       "inline_images": int,
@@ -78,7 +80,7 @@ Emitted by `scout_corpus.py`. Schema:
       "raw_cells": int | null,               // ipynb
       "has_outputs": bool | null,            // ipynb
       "encoding": "utf-8" | "cp1251" | ... | null,
-      "extraction_strategy": "pymupdf4llm"|"mineru"|"mammoth"|"doc"|"rtf"|"python-pptx"|"passthrough-md"|"passthrough-txt"|"trafilatura"|"xml"|"ipynb"|"epub"|"needs_password"|"needs_ocr_or_vlm"|"not_in_mvp"|"skip",
+      "extraction_strategy": "pymupdf4llm"|"mineru"|"mammoth"|"doc"|"rtf"|"python-pptx"|"passthrough-md"|"passthrough-txt"|"trafilatura"|"xml"|"xlsx"|"ipynb"|"epub"|"needs_password"|"needs_ocr_or_vlm"|"not_in_mvp"|"skip",
       "estimated_tokens": int | null,
       "warnings": [string],
       "action_required": "ask_user_password_or_skip"|"ask_user_ocr_strategy"|"ask_user_proceed_huge"|"ask_user_skip_corrupt"|"ask_user_skip_unsupported" | null
@@ -106,7 +108,7 @@ Every extracted document has a YAML frontmatter block. Required fields:
 |---------------------|-------------|------------------|
 | `id`                | string      | scout-assigned doc-NNN |
 | `source`            | string      | relative path inside input corpus |
-| `source_type`       | string      | `pdf`/`docx`/`doc`/`pptx`/`ipynb`/`rtf`/`epub`/`md`/`txt`/`html`/`xml` |
+| `source_type`       | string      | `pdf`/`docx`/`doc`/`pptx`/`xlsx`/`ipynb`/`rtf`/`epub`/`md`/`txt`/`html`/`xml` |
 | `source_sha256`     | string      | sha256 of original bytes |
 | `extraction_method` | string      | `name@version` of the extractor used |
 | `extraction_date`   | string      | YYYY-MM-DD UTC |
@@ -125,6 +127,9 @@ Per-type optional fields:
 | `has_tables`       | docx/doc/pptx | bool — at least one table |
 | `has_equations`    | docx/doc   | bool — OOXML `<m:oMath>` present (`.doc` after converter→`.docx`) |
 | `has_charts`       | pptx       | bool — chart shapes present |
+| `sheets`           | xlsx       | worksheets in the workbook |
+| `rows`             | xlsx       | non-empty rows written |
+| `truncated`        | xlsx       | bool — a sheet/row/cell or work cap cut the body (the cut is marked `> **[truncated]** …` in the body and listed in `warnings`) |
 | `has_tracked_changes` | docx/doc | bool — `w:ins`/`w:del` present |
 | `paragraphs`       | docx/doc   | total paragraph count |
 | `source_encoding`  | md/txt/html/xml | detected source encoding |
@@ -160,6 +165,7 @@ Per-type optional fields:
   `extract_xml.py` (with `markdownify@<ver>` as its fallback).
 - `lxml-xml@<ver>` — generic XML extractor (text blocks, tags stripped);
   `raw-text@<ver>` — its passthrough fallback when the XML doesn't parse.
+- `openpyxl@<ver>` — XLSX extractor (read-only, defusedxml).
 - `ipynb@<ver>` — Jupyter notebook extractor.
 - `claude-pagewise-manual@1` — reserved for manual Read-tool transcription
   used to recover content that the automated extractors lost (`mangled_visual_layout`

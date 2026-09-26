@@ -1,6 +1,6 @@
 ---
 name: doc2kb
-description: 'Converts a heterogeneous corpus of raw documents (PDF, DOCX, DOC, PPTX, IPYNB, RTF, EPUB, MD, TXT, HTML, XML, etc.) into a structured, LLM-optimized knowledge base — per-source Markdown + manifest.json + INDEX.md + AGENTS.md + a built-in BM25 search index (`query.sh`, citation-first), ready for ingestion in a separate Claude / Codex session. USE WHEN the user asks to ingest, index, preprocess, search, or build a knowledge base from a folder of mixed documents; "feed files to Claude", "prepare a corpus", "make my documents searchable", "build a doc index", "RAG prep", "convert documents to markdown", "ingest Jupyter notebooks". RU triggers: "обработай папку с документами", "сделай базу знаний из папки", "подготовь корпус для LLM", "найди в моих документах", "извлеки markdown из файлов". Output is for AI agents, not human reading. For single-file PDF use Anthropic''s `pdf` skill.'
+description: 'Converts a heterogeneous corpus of raw documents (PDF, DOCX, DOC, PPTX, XLSX, IPYNB, RTF, EPUB, MD, TXT, HTML, XML, etc.) into a structured, LLM-optimized knowledge base — per-source Markdown + manifest.json + INDEX.md + AGENTS.md + a built-in BM25 search index (`query.sh`, citation-first), ready for ingestion in a separate Claude / Codex session. USE WHEN the user asks to ingest, index, preprocess, search, or build a knowledge base from a folder of mixed documents; "feed files to Claude", "prepare a corpus", "make my documents searchable", "build a doc index", "RAG prep", "convert documents to markdown", "ingest Jupyter notebooks". RU triggers: "обработай папку с документами", "сделай базу знаний из папки", "подготовь корпус для LLM", "найди в моих документах", "извлеки markdown из файлов". Output is for AI agents, not human reading. For single-file PDF use Anthropic''s `pdf` skill.'
 ---
 
 # doc2kb — Document Corpus → LLM Knowledge Base
@@ -72,7 +72,7 @@ python3 <skill_dir>/scripts/ensure_env.py scout_corpus.py <input_dir> <kb_dir>
 - `scanned_pdf` — image-only PDF; опции: `skip`, `ocr_tesseract`, `vlm_mlx`, `claude_pagewise`. *MVP поддерживает только `skip`.*
 - `huge_file` — >50 MB или >500 страниц; опции: `skip`, `proceed`, `split`.
 - `corrupt` — не открывается; опции: `skip`.
-- `unsupported_format` — XLSX/EPUB/ODT/IMAGE (не в MVP); опции: `skip`. (`.doc` и `.rtf` теперь поддержаны — см. Phase 4.)
+- `unsupported_format` — ODT/IMAGE (не в MVP); опции: `skip`. (`.doc`, `.rtf`, `.epub` и `.xlsx` теперь поддержаны — см. Phase 4.)
 
 **Применение решений (важно для Phase 4).** Разрешив группу, обновите каждый файл в `_scout.json`: проставьте итоговый `extraction_strategy` (`skip` для отказа, либо рабочую стратегию для `proceed`) **и обнулите `action_required` (`null`)**. `extract_corpus.py` (Phase 4) откажется стартовать (exit 2), пока хоть у одного файла остался непустой `action_required` — это и есть гейт, гарантирующий, что Phase 3 пройдена.
 
@@ -358,6 +358,7 @@ heading catalog alone is fine; the index earns its keep from dozens of docs up.
 | `extract_md_txt.py`          | normalize Markdown/text, encoding-aware |
 | `extract_html.py`            | HTML → Markdown via trafilatura (boilerplate removal) |
 | `extract_xml.py`             | XML → Markdown/text via lxml; XHTML root reuses the HTML route (trafilatura → markdownify), generic XML flattens to text blocks (tags stripped, attribute-value salvage), malformed XML → raw-text passthrough |
+| `extract_xlsx.py`            | XLSX → Markdown via openpyxl (read-only, `data_only`: formula results, not formulas) parsing through defusedxml (refuses to run without it); zip-bomb pre-check on the central directory (member count, per-member/total uncompressed size, compression ratio, encrypted members) → `refused`; `## <sheet>` + pipe table per sheet (row numbers, column letters, ISO dates); sheet/row/cell caps truncate with an explicit `> **[truncated]**` line and `"truncated": true` |
 | `shard_doc.py`               | Phase 4 shard sub-pass, opt-in (`extract_corpus --shard`) — splits oversized docs (>24k tok) into `docs/<id>-<slug>/` folders (`_index.md` TOC + balanced per-chapter `NNN-*.md` parts). Heading-first split, verbatim self-check (abort-to-flat on mismatch), idempotent by `source_sha256` |
 | `normalize_md.py`            | structural cleanup pass (idempotent, never summarizes) |
 | `postprocess_popo.py`        | **opt-in stage 2** — runs upstream opendatalab/MinerU-Popo over cached mineru outputs to rebuild document trees (heading hierarchy, cross-page table merging, paragraph truncation repair). Resolves the Popo repo from `--popo-repo` > `$DOC2KB_POPO_REPO` > the `bootstrap_popo.py` auto-default; PATH-injects the bootstrapped env (sentinel `.doc2kb-popo-python`); `--auto-setup` runs `bootstrap_popo.py` when unconfigured. |
@@ -472,8 +473,9 @@ generated index files.
    outside `<input_dir>` — they appear in `_scout.skipped_at_scout[].reason
    = "symlink escapes corpus root — refused (security)"`. Never override this
    by passing an `<input_dir>` that includes symlinked external paths.
-2. **Parser CVEs.** PDF (pymupdf / pikepdf), DOCX/PPTX/XLSX (python-docx /
-   python-pptx via stdlib zipfile), and HTML (trafilatura via lxml) bring
+2. **Parser CVEs.** PDF (pymupdf / pikepdf), DOCX/PPTX (python-docx /
+   python-pptx via stdlib zipfile), XLSX (openpyxl through defusedxml, after a
+   zip-bomb pre-check), and HTML (trafilatura via lxml) bring
    C-library exposure. `requirements.txt` pins upper bounds and the skill
    keeps to a lightweight tier in MVP. Keep the venv current by re-running
    `ensure_env.py` after pulling updates; if a corpus came from an untrusted
@@ -519,7 +521,7 @@ python3 <skill_dir>/scripts/ensure_env.py scout_corpus.py <in> <kb> --enable-min
 **MVP lightweight tier (всегда установлен):**
 - PDF (text-layer), DOCX, PPTX (с speaker notes), IPYNB (Jupyter notebook —
   source + text outputs, base64-картинки заменяются placeholder),
-  RTF, EPUB, MD, TXT, HTML, XML.
+  RTF, EPUB, MD, TXT, HTML, XML, XLSX.
 - `.ipynb` парсится stdlib `json` — никаких jupyter/nbformat в venv.
 - `.rtf` — pure-Python `striprtf` всегда доступен; pandoc (если на PATH)
   даёт более качественный маршрут с таблицами/картинками.
@@ -528,6 +530,12 @@ python3 <skill_dir>/scripts/ensure_env.py scout_corpus.py <in> <kb> --enable-min
 - `.xml` — XHTML идёт через HTML-маршрут (trafilatura); generic XML
   flatten'ится в текстовые блоки (теги/атрибуты отбрасываются, warning в
   frontmatter); malformed XML падает в raw-text passthrough — никогда не fail.
+- `.xlsx` — openpyxl в read-only режиме через defusedxml (без него
+  extractor отказывается работать); zip-бомба (члены архива, распакованный
+  размер, степень сжатия) — `refused` до парсинга; лист — `## <имя>` и
+  pipe-таблица с номерами строк и буквами колонок, даты ISO, формулы —
+  закэшированным значением. Лимиты листов/строк/ячеек обрезают с явной
+  строкой `> **[truncated]**` и флагом `truncated` в JSON — не молча.
 - `.doc` (legacy binary Word) — поддержан через системный конвертер
   (`soffice`/`libreoffice`, macOS `textutil`, или `antiword`). Конвертер
   НЕ ставится в venv; без него `extract_doc.py` выходит с install-hint.
@@ -542,6 +550,6 @@ python3 <skill_dir>/scripts/ensure_env.py scout_corpus.py <in> <kb> --enable-min
   Оба env по-умолчанию выключены (heavy-deps-opt-in).
 
 **Follow-up (ещё не в скилле):**
-- XLSX, ODT, standalone images.
+- ODT, standalone images.
 - Scanned PDFs через OCRmyPDF + Tesseract (альтернатива MinerU без VLM).
 - Heavy tier на базе docling / marker-pdf для специфических layout-кейсов.
