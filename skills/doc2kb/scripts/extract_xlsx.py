@@ -24,8 +24,16 @@ Safety (the workbook is untrusted input):
        100 ms elsewhere) and SIGKILLs it past the wall deadline
        (--timeout / DOC2KB_XLSX_TIMEOUT, default 20 s) or the memory ceiling
        (--max-rss-mb / DOC2KB_XLSX_MAX_RSS_MB, default 1024 MiB); the child also
-       runs under RLIMIT_CPU (the deadline + 2 s), so it cannot outlive a parent
-       that died. A kill is {"ok": false, "refused": true, "reason": "refused:
+       runs under RLIMIT_CPU (the deadline + 2 s) and bounds itself: a watchdog
+       thread reads a pipe whose write end only the parent holds (EOF: the parent
+       died, by any signal → the child removes the temp dir and exits at once;
+       getppid is the backup check), and enforces the same RSS ceiling and the
+       wall deadline + 1 s on its own. SIGTERM/SIGHUP to the parent kill the
+       child and remove the temp dir. The temp dir (0700, doc2kb-xlsx-<pid>-*)
+       of a run whose parent and child both died is swept by the next run once
+       older than 2 minutes. Where RSS cannot be read (Windows), only the wall
+       deadline applies and the result says so in its warnings. A kill is
+       {"ok": false, "refused": true, "reason": "refused:
        resource: time|memory (...)"}; the result carries "peak_rss_mib" for
        parent and child. The child's own deadline is 75 % of the wall deadline,
        so a workbook that is merely large ends truncated with a marker first.
@@ -106,6 +114,7 @@ import signal  # noqa: E402
 import subprocess  # noqa: E402
 import sys  # noqa: E402
 import tempfile  # noqa: E402
+import threading  # noqa: E402
 import time  # noqa: E402
 import zipfile  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -164,6 +173,8 @@ POLL_S = 0.02                        # how often the parent reads the child's RS
 POLL_PS_S = 0.1                      # ... or through ps, where neither exists
 SOFT_SHARE = 0.75                    # the child's own deadline: truncate with a marker before the kill
 CHILD_FLAG = "--_xlsx-child"
+TEMP_PREFIX = "doc2kb-xlsx-"         # + the parent's pid: tempfile.gettempdir()/doc2kb-xlsx-<pid>-<random>
+STALE_S = 120                        # a temp dir whose parent and child are both gone is swept past this age
 
 
 class Refused(Exception):
@@ -595,6 +606,8 @@ def _parser(child: bool) -> argparse.ArgumentParser:
                     help=f"reader memory ceiling in MiB (env DOC2KB_XLSX_MAX_RSS_MB, default {DEFAULT_MAX_RSS_MB})")
     if child:
         ap.add_argument("--budget", type=float, required=True)
+        ap.add_argument("--lifeline", type=int, default=None)
+        ap.add_argument("--work", default=None)
     add_assets_args(ap)  # accepted for a uniform surface; xlsx images are not extracted
     return ap
 
@@ -664,19 +677,89 @@ def _rss_kib(pid: int) -> int:
         return 0
 
 
-def _maxrss_mib(who: int) -> float:
-    """getrusage's peak RSS in MiB (bytes on macOS, KiB on Linux)."""
-    import resource
+def _maxrss_mib(who: int) -> float | None:
+    """getrusage's peak RSS in MiB (bytes on macOS, KiB on Linux); None without the
+    resource module (Windows)."""
+    try:
+        import resource
+    except ImportError:
+        return None
     v = resource.getrusage(who).ru_maxrss
     return round(v / 1048576 if sys.platform == "darwin" else v / 1024, 1)
 
 
-def supervise(argv: list[str], timeout_s: float, max_rss_mb: int, out, err) -> tuple[int | None, str | None, float]:
+def _alive(pid: int) -> bool:
+    """True unless the process is certainly gone (POSIX signal 0; never on Windows,
+    where os.kill would terminate it)."""
+    if os.name == "nt" or pid <= 0:
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def sweep_stale(root: Path | None = None) -> int:
+    """Remove temp dirs of earlier runs whose parent (the pid in the name) and child
+    (child.pid inside) are both gone and that are older than STALE_S: what a parent
+    killed with SIGKILL, together with its child, leaves behind. Returns the count."""
+    root = Path(root or tempfile.gettempdir())
+    swept = 0
+    try:
+        entries = list(root.glob(TEMP_PREFIX + "*"))
+    except OSError:
+        return 0
+    now = time.time()
+    for d in entries:
+        m = re.match(re.escape(TEMP_PREFIX) + r"(\d+)-", d.name)
+        try:
+            if not m or not d.is_dir() or now - d.stat().st_mtime < STALE_S:
+                continue
+            child = int((d / "child.pid").read_text().strip() or 0) if (d / "child.pid").exists() else 0
+        except (OSError, ValueError):
+            continue
+        if _alive(int(m.group(1))) or (child and _alive(child)):
+            continue
+        shutil.rmtree(d, ignore_errors=True)
+        swept += 1
+    return swept
+
+
+class _Terminated(Exception):
+    """SIGTERM / SIGHUP reached the parent: kill the child, clean up, exit."""
+
+
+def _on_term(signum, frame):
+    raise _Terminated(signum)
+
+
+def supervise(argv: list[str], timeout_s: float, max_rss_mb: int, out, err,
+              work: Path) -> tuple[int | None, str | None, float]:
     """Run argv, polling its RSS every POLL_S; SIGKILL it past timeout_s wall seconds or
     max_rss_mb MiB of RSS. (returncode, None, peak MiB seen) when it ends by itself,
-    (None, "time" | "memory", peak) when it was killed."""
+    (None, "time" | "memory", peak) when it was killed.
+
+    The child gets the read end of a pipe (--lifeline) whose write end only this
+    process holds: when this process dies, by any signal, the child reads EOF and
+    removes work and exits (child_watchdog). Its pid goes to work/child.pid for the
+    sweep. The child is killed on every way out of here, a signal included."""
     interval = POLL_S if _cheap_rss() else POLL_PS_S
-    proc = subprocess.Popen(argv, stdout=out, stderr=err, stdin=subprocess.DEVNULL)
+    lifeline = os.pipe() if os.name != "nt" else None
+    if lifeline:
+        argv = argv + ["--lifeline", str(lifeline[0])]
+    try:
+        proc = subprocess.Popen(argv, stdout=out, stderr=err, stdin=subprocess.DEVNULL,
+                                pass_fds=(lifeline[0],) if lifeline else ())
+    finally:
+        if lifeline:
+            os.close(lifeline[0])
+    try:
+        (work / "child.pid").write_text(str(proc.pid))
+    except OSError:
+        pass
     deadline = time.monotonic() + timeout_s
     peak = 0
     try:
@@ -696,6 +779,56 @@ def supervise(argv: list[str], timeout_s: float, max_rss_mb: int, out, err) -> t
         if proc.poll() is None:
             proc.kill()
             proc.wait()
+        if lifeline:
+            os.close(lifeline[1])
+
+
+def child_watchdog(lifeline: int | None, work: Path | None, max_rss_mb: int, hard_deadline: float) -> None:
+    """The child bounds itself, so it stays bounded if the parent is gone:
+    - a thread blocks on the lifeline pipe; EOF means the parent died (by any
+      signal) → remove the temp dir, exit at once;
+    - a thread checks every POLL_S that the parent is still the one that started it
+      (getppid, the backup), that its own RSS is under max_rss_mb and that the wall
+      deadline has not passed → a refusal line on stdout, exit."""
+    ppid = os.getppid()
+
+    def orphaned():
+        if work is not None:
+            shutil.rmtree(work, ignore_errors=True)
+        os._exit(3)
+
+    def refuse(kind: str, detail: str):
+        line = json.dumps({"ok": False, "refused": True, "reason": f"refused: resource: {kind} ({detail})"})
+        try:
+            os.write(1, (line + "\n").encode("utf-8"))
+        finally:
+            os._exit(1)
+
+    if lifeline is not None:
+        def watch_pipe():
+            try:
+                while os.read(lifeline, 64):
+                    pass
+            except OSError:
+                pass
+            orphaned()
+        threading.Thread(target=watch_pipe, name="xlsx-lifeline", daemon=True).start()
+
+    me = os.getpid()
+    readable = _rss_kib(me) > 0
+
+    def watch_self():
+        while True:
+            time.sleep(POLL_S)
+            if os.name != "nt" and os.getppid() != ppid:
+                orphaned()
+            if readable:
+                rss = _rss_kib(me)
+                if rss > max_rss_mb * 1024:
+                    refuse("memory", f"the reader reached {rss / 1024:.1f} MiB, past the {max_rss_mb} MiB ceiling")
+            if time.monotonic() > hard_deadline:
+                refuse("time", "the reader ran past its deadline")
+    threading.Thread(target=watch_self, name="xlsx-self", daemon=True).start()
 
 
 def main() -> int:
@@ -716,24 +849,33 @@ def main() -> int:
     max_rss_mb = max(64, _limit(args.max_rss_mb, "DOC2KB_XLSX_MAX_RSS_MB", DEFAULT_MAX_RSS_MB, int))
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    # 0700, outside the knowledge base: a parent killed mid-run leaves nothing in docs/
-    work = Path(tempfile.mkdtemp(prefix="doc2kb-xlsx-"))
+    sweep_stale()
+    rss_note = None if _rss_kib(os.getpid()) > 0 else (
+        "resource: the memory ceiling is not enforced here (process RSS cannot be read on this platform); "
+        "the wall deadline is the only bound")
+    for sig in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
+        if sig is not None:
+            signal.signal(sig, _on_term)
+    # 0700, outside the knowledge base, named after this pid for sweep_stale()
+    work = Path(tempfile.mkdtemp(prefix=f"{TEMP_PREFIX}{os.getpid()}-"))
     try:
         part = work / "out.md"
         argv = [sys.executable, str(Path(__file__).resolve()), CHILD_FLAG, str(in_path), str(part),
                 "--doc-id", args.doc_id, "--max-sheets", str(args.max_sheets), "--max-rows", str(args.max_rows),
                 "--max-cells", str(args.max_cells), "--timeout", str(timeout_s), "--max-rss-mb", str(max_rss_mb),
-                "--budget", str(round(timeout_s * SOFT_SHARE, 3))]
+                "--budget", str(round(timeout_s * SOFT_SHARE, 3)), "--work", str(work)]
         if args.source_rel:
             argv += ["--source-rel", args.source_rel]
         with open(work / "stdout", "wb") as out, open(work / "stderr", "wb") as err:
-            rc, killed, seen = supervise(argv, timeout_s, max_rss_mb, out, err)
-        peaks = {"parent": _maxrss_mib(0), "child": max(seen, _maxrss_mib(-1))}  # RUSAGE_SELF, RUSAGE_CHILDREN
+            rc, killed, seen = supervise(argv, timeout_s, max_rss_mb, out, err, work)
+        child_peak = _maxrss_mib(-1)  # RUSAGE_CHILDREN
+        peaks = {"parent": _maxrss_mib(0), "child": max(seen, child_peak) if child_peak is not None else seen}
+        extra_warn = [rss_note] if rss_note else []
         if killed:
             why = (f"the reader ran past {timeout_s:g} s" if killed == "time"
                    else f"the reader reached {seen:g} MiB, past the {max_rss_mb} MiB ceiling")
             emit_failure(f"refused: resource: {killed} ({why})",
-                         extra={"refused": True, "input": str(in_path), "peak_rss_mib": peaks})
+                         extra={"refused": True, "input": str(in_path), "peak_rss_mib": peaks, "warnings": extra_warn})
             return 1
         lines = [x for x in (work / "stdout").read_text("utf-8", "replace").splitlines() if x.startswith("{")]
         try:
@@ -750,11 +892,17 @@ def main() -> int:
                              extra={"input": str(in_path), "peak_rss_mib": peaks})
             return 1
         payload["peak_rss_mib"] = peaks
+        if extra_warn:
+            payload["warnings"] = list(payload.get("warnings") or []) + extra_warn
         if payload.get("ok"):
             shutil.move(str(part), str(out_path))
             payload["out"] = str(out_path)
         json_stdout(payload)
         return rc if rc in (0, 1, 2) else 1
+    except _Terminated as t:
+        name = signal.Signals(t.args[0]).name
+        emit_failure(f"extraction failed: stopped by {name} (the reader was killed)", extra={"input": str(in_path)})
+        return 128 + t.args[0]
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -763,16 +911,18 @@ def child_main(argv: list[str]) -> int:
     """The reader: every openpyxl call happens here, under the parent's watch and its own
     RLIMIT_CPU (so it cannot outlive a parent that died by more than a few seconds)."""
     args = _parser(child=True).parse_args(argv)
+    started = time.monotonic()
     try:
         import resource
         cpu = int(math.ceil(float(args.timeout))) + 2
         resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu + 1))
     except (ImportError, ValueError, OSError):
         pass
+    child_watchdog(args.lifeline, Path(args.work) if args.work else None, int(args.max_rss_mb),
+                   started + float(args.timeout) + 1.0)
     in_path = Path(args.input_xlsx).resolve()
     out_path = Path(args.output_md).resolve()
     source_rel = validate_source_rel(args.source_rel or in_path.name)
-    started = time.monotonic()
     try:
         body, extras, warnings = extract(in_path, max(1, args.max_sheets), max(1, args.max_rows), max(1, args.max_cells),
                                          budget_s=args.budget)
