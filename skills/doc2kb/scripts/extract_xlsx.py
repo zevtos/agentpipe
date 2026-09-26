@@ -7,6 +7,7 @@ CLI:
                     [--doc-id doc-NNN]
                     [--source-rel relative/path/in/corpus.xlsx]
                     [--max-sheets N] [--max-rows N] [--max-cells N]
+                    [--timeout S] [--max-rss-mb N]
                     [--assets-dir ...] [--assets-rel ...] [--no-extract-images]
 
     The asset flags are accepted for a uniform extractor surface and ignored:
@@ -17,18 +18,31 @@ Effect:
     a single JSON line summarizing the result.
 
 Safety (the workbook is untrusted input):
+    0. The OS bounds the work, whatever path openpyxl takes: everything below runs
+       in a child process of this script. The parent polls the child's RSS every
+       20 ms (/proc on Linux, libproc's proc_pid_rusage on macOS; ps every
+       100 ms elsewhere) and SIGKILLs it past the wall deadline
+       (--timeout / DOC2KB_XLSX_TIMEOUT, default 20 s) or the memory ceiling
+       (--max-rss-mb / DOC2KB_XLSX_MAX_RSS_MB, default 1024 MiB); the child also
+       runs under RLIMIT_CPU (the deadline + 2 s), so it cannot outlive a parent
+       that died. A kill is {"ok": false, "refused": true, "reason": "refused:
+       resource: time|memory (...)"}; the result carries "peak_rss_mib" for
+       parent and child. The child's own deadline is 75 % of the wall deadline,
+       so a workbook that is merely large ends truncated with a marker first.
+       The checks below are defence in depth under that bound.
     1. Before openpyxl touches the file, a stdlib zipfile pre-check:
        - the central directory: member count, per-member and total
          uncompressed size (sharedStrings.xml lower still: openpyxl loads it
          whole into memory), per-member compression ratio, encrypted members;
-       - then every XML part (.xml/.rels/.vml) is streamed once, in C-speed
-         bytes scans: a part that is not UTF-8, any `<!DOCTYPE`/`<!ENTITY`
-         (so a DTD — internal or external — is refused, never merely left
-         unloaded), a run of more than 256 KiB between two `<` (past Excel's
-         32767-character cell and 8192-character formula limits), and in a
-         worksheet a row with more than 16384 cells (Excel's column limit:
-         openpyxl materializes a whole row at once, so a longer one is refused
-         before it can be).
+       - then EVERY member is streamed once, whatever its name (openpyxl finds
+         parts by relationship and content type), in C-speed bytes scans: any
+         `<!DOCTYPE`/`<!ENTITY` (so a DTD — internal or external — is refused,
+         never merely left unloaded). A member that is XML by name or by its
+         first bytes is also refused when it is not UTF-8, when its declaration
+         names an encoding that would hide markup from the scan (UTF-16,
+         EBCDIC, unknown), on a run of more than 256 KiB between two `<` (past
+         Excel's 32767-character cell and 8192-character formula limits), and
+         on a row with more than 16384 cells (Excel's column limit).
        Any of these refuses the file ({"ok": false, "refused": true,
        "reason": ...}). zipfile never yields more than a member's declared
        size, so the declared sizes bound what openpyxl can read later.
@@ -39,15 +53,20 @@ Safety (the workbook is untrusted input):
        refuses to run otherwise — it never parses unprotected.
     3. load_workbook(read_only=True, data_only=True, keep_links=False):
        worksheets stream, formula cells give the value Excel cached, external
-       links are not read. Each sheet's stored <dimension> is dropped
-       (reset_dimensions) so a bogus A1:XFD1048576 cannot pad every row.
+       links are not read. Rows come straight from openpyxl's own worksheet
+       parser (the one iter_rows wraps) — no gap filling, so neither a bogus
+       <dimension> nor a row-number jump pads anything, and a row numbered at
+       or below an earlier one (which iter_rows silently drops) is kept, in file
+       order, with a `row_order` warning.
 
 Caps (a large workbook is truncated, never silently):
     --max-sheets (default 100), --max-rows per sheet (10000 non-empty rows),
     --max-cells (300000 cells written, table padding included) and an 8 MiB
-    output backstop bound what is written; rows scanned (1000000, empty ones
-    included), cells scanned (5000000) and a 120 s wall-clock budget (checked
-    per row, while rendering and before the token count) bound the work. A
+    output cap bound what is written — the cap applies as rows arrive (a row
+    is held only while the text held so far fits it), so no sheet's cells are
+    held past it; rows scanned (1000000), cells scanned (5000000) and the
+    child's own deadline (checked per row, while rendering and before the
+    token count) bound the work. A
     cell longer than 2000 characters is cut with "…". Every cut puts an
     explicit `> **[truncated]** ...` line in the body, and the JSON result
     carries "truncated": true and "truncation": ["<kind>: <reason>", ...]
@@ -77,9 +96,16 @@ os.environ["OPENPYXL_LXML"] = "False"
 os.environ["OPENPYXL_DEFUSEDXML"] = "True"
 
 import argparse  # noqa: E402
+import codecs  # noqa: E402
 import datetime  # noqa: E402
+import json  # noqa: E402
+import math  # noqa: E402
 import re  # noqa: E402
+import shutil  # noqa: E402
+import signal  # noqa: E402
+import subprocess  # noqa: E402
 import sys  # noqa: E402
+import tempfile  # noqa: E402
 import time  # noqa: E402
 import zipfile  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -107,13 +133,16 @@ MAX_TOTAL_BYTES = 1024 * 1024 * 1024
 MAX_RATIO = 200                      # uncompressed / compressed, per member ...
 RATIO_MIN_BYTES = 1024 * 1024        # ... once it unpacks past 1 MiB
 SST_MAX_BYTES = 32 * 1024 * 1024     # sharedStrings.xml: openpyxl holds every string in memory
-# The streamed scan of each XML part.
+# The streamed scan of every member (DTD markers in all of them; the XML rules in the
+# members that are XML by name or by content).
 XML_SUFFIXES = (".xml", ".rels", ".vml")
 MAX_ROW_CELLS = 16384                # Excel's column limit
 MAX_TEXT_RUN = 256 * 1024            # bytes between two '<'
 SCAN_CHUNK = 1 << 20
 _DTD_RE = re.compile(rb"<!(?:DOCTYPE|ENTITY)", re.IGNORECASE)
 _ROW_CELL_RE = re.compile(rb"<(?:[A-Za-z_][\w.-]*:)?(row|c)[\s/>]")
+_XML_DECL_ENC_RE = re.compile(rb"<\?xml[^>]{0,200}?encoding\s*=\s*[\"']([A-Za-z0-9._:-]{1,40})[\"']")
+_MARKUP_PROBE = "<!DOCTYPE<!doctype<!ENTITY<!entity"
 
 # What is written.
 DEFAULT_MAX_SHEETS = 100
@@ -122,11 +151,19 @@ DEFAULT_MAX_CELLS = 300_000          # emitted cells across the workbook
 # What is worked through.
 MAX_SCAN_ROWS = 1_000_000
 MAX_SCAN_CELLS = 5_000_000
-TIME_BUDGET_S = 120
 CELL_CHARS = 2000
 MAX_SPAN = 64                        # columns a dense table may span; wider renders sparse
 MAX_OUTPUT_BYTES = 8 * 1024 * 1024   # body backstop
 EXACT_TOKENS_CHARS = 2_000_000       # past it the token count is an estimate (bytes / 4)
+
+# The OS bound: the openpyxl work runs in a child process the parent kills past either
+# (supervise()). Overridable by env or CLI (the CLI wins).
+DEFAULT_TIMEOUT_S = 20.0             # wall seconds: DOC2KB_XLSX_TIMEOUT / --timeout
+DEFAULT_MAX_RSS_MB = 1024            # child RSS ceiling: DOC2KB_XLSX_MAX_RSS_MB / --max-rss-mb
+POLL_S = 0.02                        # how often the parent reads the child's RSS (/proc, libproc) ...
+POLL_PS_S = 0.1                      # ... or through ps, where neither exists
+SOFT_SHARE = 0.75                    # the child's own deadline: truncate with a marker before the kill
+CHILD_FLAG = "--_xlsx-child"
 
 
 class Refused(Exception):
@@ -144,7 +181,8 @@ def _human(n: int) -> str:
 def zip_precheck(path: Path, deadline: float | None = None) -> None:
     """Raise Refused when the archive describes a zip bomb or carries XML openpyxl
     should not see. The central directory first (nothing inflated), then one
-    streamed bytes scan of each XML part (_scan_xml)."""
+    streamed bytes scan of every member, whatever its name (_scan_member): openpyxl
+    finds parts by relationship and content type, not by name."""
     if not zipfile.is_zipfile(path):
         raise Refused("not a zip archive (an .xlsx is one)")
     with zipfile.ZipFile(path) as zf:
@@ -169,29 +207,54 @@ def zip_precheck(path: Path, deadline: float | None = None) -> None:
             if total > MAX_TOTAL_BYTES:
                 raise Refused(f"the archive unpacks past the {_human(MAX_TOTAL_BYTES)} total cap")
         for info in infos:
-            if not info.is_dir() and info.filename.lower().endswith(XML_SUFFIXES):
-                _scan_xml(zf, info, "/worksheets/" in info.filename, deadline)
+            if not info.is_dir():
+                _scan_member(zf, info, deadline)
 
 
-def _scan_xml(zf: zipfile.ZipFile, info: zipfile.ZipInfo, sheet: bool, deadline: float | None) -> None:
-    """One XML part, streamed in SCAN_CHUNK pieces with C-speed bytes scans only:
-    refuse a part that is not UTF-8, any <!DOCTYPE / <!ENTITY, a run of more than
-    MAX_TEXT_RUN bytes between two '<', and (worksheet) a row of more than
-    MAX_ROW_CELLS <c> elements. Linear in the part's size."""
+def _ascii_markup(encoding: str) -> bool:
+    """True when the encoding writes <!DOCTYPE and <!ENTITY as their ASCII bytes, so the
+    bytes scan sees them (UTF-8, cp1251, latin-1 …; not UTF-16, EBCDIC or unknown ones)."""
+    try:
+        name = codecs.lookup(encoding).name
+        return _MARKUP_PROBE.encode(name) == _MARKUP_PROBE.encode("ascii")
+    except (LookupError, UnicodeError, ValueError):
+        return False
+
+
+def _scan_member(zf: zipfile.ZipFile, info: zipfile.ZipInfo, deadline: float | None) -> None:
+    """One member, streamed in SCAN_CHUNK pieces with C-speed bytes scans only.
+
+    Every member: refuse any <!DOCTYPE / <!ENTITY. A member that is XML by name
+    (.xml/.rels/.vml) or by content (its first bytes, past a UTF-8 BOM and blanks, are
+    '<', or it looks like UTF-16): refuse it when it is not UTF-8 (a BOM or NUL in its
+    first four bytes), when its XML declaration names an encoding that would hide
+    markup from this scan, on a run of more than MAX_TEXT_RUN bytes between two '<',
+    and on a row of more than MAX_ROW_CELLS <c> elements. Linear in the member's size."""
     name = info.filename
-    run = cells = 0
+    run = 0
+    cells = None  # counted from the first <row> on
     carry = b""
     first = True
+    xmlish = False
     with zf.open(info) as fh:
         while True:
             data = fh.read(SCAN_CHUNK)
             if first:
                 first = False
-                if data[:2] in (b"\xff\xfe", b"\xfe\xff") or b"\x00" in data[:4]:
+                utf16 = data[:2] in (b"\xff\xfe", b"\xfe\xff", b"<\x00", b"\x00<")
+                head = data[:1024]
+                head = head[3:] if head.startswith(b"\xef\xbb\xbf") else head
+                head = head.lstrip()
+                xmlish = name.lower().endswith(XML_SUFFIXES) or head.startswith(b"<") or utf16
+                if xmlish and (utf16 or b"\x00" in data[:4]):
                     raise Refused(f"{name} is not UTF-8 XML")
+                m = _XML_DECL_ENC_RE.match(head) if xmlish else None
+                if m and not _ascii_markup(m.group(1).decode("ascii")):
+                    raise Refused(f"{name} declares the encoding {m.group(1).decode('ascii')}, "
+                                  "which would hide markup from the DTD scan")
             if deadline is not None and time.monotonic() > deadline:
-                raise Refused(f"{name}: the pre-check did not finish within {TIME_BUDGET_S} s")
-            if data:
+                raise Refused(f"{name}: the pre-check did not finish in time")
+            if xmlish and data:
                 pieces = data.split(b"<")
                 run += len(pieces[0])
                 longest = max(map(len, pieces[1:-1]), default=0)
@@ -205,13 +268,13 @@ def _scan_xml(zf: zipfile.ZipFile, info: zipfile.ZipInfo, sheet: bool, deadline:
                 raise Refused(f"{name} declares a DTD (<!DOCTYPE/<!ENTITY)")
             end = len(buf) if not data else max(0, len(buf) - 16)
             pos = 0
-            if sheet:
+            if xmlish:
                 for m in _ROW_CELL_RE.finditer(buf):
                     if m.start() >= end:
                         break
                     if m.group(1) == b"row":
                         cells = 0
-                    else:
+                    elif cells is not None:
                         cells += 1
                         if cells > MAX_ROW_CELLS:
                             raise Refused(f"{name}: a row with more than {MAX_ROW_CELLS} cells "
@@ -312,10 +375,38 @@ class _Body:
         return True
 
 
+def _sheet_rows(wb, ws):
+    """(row number, [(column, value)]) for each <row> as the file has it: openpyxl's own
+    worksheet parser, which ReadOnlyWorksheet.iter_rows wraps — without the wrapper's gap
+    filling, which yields millions of empty rows for a jump and silently drops a row whose
+    number is not above the previous one. Values are the same (the same parse_cell).
+    Second item: whether row order can be checked (False on the iter_rows fallback, for
+    an openpyxl whose internals moved)."""
+    try:
+        from openpyxl.worksheet._reader import WorkSheetParser  # type: ignore
+        src = ws._get_source()
+        parser = WorkSheetParser(src, ws._shared_strings, data_only=wb.data_only, epoch=wb.epoch,
+                                 date_formats=wb._date_formats, timedelta_formats=wb._timedelta_formats)
+    except (ImportError, AttributeError, TypeError):
+        if hasattr(ws, "reset_dimensions"):
+            ws.reset_dimensions()
+        return ((i, list(enumerate(row, start=1))) for i, row in
+                enumerate(ws.iter_rows(values_only=True), start=1)), False
+
+    def rows():
+        try:
+            for idx, cells in parser.parse():
+                yield idx, [(c["column"], c["value"]) for c in cells]
+        finally:
+            src.close()
+    return rows(), True
+
+
 def extract(path: Path, max_sheets: int, max_rows: int, max_cells: int,
-            budget_s: float = TIME_BUDGET_S, max_span: int = MAX_SPAN,
+            budget_s: float = 15.0, max_span: int = MAX_SPAN,
             max_output: int = MAX_OUTPUT_BYTES) -> tuple[str, dict, list[str]]:
-    """(body, extras, warnings). Raises Refused / Unprotected before parsing."""
+    """(body, extras, warnings). Raises Refused / Unprotected before parsing. Runs in the
+    child process (child_main); budget_s is its own deadline, short of the parent's kill."""
     deadline = time.monotonic() + budget_s
     zip_precheck(path, deadline)
     openpyxl = _openpyxl()
@@ -324,6 +415,7 @@ def extract(path: Path, max_sheets: int, max_rows: int, max_cells: int,
     titles: list[str] = []
     scanned_rows = scanned_cells = emitted_rows = rendered = 0
     cut_cells_total = 0
+    row_order: list[str] = []
 
     def late() -> bool:
         return time.monotonic() > deadline
@@ -339,12 +431,14 @@ def extract(path: Path, max_sheets: int, max_rows: int, max_cells: int,
             hidden = getattr(ws, "sheet_state", "visible") != "visible"
             body.add(f"## {title}{' (hidden)' if hidden else ''}", marker=True)
             body.add("", marker=True)
-            if hasattr(ws, "reset_dimensions"):
-                ws.reset_dimensions()
+            source, ordered = _sheet_rows(wb, ws)
             rows: list[tuple[int, dict[int, str]]] = []
             nonempty = cut_cells = 0
+            held = 0  # characters of the rows held, counted against the output cap as they arrive
+            last = 0
+            disorder, first_disorder = 0, None
             sheet_cut = None
-            for rownum, row in enumerate(ws.iter_rows(values_only=True), start=1):
+            for rownum, row in source:
                 scanned_rows += 1
                 scanned_cells += len(row)
                 if scanned_rows > MAX_SCAN_ROWS or scanned_cells > MAX_SCAN_CELLS:
@@ -354,9 +448,14 @@ def extract(path: Path, max_sheets: int, max_rows: int, max_cells: int,
                 if late():
                     stop = ("time", f"not read within {budget_s:g} s; the rest is not extracted")
                     break
+                if ordered:
+                    if rownum <= last:
+                        disorder += 1
+                        first_disorder = first_disorder or (rownum, last)
+                    last = max(last, rownum)
                 cells: dict[int, str] = {}
                 row_cut = 0
-                for i, v in enumerate(row, start=1):
+                for i, v in row:
                     if v is None:
                         continue
                     text, was_cut = format_value(v)
@@ -372,9 +471,18 @@ def extract(path: Path, max_sheets: int, max_rows: int, max_cells: int,
                 if rendered + nonempty + len(cells) > max_cells:
                     stop = ("cells", f"more than {max_cells} cells in the workbook; the rest is not extracted")
                     break
+                weight = sum(len(t) for t in cells.values()) + 4 * len(cells) + 16
+                if body.size + held + weight > max_output - _Body.RESERVE:
+                    stop = ("output", f"the body reached the {max_output // 1048576} MiB output cap; "
+                                      "the rest is not extracted")
+                    break
+                held += weight
                 nonempty += len(cells)
                 cut_cells += row_cut
                 rows.append((rownum, cells))
+            if disorder:
+                row_order.append(f"sheet \"{title}\": {disorder} row(s) numbered at or below an earlier row "
+                                 f"(row {first_disorder[0]} after row {first_disorder[1]}); kept, in file order")
             cut = stop or sheet_cut
             wrote_cells, wrote_rows, render_cut = _render(body, rows, nonempty, max_cells - rendered, max_span,
                                                           late, budget_s)
@@ -409,7 +517,7 @@ def extract(path: Path, max_sheets: int, max_rows: int, max_cells: int,
     if cut_cells_total:
         truncation.append(f"cell_chars: {cut_cells_total} cell(s) longer than {CELL_CHARS} characters cut, "
                           "each ending in «…»")
-    warnings = [f"truncated: {t}" for t in truncation]
+    warnings = [f"truncated: {t}" for t in truncation] + [f"row_order: {r}" for r in row_order]
     text = "\n".join(body.lines).rstrip() + "\n"
     extras = {
         "sheets": sheet_count,
@@ -419,6 +527,7 @@ def extract(path: Path, max_sheets: int, max_rows: int, max_cells: int,
         "cut_cells": cut_cells_total,
         "truncated": bool(truncation),
         "truncation": truncation,
+        "row_order": row_order,
         "headings": titles,
         "output_bytes": len(text.encode("utf-8")),
     }
@@ -469,8 +578,9 @@ def estimate_tokens(text: str, late) -> tuple[int, bool]:
     return len(text.encode("utf-8")) // 4, False
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="Extract XLSX → Markdown via openpyxl (read-only, defusedxml).")
+def _parser(child: bool) -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(description="Extract XLSX → Markdown via openpyxl (read-only, defusedxml), "
+                                             "in a child process bounded by wall time and memory.")
     ap.add_argument("input_xlsx")
     ap.add_argument("output_md")
     ap.add_argument("--doc-id", default="doc-000")
@@ -479,30 +589,202 @@ def main() -> int:
     ap.add_argument("--max-rows", type=int, default=DEFAULT_MAX_ROWS, help="non-empty rows per sheet")
     ap.add_argument("--max-cells", type=int, default=DEFAULT_MAX_CELLS,
                     help="cells written across the workbook, table padding included")
+    ap.add_argument("--timeout", type=float, default=None,
+                    help=f"wall seconds for the reader (env DOC2KB_XLSX_TIMEOUT, default {DEFAULT_TIMEOUT_S:g})")
+    ap.add_argument("--max-rss-mb", type=int, default=None,
+                    help=f"reader memory ceiling in MiB (env DOC2KB_XLSX_MAX_RSS_MB, default {DEFAULT_MAX_RSS_MB})")
+    if child:
+        ap.add_argument("--budget", type=float, required=True)
     add_assets_args(ap)  # accepted for a uniform surface; xlsx images are not extracted
-    args = ap.parse_args()
+    return ap
 
+
+def _limit(cli, env: str, default, kind):
+    if cli is not None:
+        return kind(cli)
+    raw = os.environ.get(env)
+    try:
+        return kind(raw) if raw else default
+    except ValueError:
+        return default
+
+
+_LIBPROC = None
+
+
+def _libproc():
+    """macOS's proc_pid_rusage through ctypes (stdlib): a process's resident size
+    without spawning ps. False where it is not available."""
+    global _LIBPROC
+    if _LIBPROC is None:
+        _LIBPROC = False
+        if sys.platform == "darwin":
+            try:
+                import ctypes
+
+                class RusageInfoV0(ctypes.Structure):
+                    _fields_ = [("ri_uuid", ctypes.c_uint8 * 16)] + [(n, ctypes.c_uint64) for n in (
+                        "ri_user_time", "ri_system_time", "ri_pkg_idle_wkups", "ri_interrupt_wkups",
+                        "ri_pageins", "ri_wired_size", "ri_resident_size", "ri_phys_footprint",
+                        "ri_proc_start_abstime", "ri_proc_exit_abstime")]
+
+                lib = ctypes.CDLL("/usr/lib/libproc.dylib")
+                lib.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+                lib.proc_pid_rusage.restype = ctypes.c_int
+                _LIBPROC = (lib, RusageInfoV0, ctypes)
+            except (OSError, AttributeError):
+                _LIBPROC = False
+    return _LIBPROC
+
+
+def _cheap_rss() -> bool:
+    return os.path.isdir("/proc/self") or bool(_libproc())
+
+
+def _rss_kib(pid: int) -> int:
+    """The process's resident set in KiB: /proc on Linux, libproc on macOS, else ps;
+    0 when it is gone."""
+    try:
+        with open(f"/proc/{pid}/status", encoding="ascii", errors="replace") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1])
+        return 0
+    except OSError:
+        pass
+    lp = _libproc()
+    if lp:
+        lib, info_t, ctypes = lp
+        info = info_t()
+        return info.ri_resident_size // 1024 if lib.proc_pid_rusage(pid, 0, ctypes.byref(info)) == 0 else 0
+    try:
+        out = subprocess.run(["ps", "-o", "rss=", "-p", str(pid)], capture_output=True, text=True, timeout=2).stdout
+        return int(out.strip() or 0)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0
+
+
+def _maxrss_mib(who: int) -> float:
+    """getrusage's peak RSS in MiB (bytes on macOS, KiB on Linux)."""
+    import resource
+    v = resource.getrusage(who).ru_maxrss
+    return round(v / 1048576 if sys.platform == "darwin" else v / 1024, 1)
+
+
+def supervise(argv: list[str], timeout_s: float, max_rss_mb: int, out, err) -> tuple[int | None, str | None, float]:
+    """Run argv, polling its RSS every POLL_S; SIGKILL it past timeout_s wall seconds or
+    max_rss_mb MiB of RSS. (returncode, None, peak MiB seen) when it ends by itself,
+    (None, "time" | "memory", peak) when it was killed."""
+    interval = POLL_S if _cheap_rss() else POLL_PS_S
+    proc = subprocess.Popen(argv, stdout=out, stderr=err, stdin=subprocess.DEVNULL)
+    deadline = time.monotonic() + timeout_s
+    peak = 0
+    try:
+        while True:
+            try:
+                return proc.wait(timeout=interval), None, round(peak / 1024, 1)
+            except subprocess.TimeoutExpired:
+                pass
+            rss = _rss_kib(proc.pid)
+            peak = max(peak, rss)
+            why = "memory" if rss > max_rss_mb * 1024 else "time" if time.monotonic() > deadline else None
+            if why:
+                proc.kill()
+                proc.wait()
+                return None, why, round(peak / 1024, 1)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == CHILD_FLAG:
+        return child_main(sys.argv[2:])
+    args = _parser(child=False).parse_args()
     in_path = Path(args.input_xlsx).expanduser().resolve()
     out_path = Path(args.output_md).expanduser().resolve()
-    source_rel = args.source_rel or in_path.name
     try:
-        source_rel = validate_source_rel(source_rel)
+        validate_source_rel(args.source_rel or in_path.name)
     except ValueError as e:
         emit_failure(f"invalid --source-rel: {e}")
         return 1
     if not in_path.is_file():
         emit_failure(f"input not found: {in_path}")
         return 1
+    timeout_s = max(1.0, _limit(args.timeout, "DOC2KB_XLSX_TIMEOUT", DEFAULT_TIMEOUT_S, float))
+    max_rss_mb = max(64, _limit(args.max_rss_mb, "DOC2KB_XLSX_MAX_RSS_MB", DEFAULT_MAX_RSS_MB, int))
 
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    # 0700, outside the knowledge base: a parent killed mid-run leaves nothing in docs/
+    work = Path(tempfile.mkdtemp(prefix="doc2kb-xlsx-"))
+    try:
+        part = work / "out.md"
+        argv = [sys.executable, str(Path(__file__).resolve()), CHILD_FLAG, str(in_path), str(part),
+                "--doc-id", args.doc_id, "--max-sheets", str(args.max_sheets), "--max-rows", str(args.max_rows),
+                "--max-cells", str(args.max_cells), "--timeout", str(timeout_s), "--max-rss-mb", str(max_rss_mb),
+                "--budget", str(round(timeout_s * SOFT_SHARE, 3))]
+        if args.source_rel:
+            argv += ["--source-rel", args.source_rel]
+        with open(work / "stdout", "wb") as out, open(work / "stderr", "wb") as err:
+            rc, killed, seen = supervise(argv, timeout_s, max_rss_mb, out, err)
+        peaks = {"parent": _maxrss_mib(0), "child": max(seen, _maxrss_mib(-1))}  # RUSAGE_SELF, RUSAGE_CHILDREN
+        if killed:
+            why = (f"the reader ran past {timeout_s:g} s" if killed == "time"
+                   else f"the reader reached {seen:g} MiB, past the {max_rss_mb} MiB ceiling")
+            emit_failure(f"refused: resource: {killed} ({why})",
+                         extra={"refused": True, "input": str(in_path), "peak_rss_mib": peaks})
+            return 1
+        lines = [x for x in (work / "stdout").read_text("utf-8", "replace").splitlines() if x.startswith("{")]
+        try:
+            payload = json.loads(lines[-1])
+        except (IndexError, ValueError):
+            tail = (work / "stderr").read_text("utf-8", "replace").strip().splitlines()[-1:] or [""]
+            if rc is not None and rc < 0:
+                sig = signal.Signals(-rc).name if -rc in signal.valid_signals() else str(-rc)
+                kind = "cpu" if sig == "SIGXCPU" else f"signal {sig}"
+                emit_failure(f"refused: resource: {kind} (the reader was stopped by {sig})",
+                             extra={"refused": True, "input": str(in_path), "peak_rss_mib": peaks})
+            else:
+                emit_failure(f"extraction failed: the reader exited {rc} without a result ({tail[0][:200]})",
+                             extra={"input": str(in_path), "peak_rss_mib": peaks})
+            return 1
+        payload["peak_rss_mib"] = peaks
+        if payload.get("ok"):
+            shutil.move(str(part), str(out_path))
+            payload["out"] = str(out_path)
+        json_stdout(payload)
+        return rc if rc in (0, 1, 2) else 1
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def child_main(argv: list[str]) -> int:
+    """The reader: every openpyxl call happens here, under the parent's watch and its own
+    RLIMIT_CPU (so it cannot outlive a parent that died by more than a few seconds)."""
+    args = _parser(child=True).parse_args(argv)
+    try:
+        import resource
+        cpu = int(math.ceil(float(args.timeout))) + 2
+        resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu + 1))
+    except (ImportError, ValueError, OSError):
+        pass
+    in_path = Path(args.input_xlsx).resolve()
+    out_path = Path(args.output_md).resolve()
+    source_rel = validate_source_rel(args.source_rel or in_path.name)
     started = time.monotonic()
     try:
-        body, extras, warnings = extract(in_path, max(1, args.max_sheets), max(1, args.max_rows), max(1, args.max_cells))
+        body, extras, warnings = extract(in_path, max(1, args.max_sheets), max(1, args.max_rows), max(1, args.max_cells),
+                                         budget_s=args.budget)
     except Refused as e:
         emit_failure(f"refused: {e}", extra={"refused": True, "input": str(in_path)})
         return 1
     except Unprotected as e:
         emit_failure(f"refusing to parse without defusedxml: {e}", extra={"input": str(in_path)})
         return 2
+    except MemoryError:
+        emit_failure("refused: resource: memory (the reader ran out of memory)", extra={"refused": True, "input": str(in_path)})
+        return 1
     except Exception as e:
         root = _root(e)
         why = f"{type(root).__name__}: {str(root)[:200]}"
@@ -515,7 +797,7 @@ def main() -> int:
         emit_failure(f"extraction failed: {why}", extra={"input": str(in_path)})
         return 1
 
-    tokens, exact = estimate_tokens(body, lambda: time.monotonic() > started + TIME_BUDGET_S)
+    tokens, exact = estimate_tokens(body, lambda: time.monotonic() > started + args.budget)
     fm = {
         "id": args.doc_id,
         "source": source_rel,
@@ -534,7 +816,7 @@ def main() -> int:
     payload = {"ok": True, "out": str(out_path), "tokens_estimated": tokens, "tokens_exact": exact,
                "warnings": warnings}
     payload.update({k: extras[k] for k in ("sheets", "sheets_extracted", "rows", "cells", "cut_cells",
-                                           "output_bytes", "truncated", "truncation")})
+                                           "output_bytes", "truncated", "truncation", "row_order")})
     json_stdout(payload)
     return 0
 
