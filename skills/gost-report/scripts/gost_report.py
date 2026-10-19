@@ -236,6 +236,8 @@ class TitleConfig:
 
     # --- Опциональное ---
     work_number: str = ""
+    discipline: str = ""                   # «Системное администрирование» — строка
+                                           # «по дисциплине «…»» на титуле
     variant: str = ""
     teacher_name: str = ""
     teacher_label: str = "Проверил"        # "Руководитель" для ВКР/курсовых
@@ -260,7 +262,7 @@ _ENV_PREFIX = "GOST_REPORT_"
 _ENV_STR_FIELDS = (
     "work_type", "topic", "student_name", "student_group", "year",
     "student_label",
-    "work_number", "variant",
+    "work_number", "discipline", "variant",
     "teacher_name", "teacher_label", "teacher_degree", "teacher_position",
     "city", "ministry", "university_full", "university_short", "faculty",
 )
@@ -1122,13 +1124,16 @@ class Report:
             self._add_paragraph(faculty, italic=True)
 
     def _title_work_block(self) -> None:
-        """Вид работы (+ номер) → тема → вариант."""
+        """Вид работы (+ номер) → дисциплина → тема → вариант."""
         cfg = self._title
         work_type_text = cfg.work_type
         if cfg.work_number:
             work_type_text = f"{work_type_text} {cfg.work_number}".strip()
         self._add_paragraph(work_type_text, size=FONT_SIZE_TITLE_LARGE,
                             bold=True)
+        if cfg.discipline:
+            self._add_paragraph(f"по дисциплине «{cfg.discipline}»",
+                                size=FONT_SIZE_TITLE_LARGE)
         if cfg.topic:
             self._add_paragraph(cfg.topic, size=FONT_SIZE_TITLE_LARGE)
         if cfg.variant:
