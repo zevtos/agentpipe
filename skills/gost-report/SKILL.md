@@ -1,6 +1,6 @@
 ---
 name: gost-report
-description: Generate Russian academic reports (.docx) formatted to GOST 7.32 — лабораторные, отчёты по практике, курсовые, ВКР, домашние задания для любого российского вуза (ИТМО, МГУ, СПбГУ, МФТИ, Бауманка, и т.д.). Use whenever the user asks for a report по ГОСТ 7.32, лабораторную, отчёт по практике, курсовой, ВКР, реферат, РГР, пояснительную записку, домашку, или любую Russian-language student paper needing proper title page, headings, page numbers, figure/table captions. Triggers even when only "лабораторная" or "отчёт" is mentioned — Russian-language context (ИТМО / МГУ / СПбГУ / университет / ГОСТ) is enough. ITMO is the default profile; other universities via UniversityProfile.
+description: Generate Russian academic reports (.docx) formatted to GOST 7.32 — лабораторные, отчёты по практике, курсовые, ВКР, домашние задания для любого российского вуза (ИТМО, МГУ, СПбГУ, МФТИ, Бауманка, и т.д.). Use whenever the user asks for a report по ГОСТ 7.32, лабораторную, отчёт по практике, курсовой, ВКР, реферат, РГР, пояснительную записку, домашку, или любую Russian-language student paper needing proper title page, headings, page numbers, figure/table captions. Also школьный индивидуальный проект. Triggers even when only "лабораторная" or "отчёт" is mentioned — Russian-language context (ИТМО / МГУ / СПбГУ / университет / ГОСТ) is enough. ITMO is the default profile; other universities via UniversityProfile.
 ---
 
 # GOST report generator
@@ -55,6 +55,7 @@ GOST_REPORT_YEAR="2026"
 - Под предмет — свой `.gost-report.env` рядом с проектом курса (ищется вверх от build.py): обычно только преподаватель/кафедра.
 - Приоритет (первый непустой): env-переменные → `<курс>/.gost-report.env` → глобальный конфиг → `TitleConfig(...)` в build.py. Env побеждает build.py.
 - Путь глобального конфига можно перенести: `GOST_REPORT_CONFIG=/path/to/config` (когда `~/.config` недоступен на запись).
+- Работа за другого человека: `GOST_REPORT_IGNORE_GLOBAL_CONFIG=1` в `<проект>/.gost-report.env` — глобальный конфиг (твои ФИО/группа) не применяется.
 
 ## Командная работа
 
@@ -355,7 +356,7 @@ WARN-коды (`placeholder-name`, `ai-tone`, `caption-short`) не блокир
 
 Загружай по необходимости (агент не должен держать это в контексте каждый раз):
 
-- **`references/profiles.md`** — другие вузы: `GOST_PROFILE`, кастомный `UniversityProfile`, переопределение полей через `TitleConfig`.
+- **`references/profiles.md`** — другие вузы и школы: `GOST_PROFILE`, кастомный `UniversityProfile` (поля, кегль/интервал/отступ, позиция номера страницы, раскладка титула, `title_builder`), методичка → профиль, работа за другого человека (`GOST_REPORT_IGNORE_GLOBAL_CONFIG`).
 - **`references/formulas.md`** — полный список поддерживаемых LaTeX-конструкций, edge cases, санитайзер vs LaTeX, отладка.
 - **`references/patterns.md`** — структура для лаб, ВКР, курсовых, отчёта по практике, ДЗ.
 - **`references/api.md`** — TitleConfig полный, поведенческие заметки (TOC поле, рестарт списков, нет кавычек у `topic`, картинки клампятся, санитайзер семантика).

@@ -42,7 +42,7 @@ import os
 from pathlib import Path
 import re
 import sys
-from typing import Dict, List, Optional, Sequence, Union
+from typing import Callable, Dict, List, Optional, Sequence, Union
 import zipfile
 
 from docx import Document
@@ -81,7 +81,6 @@ SPACE_BLOCK = Pt(6)
 # Титульник: пустые абзацы-разделители и сдвиг правого блока.
 _TITLE_TOP_GAP = 6                    # пустых абзацев от шапки до вида работы
 _TITLE_MID_GAP = 4                    # пустых абзацев перед блоком студент/преподаватель
-_RIGHT_BLOCK_INDENT = Cm(9)           # сдвиг правого блока от левого края
 _RIGHT_BLOCK_REST_INDENT = Cm(2.2)    # доп. сдвиг continuation-имён (≈ ширина "Выполнили: ")
 
 
@@ -128,6 +127,29 @@ class UniversityProfile:
     university_short: str = ""
     faculty: str = ""
     city: str = ""
+
+    # --- Типографика основного текста (дефолты = ГОСТ 7.32) ---
+    # Школы и некоторые вузы требуют другое: TNR 12, отступ 1 см и т.п.
+    body_font_size: float = 14             # пт, весь текст кроме заголовков
+    line_spacing: float = 1.5              # множитель, основной текст и заголовки
+    first_line_indent_cm: float = 1.25     # абзацный отступ («красная строка»)
+    heading_space_after_pt: float = 12     # интервал после заголовков и «ОГЛАВЛЕНИЯ»
+    block_space_pt: float = 6              # интервал вокруг рисунков/таблиц/формул
+    # Номер страницы: "<bottom|top>-<left|center|right>"
+    page_number_position: str = "bottom-center"
+    page_number_size: float = 11           # пт
+    # --- Титульник ---
+    title_size_large: float = 18           # пт, вид работы и тема
+    title_right_block_indent_cm: float = 9  # сдвиг блока «Выполнил/Проверил» от левого поля
+    # "group_line"  — строка «Группа: …», ниже «Выполнил: ФИО» (вуз)
+    # "label_group" — «Выполнила: ученица 9 «Б» класса», ФИО строками ниже
+    #                 под меткой, как у руководителя (школа)
+    title_student_layout: str = "group_line"
+    title_group_template: str = "Группа: {group}"   # {group} ← TitleConfig.student_group
+    # Полностью свой титульник: callable(report) вместо встроенной раскладки.
+    # Внутри — report.add_text_paragraph(...), report.add_runs_paragraph(...),
+    # report.add_bottom_block([...]). Секция, поля и скрытый номер уже настроены.
+    title_builder: Optional[Callable[["Report"], None]] = None
 
 
 # ---- Встроенные пресеты ----
@@ -186,7 +208,7 @@ class StyledRun:
     bold: bool = False
     italic: bool = False
     underline: bool = False
-    # docx.shared.Length (либо None → FONT_SIZE_BODY). Pt/Cm/Mm возвращают
+    # docx.shared.Length (либо None → кегль основного текста профиля). Pt/Cm/Mm возвращают
     # Length-объекты; используем Optional[Length] вместо object для ясности.
     size: Optional["Length"] = None
 
@@ -338,11 +360,17 @@ def _find_subject_config() -> Optional[Path]:
 def _load_gost_env() -> Dict[str, str]:
     """Сливает три слоя env: global config → subject config → os.environ.
     Каждый последующий перекрывает предыдущий. Пустые/отсутствующие
-    значения не затирают то, что выставлено выше по приоритету."""
-    merged = _parse_config_file(_config_file_path())
+    значения не затирают то, что выставлено выше по приоритету.
+
+    Работа за другого человека (заказ, сестра): в subject-конфиге
+    `GOST_REPORT_IGNORE_GLOBAL_CONFIG=1` отключает глобальный слой, чтобы
+    личные ФИО/группа владельца не протекли на чужой титул."""
     subject = _find_subject_config()
-    if subject is not None:
-        merged.update(_parse_config_file(subject))
+    subject_env = _parse_config_file(subject) if subject is not None else {}
+    ignore_global = subject_env.get(
+        f"{_ENV_PREFIX}IGNORE_GLOBAL_CONFIG", "").strip().lower() in _TRUTHY_ENV
+    merged = {} if ignore_global else _parse_config_file(_config_file_path())
+    merged.update(subject_env)
     for key, val in os.environ.items():
         if key.startswith(_ENV_PREFIX) and val:
             merged[key] = val
@@ -516,13 +544,14 @@ def _strip_thumbnail_part(docx_path: Path) -> None:
         raise
 
 
-def _ensure_normal_style(doc: _Document):
+def _ensure_normal_style(doc: _Document, *, size=FONT_SIZE_BODY,
+                         line_spacing=LINE_SPACING_BODY):
     normal = doc.styles["Normal"]
     normal.font.name = FONT_NAME
-    normal.font.size = FONT_SIZE_BODY
+    normal.font.size = size
     _force_run_fonts(normal.element.get_or_add_rPr(), FONT_NAME)
     pf = normal.paragraph_format
-    pf.line_spacing = LINE_SPACING_BODY
+    pf.line_spacing = line_spacing
     pf.space_after = Pt(0)
     pf.space_before = Pt(0)
 
@@ -564,27 +593,51 @@ def _append_word_field(run, instr_text: str, *,
     run._element.append(fld_end)
 
 
-def _add_page_number_to_footer(section, *, hide_on_first=True):
-    if hide_on_first:
-        section.different_first_page_header_footer = True
+_PAGE_NUMBER_ALIGN = {
+    "left": WD_ALIGN_PARAGRAPH.LEFT,
+    "center": WD_ALIGN_PARAGRAPH.CENTER,
+    "right": WD_ALIGN_PARAGRAPH.RIGHT,
+}
 
-    footer = section.footer
-    footer.is_linked_to_previous = False
 
-    for p in list(footer.paragraphs):
+def _parse_page_number_position(position: str):
+    """"top-right" → ("top", RIGHT). Неизвестное значение — ValueError сразу,
+    а не тихий дефолт: опечатка в профиле не должна давать «почти верный» файл."""
+    vert, _, horiz = (position or "").partition("-")
+    if vert not in ("top", "bottom") or horiz not in _PAGE_NUMBER_ALIGN:
+        raise ValueError(
+            f"UniversityProfile.page_number_position={position!r}: ожидается "
+            "'<top|bottom>-<left|center|right>', например 'bottom-center' "
+            "или 'top-right'.")
+    return vert, _PAGE_NUMBER_ALIGN[horiz]
+
+
+def _add_page_number(section, *, hide_on_first=True,
+                     position="bottom-center", size=FONT_SIZE_PAGE_NUMBER):
+    vert, align = _parse_page_number_position(position)
+    # add_section() копирует sectPr предыдущей секции вместе с <w:titlePg/>
+    # титульника — без явного False первая страница основного текста
+    # (оглавление) брала пустой first-колонтитул и оставалась без номера.
+    section.different_first_page_header_footer = hide_on_first
+
+    part = section.header if vert == "top" else section.footer
+    part.is_linked_to_previous = False
+
+    for p in list(part.paragraphs):
         p.clear()
-    p = footer.paragraphs[0]
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p = part.paragraphs[0]
+    p.alignment = align
     p.paragraph_format.line_spacing = LINE_SPACING_CODE
 
     run = p.add_run()
-    _set_run_font(run, size=FONT_SIZE_PAGE_NUMBER)
+    _set_run_font(run, size=size)
     _append_word_field(run, "PAGE")
 
     if hide_on_first:
-        first_footer = section.first_page_footer
-        first_footer.is_linked_to_previous = False
-        for p in list(first_footer.paragraphs):
+        first = (section.first_page_header if vert == "top"
+                 else section.first_page_footer)
+        first.is_linked_to_previous = False
+        for p in list(first.paragraphs):
             p.clear()
 
 
@@ -605,7 +658,8 @@ def _align_const(name: str):
 
 
 def _configure_heading_style(doc: _Document, level: int, size_pt: int,
-                             align: str):
+                             align: str, *, line_spacing=LINE_SPACING_BODY,
+                             space_after_pt: float = 12):
     style = doc.styles[f"Heading {level}"]
     style.font.name = FONT_NAME
     style.font.size = Pt(size_pt)
@@ -615,9 +669,9 @@ def _configure_heading_style(doc: _Document, level: int, size_pt: int,
 
     pf = style.paragraph_format
     pf.alignment = _align_const(align)
-    pf.line_spacing = LINE_SPACING_BODY
+    pf.line_spacing = line_spacing
     pf.space_before = Pt(0)
-    pf.space_after = Pt(12)
+    pf.space_after = Pt(space_after_pt)
     pf.first_line_indent = Pt(0)
     pf.keep_with_next = True
 
@@ -693,6 +747,20 @@ class Report:
         if self._has_title_page:
             self._check_required(self._title)
         self._profile = profile
+        # Типографика из профиля. Pt/Cm от тех же чисел, что и прежние
+        # константы, — у ITMO/GOST байты XML не меняются.
+        self._body_size = Pt(profile.body_font_size)
+        self._line_spacing = profile.line_spacing
+        self._first_line_indent = Cm(profile.first_line_indent_cm)
+        self._space_block = Pt(profile.block_space_pt)
+        self._title_large = Pt(profile.title_size_large)
+        self._right_block_indent = Cm(profile.title_right_block_indent_cm)
+        _parse_page_number_position(profile.page_number_position)
+        if profile.title_student_layout not in ("group_line", "label_group"):
+            raise ValueError(
+                "UniversityProfile.title_student_layout="
+                f"{profile.title_student_layout!r}: ожидается "
+                "'group_line' или 'label_group'.")
         self._figure_counter = 0
         self._table_counter = 0
         self._formula_counter = 0
@@ -720,17 +788,19 @@ class Report:
             self._paths = paths(Path(project_root))
 
         # 1. Базовые стили
-        _ensure_normal_style(self._doc)
-        _configure_heading_style(self._doc, 1,
-                                 profile.heading_size_h1,
-                                 profile.heading_align_h1)
-        _configure_heading_style(self._doc, 2,
-                                 profile.heading_size_h2,
-                                 profile.heading_align_h2)
-        _configure_heading_style(self._doc, 3,
-                                 profile.heading_size_h3,
-                                 profile.heading_align_h3)
+        _ensure_normal_style(self._doc, size=self._body_size,
+                             line_spacing=self._line_spacing)
+        for level in (1, 2, 3):
+            _configure_heading_style(
+                self._doc, level,
+                getattr(profile, f"heading_size_h{level}"),
+                getattr(profile, f"heading_align_h{level}"),
+                line_spacing=self._line_spacing,
+                space_after_pt=profile.heading_space_after_pt,
+            )
 
+        page_number = dict(position=profile.page_number_position,
+                           size=Pt(profile.page_number_size))
         if self._has_title_page:
             # 2. Секция титульника (первая)
             section = self._doc.sections[0]
@@ -738,8 +808,11 @@ class Report:
             _apply_margins(section,
                            profile.title_margin_left, profile.title_margin_right,
                            profile.title_margin_top, profile.title_margin_bottom)
-            _add_page_number_to_footer(section, hide_on_first=True)
-            self._build_title_page()
+            _add_page_number(section, hide_on_first=True, **page_number)
+            if profile.title_builder is not None:
+                profile.title_builder(self)
+            else:
+                self._build_title_page()
 
             # 3. Новая секция для основного текста
             body_section = self._doc.add_section(WD_SECTION.NEW_PAGE)
@@ -747,7 +820,7 @@ class Report:
             _apply_margins(body_section,
                            profile.body_margin_left, profile.body_margin_right,
                            profile.body_margin_top, profile.body_margin_bottom)
-            _add_page_number_to_footer(body_section, hide_on_first=False)
+            _add_page_number(body_section, hide_on_first=False, **page_number)
         else:
             # Без титульника: единственная секция сразу с полями основного
             # текста; нумерация страниц видна с первой страницы.
@@ -756,7 +829,7 @@ class Report:
             _apply_margins(section,
                            profile.body_margin_left, profile.body_margin_right,
                            profile.body_margin_top, profile.body_margin_bottom)
-            _add_page_number_to_footer(section, hide_on_first=False)
+            _add_page_number(section, hide_on_first=False, **page_number)
         self._just_broke_page = True
 
     # --------------------------------------------------------
@@ -850,14 +923,41 @@ class Report:
         """Текстовый параграф — фасад _add_paragraph."""
         return self._add_paragraph(text, **kwargs)
 
+    def add_runs_paragraph(self, runs: Sequence[StyledRun], **kwargs):
+        """Абзац из нескольких StyledRun (метка подчёркнута, значение нет и т.п.)
+        — для profile.title_builder. kwargs: align, left_indent."""
+        return self._add_runs_paragraph(runs, **kwargs)
+
+    def add_bottom_block(self, lines: Sequence[str]):
+        """Строки по центру, прижатые к нижнему полю страницы (город/год на
+        титуле) — для profile.title_builder."""
+        return self._add_bottom_anchored_block(list(lines))
+
+    def add_blank_paragraphs(self, count: int) -> None:
+        """Пустые абзацы-разделители — для profile.title_builder."""
+        self._add_blank_paragraphs(count)
+
+    @property
+    def title_config(self) -> TitleConfig:
+        """TitleConfig после наложения env — для profile.title_builder."""
+        return self._title
+
     def set_run_font(self, run, **kwargs) -> None:
-        """Шрифт для run — фасад _set_run_font."""
+        """Шрифт для run — фасад _set_run_font. Без size — кегль основного
+        текста активного профиля."""
+        if kwargs.get("size") is None:
+            kwargs["size"] = self._body_size
         _set_run_font(run, **kwargs)
 
     @property
     def space_block(self):
-        """Межблочный интервал SPACE_BLOCK (для модулей)."""
-        return SPACE_BLOCK
+        """Межблочный интервал профиля (block_space_pt) для модулей."""
+        return self._space_block
+
+    @property
+    def body_size(self):
+        """Кегль основного текста профиля (Length) для модулей и title_builder."""
+        return self._body_size
 
     def embed_figure(self, image, caption: str, *,
                      width_cm: Optional[float] = None) -> int:
@@ -907,7 +1007,7 @@ class Report:
             pass
 
     def _make_paragraph(self, *, align=WD_ALIGN_PARAGRAPH.CENTER,
-                        line_spacing=LINE_SPACING_BODY,
+                        line_spacing=None,
                         space_before=Pt(0), space_after=Pt(0),
                         left_indent=None, first_line_indent=None):
         """Создаёт пустой параграф с заданным форматированием.
@@ -920,8 +1020,11 @@ class Report:
         ``space_after``, ``left_indent``, ``first_line_indent``) можно явно
         обнулить через ``_INHERIT`` чтобы оставить значение из стиля абзаца
         (нужно для list-параграфов: их ``w:before`` берётся из стиля
-        ``List Number`` / ``List Bullet``).
+        ``List Number`` / ``List Bullet``). ``line_spacing=None`` — интервал
+        основного текста профиля.
         """
+        if line_spacing is None:
+            line_spacing = self._line_spacing
         p = self._doc.add_paragraph()
         if align is not _INHERIT:
             p.alignment = align
@@ -939,10 +1042,10 @@ class Report:
         return p
 
     def _add_paragraph(self, text="", *, align=WD_ALIGN_PARAGRAPH.CENTER,
-                       size=FONT_SIZE_BODY, bold=False, italic=False,
+                       size=None, bold=False, italic=False,
                        underline=False, left_indent=None,
                        first_line_indent=None,
-                       line_spacing=LINE_SPACING_BODY,
+                       line_spacing=None,
                        space_before=Pt(0), space_after=Pt(0)):
         p = self._make_paragraph(align=align, line_spacing=line_spacing,
                                  space_before=space_before,
@@ -951,15 +1054,15 @@ class Report:
                                  first_line_indent=first_line_indent)
         if text:
             run = p.add_run(text)
-            _set_run_font(run, size=size, bold=bold, italic=italic,
-                          underline=underline)
+            _set_run_font(run, size=self._body_size if size is None else size,
+                          bold=bold, italic=italic, underline=underline)
         return p
 
     # Инлайновая математика: $...$ внутри прозы → нативное Word-уравнение.
     # \$ — литеральный знак доллара. (?<!\\) — не считать экранированный $.
     _INLINE_MATH_RE = re.compile(r"(?<!\\)\$(.+?)(?<!\\)\$", re.DOTALL)
 
-    def _append_inline(self, p, raw, *, size=FONT_SIZE_BODY, bold=False,
+    def _append_inline(self, p, raw, *, size=None, bold=False,
                        italic=False, underline=False):
         """Заполняет параграф p: проза + инлайновая математика из $...$.
 
@@ -968,6 +1071,8 @@ class Report:
         <m:oMath>; прозовые сегменты проходят _sanitize_prose. \\$ → '$'."""
         if not raw:
             return
+        if size is None:
+            size = self._body_size
 
         def _prose(s):
             if not s:
@@ -988,10 +1093,10 @@ class Report:
         _prose(raw[pos:])
 
     def add_inline_paragraph(self, raw="", *, align=WD_ALIGN_PARAGRAPH.CENTER,
-                             size=FONT_SIZE_BODY, bold=False, italic=False,
+                             size=None, bold=False, italic=False,
                              underline=False, left_indent=None,
                              first_line_indent=None,
-                             line_spacing=LINE_SPACING_BODY,
+                             line_spacing=None,
                              space_before=Pt(0), space_after=Pt(0)):
         """Как _add_paragraph, но текст поддерживает инлайновую математику $...$.
         Публичный core-сервис (используется text/task и math-модулем для where)."""
@@ -1017,7 +1122,7 @@ class Report:
         p = self._make_paragraph(align=align, first_line_indent=Pt(0),
                                  space_before=space_before, space_after=space_after)
         pre = p.add_run(prefix)
-        _set_run_font(pre)
+        _set_run_font(pre, size=self._body_size)
         self._append_inline(p, caption)
         return p
 
@@ -1028,7 +1133,7 @@ class Report:
             run = p.add_run(r.text)
             # Explicit None-check, не `or`-fallback: иначе Pt(0) (бывает
             # falsy) был бы перетёрт дефолтом.
-            run_size = r.size if r.size is not None else FONT_SIZE_BODY
+            run_size = r.size if r.size is not None else self._body_size
             _set_run_font(
                 run,
                 size=run_size,
@@ -1086,11 +1191,11 @@ class Report:
             p = cell.paragraphs[0]
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             pf = p.paragraph_format
-            pf.line_spacing = LINE_SPACING_BODY
+            pf.line_spacing = self._line_spacing
             pf.space_before = Pt(0)
             pf.space_after = Pt(0)
             run = p.add_run(text)
-            _set_run_font(run, size=FONT_SIZE_BODY)
+            _set_run_font(run, size=self._body_size)
 
         return table
 
@@ -1129,40 +1234,59 @@ class Report:
         work_type_text = cfg.work_type
         if cfg.work_number:
             work_type_text = f"{work_type_text} {cfg.work_number}".strip()
-        self._add_paragraph(work_type_text, size=FONT_SIZE_TITLE_LARGE,
+        self._add_paragraph(work_type_text, size=self._title_large,
                             bold=True)
         if cfg.discipline:
             self._add_paragraph(f"по дисциплине «{cfg.discipline}»",
-                                size=FONT_SIZE_TITLE_LARGE)
+                                size=self._title_large)
         if cfg.topic:
-            self._add_paragraph(cfg.topic, size=FONT_SIZE_TITLE_LARGE)
+            self._add_paragraph(cfg.topic, size=self._title_large)
         if cfg.variant:
             self._add_paragraph()
             self._add_paragraph(f"Вариант №{cfg.variant}",
-                                size=FONT_SIZE_TITLE_LARGE)
+                                size=self._title_large)
 
     def _title_student_block(self) -> None:
-        """Группа → "Выполнил(и): ФИО" с правым сдвигом."""
+        """Правый блок студента, раскладка — profile.title_student_layout:
+        group_line:  «Группа: …» → «Выполнил(и): ФИО», доп. имена ниже;
+        label_group: «Выполнила: ученица 9 «Б» класса» → все ФИО строками ниже."""
         cfg = self._title
-        self._add_runs_paragraph(
-            [StyledRun(f"Группа: {cfg.student_group}", underline=True)],
-            align=WD_ALIGN_PARAGRAPH.LEFT,
-            left_indent=_RIGHT_BLOCK_INDENT,
-        )
+        group_text = self._profile.title_group_template.format(
+            group=cfg.student_group)
         student_label = _resolve_student_label(cfg)
         names = cfg.student_names or ([cfg.student_name] if cfg.student_name else [])
-        first, *rest = names
-        self._add_runs_paragraph(
-            [
-                StyledRun(student_label, underline=True),
-                StyledRun(f": {first}"),
-            ],
-            align=WD_ALIGN_PARAGRAPH.LEFT,
-            left_indent=_RIGHT_BLOCK_INDENT,
-        )
-        # Дополнительные участники: визуально выравниваются под первое имя
-        # через немного больший left_indent (≈ ширина "Выполнили: " в TNR 14pt).
-        rest_indent = _RIGHT_BLOCK_INDENT + _RIGHT_BLOCK_REST_INDENT
+        block_indent = self._right_block_indent
+        # group_line: доп. имена — под текст после «Выполнили: » (ширина метки
+        # ≈ 2.2 см в TNR 14, пропорционально кеглю профиля).
+        rest_indent = block_indent + Cm(
+            _RIGHT_BLOCK_REST_INDENT.cm * self._profile.body_font_size / 14)
+
+        if self._profile.title_student_layout == "label_group":
+            self._add_runs_paragraph(
+                [
+                    StyledRun(student_label, underline=True),
+                    StyledRun(f": {group_text}"),
+                ],
+                align=WD_ALIGN_PARAGRAPH.LEFT,
+                left_indent=self._right_block_indent,
+            )
+            rest = names
+            rest_indent = block_indent
+        else:
+            self._add_runs_paragraph(
+                [StyledRun(group_text, underline=True)],
+                align=WD_ALIGN_PARAGRAPH.LEFT,
+                left_indent=self._right_block_indent,
+            )
+            first, *rest = names
+            self._add_runs_paragraph(
+                [
+                    StyledRun(student_label, underline=True),
+                    StyledRun(f": {first}"),
+                ],
+                align=WD_ALIGN_PARAGRAPH.LEFT,
+                left_indent=self._right_block_indent,
+            )
         for extra_name in rest:
             self._add_runs_paragraph(
                 [StyledRun(extra_name)],
@@ -1175,7 +1299,7 @@ class Report:
         cfg = self._title
         if not cfg.teacher_name:
             return
-        self._add_paragraph(left_indent=_RIGHT_BLOCK_INDENT,
+        self._add_paragraph(left_indent=self._right_block_indent,
                             align=WD_ALIGN_PARAGRAPH.LEFT)
         self._add_runs_paragraph(
             [
@@ -1183,7 +1307,7 @@ class Report:
                 StyledRun(":"),
             ],
             align=WD_ALIGN_PARAGRAPH.LEFT,
-            left_indent=_RIGHT_BLOCK_INDENT,
+            left_indent=self._right_block_indent,
         )
         parts = []
         if cfg.teacher_degree:
@@ -1194,7 +1318,7 @@ class Report:
         self._add_paragraph(
             " ".join(parts),
             align=WD_ALIGN_PARAGRAPH.LEFT,
-            left_indent=_RIGHT_BLOCK_INDENT,
+            left_indent=self._right_block_indent,
         )
 
     def _title_footer(self) -> None:
@@ -1239,12 +1363,12 @@ class Report:
             self._profile.toc_title,
             size=Pt(self._profile.heading_size_h1),
             bold=True,
-            space_after=Pt(12),
+            space_after=Pt(self._profile.heading_space_after_pt),
         )
 
         p = self._doc.add_paragraph()
         run = p.add_run()
-        _set_run_font(run)
+        _set_run_font(run, size=self._body_size)
         _append_word_field(
             run,
             ' TOC \\o "1-3" \\h \\z \\u ',
@@ -1283,7 +1407,7 @@ class Report:
         self.add_inline_paragraph(
             text,
             align=WD_ALIGN_PARAGRAPH.JUSTIFY,
-            first_line_indent=FIRST_LINE_INDENT,
+            first_line_indent=self._first_line_indent,
             bold=bold, italic=italic,
         )
 
@@ -1291,9 +1415,9 @@ class Report:
         self.add_inline_paragraph(
             text,
             align=WD_ALIGN_PARAGRAPH.JUSTIFY,
-            first_line_indent=FIRST_LINE_INDENT,
+            first_line_indent=self._first_line_indent,
             bold=True,
-            space_before=SPACE_BLOCK, space_after=SPACE_BLOCK,
+            space_before=self._space_block, space_after=self._space_block,
         )
 
     def code(self, code: str):
@@ -1377,7 +1501,7 @@ class Report:
         p = self._make_paragraph(
             align=WD_ALIGN_PARAGRAPH.CENTER,
             first_line_indent=Pt(0),
-            space_before=SPACE_BLOCK,
+            space_before=self._space_block,
         )
         run = p.add_run()
         if width_cm is not None:
@@ -1388,7 +1512,7 @@ class Report:
         self._add_caption(
             f"Рисунок {self._figure_counter} — ", caption,
             align=WD_ALIGN_PARAGRAPH.CENTER,
-            space_after=SPACE_BLOCK,
+            space_after=self._space_block,
         )
         return self._figure_counter
 
@@ -1429,7 +1553,7 @@ class Report:
             self._add_caption(
                 f"Таблица {self._table_counter} — ", caption,
                 align=WD_ALIGN_PARAGRAPH.LEFT,
-                space_before=SPACE_BLOCK,
+                space_before=self._space_block,
             )
 
         n_cols = max(len(r) for r in rows)
@@ -1537,10 +1661,10 @@ class Report:
             for item in items:
                 p = self._doc.add_paragraph(style=style_name)
                 pf = p.paragraph_format
-                pf.line_spacing = LINE_SPACING_BODY
+                pf.line_spacing = self._line_spacing
                 pf.space_after = Pt(0)
                 run = p.add_run(_sanitize_prose(item))
-                _set_run_font(run)
+                _set_run_font(run, size=self._body_size)
             return
         num_id = self._create_independent_num(abstract_id)
         for item in items:
