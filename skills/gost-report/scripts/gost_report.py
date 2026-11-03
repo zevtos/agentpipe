@@ -54,6 +54,7 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 
 from _paths import paths, _caller_file, _find_root
+from typography import split_emphasis, typograf
 
 
 # ============================================================
@@ -432,6 +433,7 @@ def _resolve_student_label(cfg: TitleConfig) -> str:
 # ============================================================
 
 _RFONTS_ATTRS = ("w:ascii", "w:hAnsi", "w:cs", "w:eastAsia")
+_RFONTS_THEME_ATTRS = ("w:asciiTheme", "w:hAnsiTheme", "w:cstheme", "w:eastAsiaTheme")
 
 
 def _force_run_fonts(rpr, font_name: str) -> None:
@@ -445,6 +447,10 @@ def _force_run_fonts(rpr, font_name: str) -> None:
         rpr.append(rfonts)
     for attr in _RFONTS_ATTRS:
         rfonts.set(qn(attr), font_name)
+    # Theme-атрибуты в шаблоне python-docx побеждают явный w:ascii: без этого
+    # часть заголовка (например, пробелы) уезжает в Calibri.
+    for attr in _RFONTS_THEME_ATTRS:
+        rfonts.attrib.pop(qn(attr), None)
 
 
 def _set_run_font(run, *, size=FONT_SIZE_BODY, bold=False, italic=False,
@@ -629,9 +635,18 @@ def _add_page_number(section, *, hide_on_first=True,
     p.alignment = align
     p.paragraph_format.line_spacing = LINE_SPACING_CODE
 
-    run = p.add_run()
-    _set_run_font(run, size=size)
-    _append_word_field(run, "PAGE")
+    # Каждая часть поля в своём run: если они в одном, LibreOffice теряет его
+    # шрифт и кегль, и номер страницы выходит полужирным кеглем основного текста.
+    for part in ("begin", "instr", "end"):
+        run = p.add_run()
+        _set_run_font(run, size=size)
+        if part == "instr":
+            el = OxmlElement("w:instrText")
+            el.text = "PAGE"
+        else:
+            el = OxmlElement("w:fldChar")
+            el.set(qn("w:fldCharType"), part)
+        run._element.append(el)
 
     if hide_on_first:
         first = (section.first_page_header if vert == "top"
@@ -655,6 +670,19 @@ def _apply_margins(section, left, right, top, bottom):
 
 def _align_const(name: str):
     return WD_ALIGN_PARAGRAPH.CENTER if name == "center" else WD_ALIGN_PARAGRAPH.LEFT
+
+
+def _suppress_hyphens(ppr) -> None:
+    """<w:suppressAutoHyphens/> на нужном месте схемы w:pPr: заголовки не переносят."""
+    ppr.insert_element_before(
+        OxmlElement("w:suppressAutoHyphens"),
+        "w:kinsoku", "w:wordWrap", "w:overflowPunct", "w:topLinePunct",
+        "w:autoSpaceDE", "w:autoSpaceDN", "w:bidi", "w:adjustRightInd",
+        "w:snapToGrid", "w:spacing", "w:ind", "w:contextualSpacing",
+        "w:mirrorIndents", "w:suppressOverlap", "w:jc", "w:textDirection",
+        "w:textAlignment", "w:textboxTightWrap", "w:outlineLvl", "w:divId",
+        "w:cnfStyle", "w:rPr", "w:sectPr", "w:pPrChange",
+    )
 
 
 def _configure_heading_style(doc: _Document, level: int, size_pt: int,
@@ -733,8 +761,13 @@ class Report:
                  profile: UniversityProfile = DEFAULT_PROFILE,
                  *,
                  title_page: bool = True,
-                 project_root: Optional[Union[str, Path]] = None):
+                 project_root: Optional[Union[str, Path]] = None,
+                 typography: bool = False,
+                 allow_dashes: bool = False):
         self._doc = Document()
+        self._typography = typography
+        self._allow_dashes = allow_dashes
+        self._saved_docx: Optional[Path] = None
         # Титульник можно отключить: параметр title_page=False или env
         # GOST_REPORT_NO_TITLE_PAGE=1. Env только отключает (не включает),
         # чтобы автоматизация могла гасить титул, не трогая build.py.
@@ -831,6 +864,54 @@ class Report:
                            profile.body_margin_top, profile.body_margin_bottom)
             _add_page_number(section, hide_on_first=False, **page_number)
         self._just_broke_page = True
+        if typography:
+            self._apply_typography()
+
+    def _apply_typography(self) -> None:
+        """Настройки docx для typography=True: язык, переносы, воздух вокруг заголовков."""
+        doc = self._doc
+        # Без русского языка документа Word и LibreOffice не переносят текст.
+        rpr = doc.styles.element.find(qn("w:docDefaults")).find(qn("w:rPrDefault")).find(qn("w:rPr"))
+        lang = rpr.find(qn("w:lang"))
+        if lang is None:
+            lang = OxmlElement("w:lang")
+            rpr.append(lang)
+        lang.set(qn("w:val"), "ru-RU")
+
+        settings = doc.settings.element
+        anchor = settings.find(qn("w:defaultTabStop"))
+        for tag, value in reversed((("w:autoHyphenation", "true"),
+                                    ("w:consecutiveHyphenLimit", "2"),
+                                    ("w:hyphenationZone", "284"),
+                                    ("w:doNotHyphenateCaps", "true"))):
+            el = OxmlElement(tag)
+            el.set(qn("w:val"), value)
+            anchor.addnext(el)
+        # Режим Word 2013+: иначе неразрывные пробелы не тянутся при выключке по ширине.
+        for compat in settings.iter(qn("w:compatSetting")):
+            if compat.get(qn("w:name")) == "compatibilityMode":
+                compat.set(qn("w:val"), "15")
+
+        doc.styles["Normal"].paragraph_format.widow_control = True
+        # Заголовок ближе к своему тексту, чем к предыдущему: отступ сверху втрое
+        # больше нижнего. 1,15 — естественная строка Times при одинарном интервале.
+        line = self._profile.body_font_size * 1.15 * self._line_spacing
+        for level in (1, 2, 3):
+            style = doc.styles[f"Heading {level}"]
+            pf = style.paragraph_format
+            pf.line_spacing = 1.0
+            pf.keep_together = True
+            pf.space_before = Pt(0 if level == 1 else round(line))
+            pf.space_after = Pt(round(line / 2 if level == 1 else line / 3))
+            _suppress_hyphens(style.element.get_or_add_pPr())
+
+    def _clean(self, text: str) -> str:
+        """Единая обработка прозы: санитайз тире и типографика, если они включены."""
+        if not self._allow_dashes:
+            text = _sanitize_prose(text)
+        if self._typography:
+            text = typograf(text, dashes=self._allow_dashes)
+        return text
 
     # --------------------------------------------------------
     # Внутреннее: построение титульника
@@ -906,8 +987,8 @@ class Report:
         return self._printable_cm()
 
     def sanitize(self, text: str) -> str:
-        """Санитайз прозы (подписи/контент) — фасад _sanitize_prose."""
-        return _sanitize_prose(text)
+        """Обработка прозы (подписи/контент) для модулей, см. _clean."""
+        return self._clean(text)
 
     def next_formula_number(self) -> int:
         """Следующий номер формулы (для math-модуля)."""
@@ -1077,9 +1158,12 @@ class Report:
         def _prose(s):
             if not s:
                 return
-            run = p.add_run(_sanitize_prose(s).replace("\\$", "$"))
-            _set_run_font(run, size=size, bold=bold, italic=italic,
-                          underline=underline)
+            s = self._clean(s).replace("\\$", "$")
+            parts = split_emphasis(s) if self._typography else [(s, False, False)]
+            for chunk, strong, emphasis in parts:
+                run = p.add_run(chunk)
+                _set_run_font(run, size=size, bold=bold or strong,
+                              italic=italic or emphasis, underline=underline)
 
         if "$" not in raw:
             _prose(raw)
@@ -1116,7 +1200,7 @@ class Report:
         Без '$' — один run (байты как раньше)."""
         if "$" not in caption:
             return self._add_paragraph(
-                prefix + _sanitize_prose(caption), align=align,
+                prefix + self._clean(caption), align=align,
                 first_line_indent=Pt(0),
                 space_before=space_before, space_after=space_after)
         p = self._make_paragraph(align=align, first_line_indent=Pt(0),
@@ -1389,20 +1473,42 @@ class Report:
         # следующую, а заголовок ещё на одну, и между ними пустая страница.
         if self._profile.h1_new_page and not self._just_broke_page:
             p.paragraph_format.page_break_before = True
-        text = _sanitize_prose(text)
+        text = self._clean(text)
         text_to_render = text.upper() if self._profile.h1_uppercase else text
         run = p.add_run(text_to_render)
         _set_run_font(run, size=Pt(self._profile.heading_size_h1), bold=True)
+        if self._typography:
+            if self._profile.h1_uppercase:
+                # Прописным нужна разрядка 5% кегля. w:spacing в двадцатых долях пункта.
+                spacing = OxmlElement("w:spacing")
+                spacing.set(qn("w:val"), str(self._profile.heading_size_h1))
+                run._element.get_or_add_rPr().insert_element_before(
+                    spacing, "w:w", "w:kern", "w:position", "w:sz", "w:szCs",
+                    "w:highlight", "w:u", "w:effect", "w:bdr", "w:shd",
+                    "w:fitText", "w:vertAlign", "w:rtl", "w:cs", "w:em",
+                    "w:lang", "w:eastAsianLayout", "w:specVanish", "w:oMath",
+                )
+            # Заголовок становится названием PDF.
+            if not self._doc.core_properties.title:
+                self._doc.core_properties.title = " ".join(text.split())
         self._just_broke_page = False
+
+    def subtitle(self, text: str):
+        """Подзаголовок под h1: курсив по центру, одинарный интервал, без переносов.
+        Перевод строки в тексте разбивает его по смыслу."""
+        p = self.add_inline_paragraph(text, italic=True, line_spacing=1.0)
+        p.paragraph_format.keep_with_next = True
+        _suppress_hyphens(p._p.get_or_add_pPr())
+        return p
 
     def h2(self, text: str):
         p = self._doc.add_paragraph(style="Heading 2")
-        run = p.add_run(_sanitize_prose(text))
+        run = p.add_run(self._clean(text))
         _set_run_font(run, size=Pt(self._profile.heading_size_h2), bold=True)
 
     def h3(self, text: str):
         p = self._doc.add_paragraph(style="Heading 3")
-        run = p.add_run(_sanitize_prose(text))
+        run = p.add_run(self._clean(text))
         _set_run_font(run, size=Pt(self._profile.heading_size_h3), bold=True)
 
     def text(self, text: str, *, bold=False, italic=False):
@@ -1666,7 +1772,7 @@ class Report:
                 pf = p.paragraph_format
                 pf.line_spacing = self._line_spacing
                 pf.space_after = Pt(0)
-                run = p.add_run(_sanitize_prose(item))
+                run = p.add_run(self._clean(item))
                 _set_run_font(run, size=self._body_size)
             return
         num_id = self._create_independent_num(abstract_id)
@@ -1706,6 +1812,7 @@ class Report:
         self._doc.save(str(target))
         _strip_thumbnail_part(target)
         target = target.resolve()
+        self._saved_docx = target
 
         # Картинки уже встроены байтами в .docx — tmp-PNG модулей больше не нужны.
         self._cleanup()
@@ -1724,7 +1831,8 @@ class Report:
                 if value is self._profile and var_name.endswith("_PROFILE"):
                     profile_name = var_name
                     break
-            _validate.write_sentinel(target, profile_name=profile_name)
+            _validate.write_sentinel(target, profile_name=profile_name,
+                                     allow_dashes=self._allow_dashes)
             violations = _validate.validate_docx(target)
         except Exception as e:
             sys.stderr.write(
@@ -1741,6 +1849,20 @@ class Report:
                 _validate.format_error(target, violations)
             )
         return target
+
+    def export_pdf(self, path: Optional[Union[str, Path]] = None,
+                   *, check: bool = True) -> Path:
+        """PDF из сохранённого .docx через LibreOffice с русскими переносами.
+        Без path кладёт файл рядом с .docx. check=True печатает в stderr дефекты
+        вёрстки: висячие предлоги, дыры в строках, подмену шрифта (см. pdf_export)."""
+        if self._saved_docx is None:
+            raise RuntimeError("Сначала r.save(): export_pdf конвертирует сохранённый .docx.")
+        import pdf_export
+        pdf = pdf_export.export_pdf(self._saved_docx, path)
+        if check:
+            for issue in pdf_export.check_pdf(pdf, font=FONT_NAME):
+                sys.stderr.write(f"gost-report pdf warn: {issue}\n")
+        return pdf
 
     @property
     def doc(self) -> _Document:

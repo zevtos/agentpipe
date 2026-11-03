@@ -138,7 +138,8 @@ def _sentinel_path(docx_path: Path) -> Path:
 
 
 def write_sentinel(docx_path: Path, *, profile_name: str = "",
-                   generator_version: str = "") -> None:
+                   generator_version: str = "",
+                   allow_dashes: bool = False) -> None:
     payload = {
         "version": SENTINEL_VERSION,
         "generator": "gost_report",
@@ -147,6 +148,9 @@ def write_sentinel(docx_path: Path, *, profile_name: str = "",
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "docx": str(docx_path),
     }
+    # Report(allow_dashes=True): тире требует само задание, Stop-хук это видит.
+    if allow_dashes:
+        payload["allow_dashes"] = True
     sentinel = _sentinel_path(docx_path)
     sentinel.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False),
@@ -492,8 +496,11 @@ def validate_docx(path: Path) -> List[Violation]:
             tier=TIER_FAIL, code="read-failed",
             message=f"не смог открыть .docx: {e}",
         )]
+    allow_dashes = bool((read_sentinel(path) or {}).get("allow_dashes"))
     violations: List[Violation] = []
     for check in _ALL_CHECKS:
+        if allow_dashes and check is _check_dashes:
+            continue
         violations.extend(_safe_run_check(check, doc))
     return violations
 
