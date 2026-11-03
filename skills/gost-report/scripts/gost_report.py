@@ -1383,9 +1383,12 @@ class Report:
         """Заголовок 1 уровня. Поведение управляется профилем:
         h1_new_page (новая страница), h1_uppercase (ВЕРХНИЙ регистр).
         """
-        if self._profile.h1_new_page and not self._just_broke_page:
-            self.page_break()
         p = self._doc.add_paragraph(style="Heading 1")
+        # «С новой страницы» — свойство самого заголовка, не абзац с разрывом:
+        # если предыдущая страница заполнена до конца, такой абзац уходит на
+        # следующую, а заголовок ещё на одну, и между ними пустая страница.
+        if self._profile.h1_new_page and not self._just_broke_page:
+            p.paragraph_format.page_break_before = True
         text = _sanitize_prose(text)
         text_to_render = text.upper() if self._profile.h1_uppercase else text
         run = p.add_run(text_to_render)

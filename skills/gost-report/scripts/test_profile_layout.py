@@ -17,6 +17,10 @@ What it covers:
                 «Выполнила: <group>» with names below; title_builder replaces
                 the built-in title layout.
   validation  — a typo in page_number_position / title_student_layout raises.
+  h1 breaks   — h1_new_page sets pageBreakBefore on the Heading 1 paragraph
+                instead of a break-only paragraph before it (regression: that
+                paragraph slid onto the next page and left it blank); none
+                after toc() / page_break(), none with h1_new_page=False.
   env         — GOST_REPORT_IGNORE_GLOBAL_CONFIG=1 in a subject .gost-report.env
                 stops the owner's global config from leaking onto the title.
 
@@ -179,6 +183,39 @@ def test_bad_values_raise():
         raise AssertionError(f"{bad} must raise ValueError")
 
 
+def _h1_layout(profile, name):
+    """[(text, page_break_before, previous paragraph is break-only)] по h1."""
+    r = G.Report(G.TitleConfig(**TITLE), profile=profile, project_root=_TMP)
+    r.toc()
+    r.h1("Введение")
+    r.text("Абзац.")
+    r.h1("1 Раздел")
+    r.text("Абзац.")
+    r.page_break()
+    r.h1("2 Раздел")
+    r.text("Абзац.")
+    doc = _xml(zipfile.ZipFile(r.save(_TMP / f"{name}.docx")), "word/document.xml")
+    paras = re.findall(r'<w:p[ >].*?</w:p>', doc, re.S)
+    break_only = ['w:type="page"' in p and "<w:t" not in p for p in paras]
+    return [("".join(re.findall(r'<w:t[^>]*>([^<]*)', p)),
+             "<w:pageBreakBefore/>" in p, i > 0 and break_only[i - 1])
+            for i, p in enumerate(paras) if '<w:pStyle w:val="Heading1"/>' in p]
+
+
+def test_h1_page_break_before():
+    assert _h1_layout(SCHOOL, "h1-break") == [
+        ("Введение", False, True),     # TOC page ends with its own break
+        ("1 Раздел", True, False),     # property on the heading, no break paragraph
+        ("2 Раздел", False, True),     # explicit page_break(): no double break
+    ]
+    from dataclasses import replace
+    assert _h1_layout(replace(SCHOOL, h1_new_page=False), "h1-flow") == [
+        ("Введение", False, True),
+        ("1 Раздел", False, False),
+        ("2 Раздел", False, True),
+    ]
+
+
 def test_ignore_global_config():
     cfg = _TMP / "global.env"
     cfg.write_text('GOST_REPORT_STUDENT_NAME="Владелец В.В."\n'
@@ -214,6 +251,8 @@ def main() -> int:
     check("title: label_group layout", test_label_group_title)
     check("title: title_builder replaces built-in layout", test_title_builder)
     check("validation: bad position / layout raise", test_bad_values_raise)
+    check("h1: page_break_before on the heading, no break paragraph",
+          test_h1_page_break_before)
     check("env: IGNORE_GLOBAL_CONFIG blocks owner's global config",
           test_ignore_global_config)
 
