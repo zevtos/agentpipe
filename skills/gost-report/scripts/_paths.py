@@ -57,15 +57,18 @@ def _caller_file() -> Optional[Path]:
     _paths.py, но и весь scripts/ — иначе при вызове paths() из Report.__init__
     мы возьмём gost_report.py вместо user-скрипта."""
     frame = sys._getframe(1)
-    skill_scripts_dir = str(Path(__file__).resolve().parent)
+    skill_scripts_dir = Path(__file__).resolve().parent
     while frame is not None:
         f = frame.f_globals.get("__file__")
         if f:
-            f_resolved = str(Path(f).resolve())
+            f_resolved = Path(f).resolve()
             # Пропускаем любой файл внутри скилл-scripts/ (gost_report.py,
-            # _paths.py, любые будущие helper-модули скилла).
-            if not f_resolved.startswith(skill_scripts_dir + "/") and \
-               f_resolved != skill_scripts_dir:
+            # _paths.py, любые будущие helper-модули скилла). Сравнение через
+            # Path.parents, а не через строковый префикс с "/": на Windows
+            # разделитель "\", и префикс не совпадал, так что caller'ом
+            # считался сам gost_report.py, а корнем проекта домашняя папка.
+            if f_resolved != skill_scripts_dir and \
+               skill_scripts_dir not in f_resolved.parents:
                 return Path(f)
         frame = frame.f_back
     return None
