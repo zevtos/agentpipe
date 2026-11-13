@@ -19,8 +19,9 @@ What it covers:
   validation  — a typo in page_number_position / title_student_layout raises.
   h1 breaks   — h1_new_page sets pageBreakBefore on the Heading 1 paragraph
                 instead of a break-only paragraph before it (regression: that
-                paragraph slid onto the next page and left it blank); none
-                after toc() / page_break(), none with h1_new_page=False.
+                paragraph slid onto the next page and left it blank).
+                toc() / page_break() end up as the same property on the next
+                paragraph, with no break run left in the document.
   env         — GOST_REPORT_IGNORE_GLOBAL_CONFIG=1 in a subject .gost-report.env
                 stops the owner's global config from leaking onto the title.
 
@@ -195,6 +196,7 @@ def _h1_layout(profile, name):
     r.h1("2 Раздел")
     r.text("Абзац.")
     doc = _xml(zipfile.ZipFile(r.save(_TMP / f"{name}.docx")), "word/document.xml")
+    assert 'w:type="page"' not in doc, "page_break() must not leave a break run"
     paras = re.findall(r'<w:p[ >].*?</w:p>', doc, re.S)
     break_only = ['w:type="page"' in p and "<w:t" not in p for p in paras]
     return [("".join(re.findall(r'<w:t[^>]*>([^<]*)', p)),
@@ -204,15 +206,15 @@ def _h1_layout(profile, name):
 
 def test_h1_page_break_before():
     assert _h1_layout(SCHOOL, "h1-break") == [
-        ("Введение", False, True),     # TOC page ends with its own break
+        ("Введение", True, False),     # break after toc() moved onto the heading
         ("1 Раздел", True, False),     # property on the heading, no break paragraph
-        ("2 Раздел", False, True),     # explicit page_break(): no double break
+        ("2 Раздел", True, False),     # explicit page_break(): same property
     ]
     from dataclasses import replace
     assert _h1_layout(replace(SCHOOL, h1_new_page=False), "h1-flow") == [
-        ("Введение", False, True),
+        ("Введение", True, False),
         ("1 Раздел", False, False),
-        ("2 Раздел", False, True),
+        ("2 Раздел", True, False),
     ]
 
 

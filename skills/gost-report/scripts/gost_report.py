@@ -798,6 +798,7 @@ class Report:
         self._table_counter = 0
         self._formula_counter = 0
         self._just_broke_page = False
+        self._break_paragraphs: list = []
         self._next_num_id = 100
 
         # Подключаемые модули (r.plot, r.diagram, …). discover() лёгкий — тянет
@@ -1786,10 +1787,49 @@ class Report:
         self._list(items, style_name="List Bullet")
 
     def page_break(self):
+        """Следующий блок начнётся с новой страницы.
+
+        В готовом файле это свойство «с новой страницы» на следующем абзаце,
+        а не абзац с разрывом: `save()` переносит его через
+        `_resolve_page_breaks()`, потому что на момент вызова следующего
+        блока ещё нет.
+        """
         p = self._doc.add_paragraph()
         run = p.add_run()
         run.add_break(WD_BREAK.PAGE)
+        self._break_paragraphs.append(p._p)
         self._just_broke_page = True
+
+    def _resolve_page_breaks(self) -> None:
+        """Заменяет абзацы-разрывы от `page_break()` на `pageBreakBefore`
+        у следующего блока (у таблицы — в первом абзаце первой ячейки).
+
+        Абзац с разрывом занимает строку: на заполненной до конца странице он
+        уезжает на следующую и оставляет пустую. Разрыв, после которого ничего
+        нет, остаётся как есть. Два разрыва подряд дают пустую страницу: первый
+        абзац теряет `<w:br>` и остаётся пустым, с тем же свойством.
+        """
+        pending, self._break_paragraphs = self._break_paragraphs, []
+        for br_p in pending:
+            if br_p.getparent() is None:
+                continue
+            target = br_p.getnext()
+            while target is not None and target.tag not in (qn("w:p"), qn("w:tbl")):
+                target = target.getnext()
+            if target is None:
+                self._break_paragraphs.append(br_p)
+                continue
+            if target.tag == qn("w:tbl"):
+                target = next(target.iter(qn("w:p")), None)
+                if target is None:
+                    self._break_paragraphs.append(br_p)
+                    continue
+            target.get_or_add_pPr().get_or_add_pageBreakBefore()
+            if br_p.find(qn("w:pPr") + "/" + qn("w:pageBreakBefore")) is None:
+                br_p.getparent().remove(br_p)
+            else:
+                for r in br_p.findall(qn("w:r")):
+                    br_p.remove(r)
 
     def save(self, path: Optional[Union[str, Path]] = None) -> Path:
         """Сохранить .docx. Если path не задан — `<project>/docs/report.docx`.
@@ -1808,6 +1848,7 @@ class Report:
             p = Path(path)
             target = p if p.is_absolute() else self._paths.docs / p
         target.parent.mkdir(parents=True, exist_ok=True)
+        self._resolve_page_breaks()
         _strip_python_docx_fingerprints(self._doc)
         self._doc.save(str(target))
         _strip_thumbnail_part(target)
