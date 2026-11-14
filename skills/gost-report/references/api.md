@@ -310,7 +310,7 @@ Report(title=None, profile=None, *, title_page=True, project_root=None,
 
 ### Текст и списки
 
-- `r.text(text, *, bold, italic, markup=None, lead=None, indent=True, align=None)`: `lead="Тема."` — жирное начало абзаца; `markup=True` — `**жирный**` и `*курсив*` без режима typography.
+- `r.text(text, *, bold, italic, markup=None, lead=None, indent=True, align=None, keep_with_next=False)`: `lead="Тема."` — жирное начало абзаца; `markup=True` — `**жирный**` и `*курсив*` без режима typography; `keep_with_next=True` — абзац уходит на страницу вместе со следующим блоком (строка «Глава 2. … (14–17 с.)» перед таблицей). В Markdown — `{.keep}` в конце абзаца.
 - `r.numbered(items, nested="bullet")`, `r.bullet(items, nested="numbered")`, `r.lettered(items, nested="numbered")`. Пункт — строка или `("текст", [вложенные пункты])`. Вид вложенного списка — `nested`. Маркеры и раскладка — стиль (`list_layout`, `bullet_char`, `numbered_format`, `lettered_format`, `list_letters`). Если стиль их не меняет и вложенности нет — прежний путь через стили Word «List Number/Bullet». «а)», «б)» пишутся текстом, а не нумерацией Word: в Word нет алфавита без ё, з, й, о, ч, ъ, ы, ь.
 - `r.note(text | [тексты], label=None)`, `r.example(...)`: «Примечание – Текст» с абзацного отступа; несколько — «Примечания:» и «1. Текст».
 - `r.blank(n)` — пустые строки. `r.subtitle(text, *, italic, bold, line_spacing, space_after)` — дефолты из `subtitle_*` стиля.
@@ -333,7 +333,7 @@ Report(title=None, profile=None, *, title_page=True, project_root=None,
 
 ### Реферат и приложения
 
-- `r.keywords(words)` — прописными, через запятые, без абзацного отступа, без переносов, без точки; стиль абзаца `Keywords`; вне `keywords_min…keywords_max` — предупреждение.
+- `r.keywords(words)` — прописными, через запятые, без абзацного отступа, без переносов, без точки, дефис внутри слов неразрывный (`<w:noBreakHyphen/>`: «БИЗНЕС-ПРОЦЕСС» не рвётся); стиль абзаца `Keywords`; вне `keywords_min…keywords_max` — предупреждение.
 - `r.volume_line(template=None, **числа)` — строка объёма по `volume_template`. Рисунки, таблицы, источники `r.bib`, приложения считаются в `r.save()`; `{pages}` — поле Word NUMPAGES, его результат считает проход вёрстки. `pages=58` и т. п. — свои числа.
 - `r.appendix(title, status="обязательное", *, letter=None, label=None) → буква`: с новой страницы, по центру «ПРИЛОЖЕНИЕ А», «(обязательное)», заголовок с прописной; в оглавлении одной записью. Дальше нумерация «А.1», кегль `appendix_font_size`, пока не встретится h1.
 

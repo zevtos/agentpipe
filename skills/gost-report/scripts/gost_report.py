@@ -54,7 +54,7 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 
 from _paths import paths, _caller_file, _find_root
-from typography import (glue_short_words, normalize_dashes, required_nbsp,
+from typography import (NBHY, glue_short_words, normalize_dashes, required_nbsp,
                         split_emphasis, typograf)
 
 
@@ -1560,6 +1560,29 @@ class Report:
         kwargs.setdefault("font", self._font)
         _set_run_font(run, **kwargs)
 
+    def _text_run(self, p, text: str, **fmt):
+        """Run с текстом и шрифтом. Неразрывный дефис (U+2011 от nbsp="required"
+        и r.keywords) пишется элементом <w:noBreakHyphen/>: Word рисует его
+        глифом обычного дефиса и не переносит строку на нём. Возвращает первый run."""
+        if NBHY not in text:
+            run = p.add_run(text)
+            self._font_run(run, **fmt)
+            return run
+        first = None
+        parts = text.split(NBHY)
+        for k, part in enumerate(parts):
+            run = p.add_run(part) if part else p.add_run()
+            self._font_run(run, **fmt)
+            if k < len(parts) - 1:
+                run._r.append(OxmlElement("w:noBreakHyphen"))
+            first = first or run
+        return first
+
+    def add_text_runs(self, p, text: str, **fmt):
+        """Публичный фасад _text_run для модулей (запись списка источников)."""
+        fmt.setdefault("size", self._text_size())
+        return self._text_run(p, text, **fmt)
+
     def _text_size(self):
         """Кегль прозы в текущем месте документа: в приложении —
         profile.appendix_font_size, если задан."""
@@ -1687,8 +1710,7 @@ class Report:
                                  left_indent=left_indent,
                                  first_line_indent=first_line_indent)
         if text:
-            run = p.add_run(text)
-            self._font_run(run, size=self._text_size() if size is None else size,
+            self._text_run(p, text, size=self._text_size() if size is None else size,
                            bold=bold, italic=italic, underline=underline)
         return p
 
@@ -1719,8 +1741,7 @@ class Report:
             s = clean(s).replace("\\$", "$")
             parts = split_emphasis(s) if use_markup else [(s, False, False)]
             for chunk, strong, emphasis in parts:
-                run = p.add_run(chunk)
-                self._font_run(run, size=size, bold=bold or strong,
+                self._text_run(p, chunk, size=size, bold=bold or strong,
                                italic=italic or emphasis, underline=underline)
 
         if "$" not in raw:
@@ -2188,10 +2209,10 @@ class Report:
             text_to_render = text
         if number:
             text_to_render = f"{number}{prof.heading_number_sep}{text_to_render}"
-        run = p.add_run(text_to_render)
-        self._font_run(run, size=Pt(getattr(prof, f"heading_size_h{level}")),
-                       bold=getattr(prof, f"heading_bold_h{level}"),
-                       italic=getattr(prof, f"heading_italic_h{level}"))
+        run = self._text_run(p, text_to_render,
+                             size=Pt(getattr(prof, f"heading_size_h{level}")),
+                             bold=getattr(prof, f"heading_bold_h{level}"),
+                             italic=getattr(prof, f"heading_italic_h{level}"))
         # Два заголовка подряд: интервал между ними один, а не сумма
         # «после» первого и «до» второго (пропуск одной строки по ГОСТ).
         if (self._prev_kind == "heading"
@@ -2277,14 +2298,17 @@ class Report:
     # ---- проза ----
     def text(self, text: str, *, bold=False, italic=False,
              markup: Optional[bool] = None, lead: Optional[str] = None,
-             indent: bool = True, align: Optional[str] = None):
+             indent: bool = True, align: Optional[str] = None,
+             keep_with_next: bool = False):
         """Абзац основного текста: по ширине, с абзацного отступа. Поддерживает
         инлайновую математику $...$ (LaTeX → нативное уравнение).
 
         markup=True — **жирный** и *курсив* внутри текста (по умолчанию как в
         профиле: markup / typography). lead="Тема." — жирное начало абзаца
         («**Тема.** Автоматизация…»). indent=False — без абзацного отступа;
-        align="left"/"center"/"right"/"justify"."""
+        align="left"/"center"/"right"/"justify". keep_with_next=True — абзац
+        не остаётся последним на странице, а уходит вместе со следующим блоком
+        (строка-заголовок перед таблицей: запрет висячего заголовка)."""
         p = self._make_paragraph(
             align=_align_const(align) if align else WD_ALIGN_PARAGRAPH.JUSTIFY,
             first_line_indent=self._first_line_indent if indent else Pt(0),
@@ -2293,6 +2317,8 @@ class Report:
             run = p.add_run(self._clean(lead.rstrip()) + " ")
             self._font_run(run, size=self._text_size(), bold=True, italic=italic)
         self._append_inline(p, text, bold=bold, italic=italic, markup=markup)
+        if keep_with_next:
+            p.paragraph_format.keep_with_next = True
         self._prev_kind = "text"
         return p
 
@@ -2908,6 +2934,8 @@ class Report:
         text = ", ".join(items)
         if uppercase:
             text = text.upper()
+        # «Без переноса слов» (прил. 9 МБИ): «БИЗНЕС-ПРОЦЕСС» не рвётся на дефисе.
+        text = re.sub(r"(?<=\w)-(?=\w)", NBHY, text)
         p = self._make_paragraph(align=_align_const(prof.keywords_align),
                                  first_line_indent=Pt(0))
         p.style = self._ensure_paragraph_style("Keywords")
@@ -3217,8 +3245,13 @@ class Report:
         import pdf_export
         pdf = pdf_export.export_pdf(self._saved_docx, path)
         if check:
+            # nbsp="required" сознательно не клеит предлоги: висячий предлог
+            # в таком стиле не дефект, а выбор положения.
+            skip = ({"hanging-word"} if not self._typography
+                    and self._profile.nbsp == "required" else set())
             for issue in pdf_export.check_pdf(pdf, font=self._font):
-                sys.stderr.write(f"gost-report pdf warn: {issue}\n")
+                if issue.code not in skip:
+                    sys.stderr.write(f"gost-report pdf warn: {issue}\n")
         return pdf
 
     @property

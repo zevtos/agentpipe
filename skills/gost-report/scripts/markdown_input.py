@@ -11,6 +11,8 @@
     # Реферат {.notoc}              без строки в оглавлении; {-} — без номера
     Абзац текста, **жирный**, *курсив*, $x^2$, ссылка [@ivanov2020; @gost7_32].
     **Тема.** Абзац с жирным началом.
+    **Глава 2.** Проектирование (14–17 с.) {.keep}   не отрывать от следующего блока;
+                                    также {.noindent}, {align=center}
     - пункт / * пункт / – пункт     → r.bullet; 1. / 1) → r.numbered; а) → r.lettered
       1) вложенный (отступ 2+ пробела)
     > Примечание к тексту           → r.note; несколько абзацев «>» → «Примечания:»
@@ -149,7 +151,8 @@ class _Renderer:
             buf.append(lines[i].strip())
             i += 1
         if buf:
-            self.r.text(self.inline(" ".join(buf)), markup=True)
+            text, kw = _paragraph_attrs(" ".join(buf))
+            self.r.text(self.inline(text), markup=True, **kw)
         return i
 
     @staticmethod
@@ -364,6 +367,29 @@ class _Renderer:
         paras = [self.inline(p) for p in paras]
         self.r.note(paras[0] if len(paras) == 1 else paras)
         return i
+
+
+_PARA_ATTRS = re.compile(r"\s*\{([^{}]*)\}\s*$")
+
+
+def _paragraph_attrs(text: str):
+    """Атрибуты абзаца в конце: «… {.keep}» — не отрывать от следующего блока,
+    {.noindent} — без абзацного отступа, {align=center}. Фигурные скобки с
+    чем-то другим остаются текстом."""
+    m = _PARA_ATTRS.search(text)
+    if not m:
+        return text, {}
+    kw: Dict[str, Any] = {}
+    for key, value in _attrs(m.group(1)).items():
+        if key in ("keep", "keepnext", "keep_with_next") and value is True:
+            kw["keep_with_next"] = True
+        elif key == "noindent" and value is True:
+            kw["indent"] = False
+        elif key == "align" and value in ("left", "center", "right", "justify"):
+            kw["align"] = value
+        else:
+            return text, {}
+    return text[:m.start()].rstrip(), kw
 
 
 _WHERE_ITEM = re.compile(r"^\s*(\$[^$]+\$|\S+)\s+[–—-]\s+(.+?)\s*[;.]?\s*$")

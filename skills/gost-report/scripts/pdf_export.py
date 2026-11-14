@@ -153,6 +153,7 @@ def _prepare_for_libreoffice(docx: Path, tmp: Path) -> Path:
 
     WORD JOINER вокруг знака запрещает перенос внутри «400–430» и «АИ-98». В Word
     у этих знаков такого средства нет, а в .docx эти символы только мешали бы.
+    Неразрывный дефис Word (<w:noBreakHyphen/>) становится тем же дефисом в WJ.
     """
     def fix(m: "re.Match[str]") -> str:
         text = re.sub(r"(?<=\w)–(?=\w)", f"{WORD_JOINER}–{WORD_JOINER}", m[2])
@@ -165,7 +166,13 @@ def _prepare_for_libreoffice(docx: Path, tmp: Path) -> Path:
             data = zin.read(item.filename)
             if item.filename == "word/document.xml":
                 xml = data.decode("utf-8")
-                data = re.sub(r"(<w:t(?: [^>]*)?>)([^<]*)(</w:t>)", fix, xml).encode("utf-8")
+                xml = re.sub(r"(<w:t(?: [^>]*)?>)([^<]*)(</w:t>)", fix, xml)
+                # Неразрывный дефис Word LibreOffice рисует символом U+2011, а его
+                # нет в Times New Roman: глиф приходит из другого шрифта. Обычный
+                # дефис между WORD JOINER не переносится так же.
+                xml = re.sub(r"<w:noBreakHyphen\s*/>",
+                             f"<w:t>{WORD_JOINER}-{WORD_JOINER}</w:t>", xml)
+                data = xml.encode("utf-8")
             zout.writestr(item, data)
     return out
 
@@ -289,7 +296,9 @@ def check_lines(lines: List[Line]) -> List[Issue]:
         if full(line):
             if tokens[-1].lower() in SHORT_WORDS:
                 issues.append(Issue("hanging-word", line.page, f"строка кончается на «{tokens[-1]}»: «…{' '.join(tokens[-3:])}»"))
-            if tokens[-1].endswith("–") or re.search(r"\d-$", tokens[-1]):
+            # «400–» в конце строки — разорванный диапазон; одиночное «–» —
+            # тире между словами (стиль МБИ), ему в конце строки место.
+            if (tokens[-1].endswith("–") and tokens[-1] != "–") or re.search(r"\d-$", tokens[-1]):
                 issues.append(Issue("broken-range", line.page, f"перенос внутри диапазона: «{tokens[-1]}»"))
             gaps = [b[1] - a[2] for a, b in zip(line.words, line.words[1:])]
             if gaps and max(gaps) > _WIDE_GAP_EM * em:

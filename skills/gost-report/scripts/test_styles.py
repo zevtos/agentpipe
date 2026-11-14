@@ -17,6 +17,8 @@ What it covers:
                 12 pt tables with repeated header and unsplittable rows, «1)» and «–»
                 lists on the paragraph indent, «а)» letters, required NBSP, keywords,
                 volume line, appendix «А.1», title page from [[title.blocks]].
+  breaks      — NBSP before « – », <w:noBreakHyphen/> in keywords and in «19770-1»,
+                «44-ФЗ»; «ITIL 4», «ГОСТ 34.602» glued; r.text / Markdown {.keep}.
   numbering   — numbering="chapter" + heading_numbering: «1», «1.1», «Рисунок 1.1»,
                 «(2.1)», forward references by label.
   markdown    — r.markdown: headings, lists, pipe table, citation, forward refs.
@@ -230,7 +232,7 @@ def test_mbi_document():
     assert "Таблица 1 – Этапы" in texts and "Рисунок 1 – Схема процесса учёта" in texts
     assert "Таблица А.1 – Поля журнала" in texts
     assert "Примечание – Значения округлены." in texts and "Примечания:" in texts
-    assert any(t.startswith("Объект исследования – процессы учёта") for t in texts)
+    assert any(t.startswith(f"Объект исследования{NBSP}– процессы учёта") for t in texts)
     assert any(f"Т.{NBSP}Г.{NBSP}Пискунова" in t for t in texts), "required nbsp"
     assert any("45–60" in t for t in texts)
     assert "УЧЁТ ОБРАЩЕНИЙ, ДОКУМЕНТООБОРОТ, BPMN, АВТОМАТИЗАЦИЯ, АДМИНИСТРАЦИЯ" in texts
@@ -259,6 +261,40 @@ def test_mbi_document():
     assert "канд. экон. наук, доцент" in title
     fails = [v for v in V.validate_docx(out) if v.tier == V.TIER_FAIL]
     assert not fails, fails
+
+
+def test_mbi_line_breaks():
+    """Тире не начинает строку, дефисы в ключевых словах и обозначениях не рвутся,
+    название с номером версии склеено, строка-заголовок держится со следующим."""
+    r = G.Report(title_page=False, profile="mbi", project_root=_TMP)
+    r.keywords(["бизнес-процесс", "ИТ-инфраструктура", "учёт", "ITIL", "BPMN"])
+    r.text("Область применения - подразделения администрации, по ITIL 4 и "
+           "ГОСТ 34.602-2020, закон № 44-ФЗ.")
+    r.text("Проектирование (14–17 с.)", lead="Глава 2.", keep_with_next=True)
+    r.table([["Стандарт", "Год"], ["ISO/IEC 19770-1", "2017"]], caption="Стандарты")
+    r.markdown("**Глава 3.** Внедрение {.keep}\n\nТекст про {фигурные} скобки.")
+    out = r.save(_TMP / "breaks.docx", layout=False)
+    doc = _xml(out)
+    paras = re.findall(r"<w:p[ >].*?</w:p>", doc, re.S)
+    kw = next(x for x in paras if "Keywords" in x)
+    assert kw.count("<w:noBreakHyphen/>") == 2, kw
+    texts = _texts(out)
+    body = next(t for t in texts if t.startswith("Область"))
+    assert f"применения{NBSP}– подразделения" in body, body
+    assert f"ITIL{NBSP}4" in body and f"ГОСТ{NBSP}34.602" in body, body
+    gost = next(x for x in paras if "34.602" in x)
+    assert gost.count("<w:noBreakHyphen/>") == 2, "34.602‑2020 и 44‑ФЗ"
+    cell = re.search(r"<w:tc>(?:(?!</w:tc>).)*19770(?:(?!</w:tc>).)*</w:tc>", doc, re.S).group(0)
+    assert "<w:noBreakHyphen/>" in cell
+    head = next(x for x in paras if "Проектирование" in x)
+    assert "<w:keepNext/>" in head
+    md = next(x for x in paras if "Внедрение" in x)
+    assert "<w:keepNext/>" in md and "{.keep}" not in md
+    assert "Текст про {фигурные} скобки." in texts
+    from docx import Document
+    words = [x.text for x in Document(out).paragraphs if x.style.name == "Keywords"]
+    assert words == ["БИЗНЕС-ПРОЦЕСС, ИТ-ИНФРАСТРУКТУРА, УЧЁТ, ITIL, BPMN"], words
+    assert not [v for v in V.validate_docx(out) if v.tier == V.TIER_FAIL]
 
 
 def test_chapter_numbering():
@@ -402,6 +438,8 @@ def main() -> int:
           test_defaults_untouched)
     check("mbi: dashes, hyphenation, headings, tables, lists, nbsp, title, appendix",
           test_mbi_document)
+    check("mbi line breaks: nbsp before dash, non-breaking hyphens, keep_with_next",
+          test_mbi_line_breaks)
     check("numbering: chapters, auto heading numbers, forward refs", test_chapter_numbering)
     check("markdown: headings, lists, table, citation, forward refs", test_markdown)
     check("title_docx: blank with split fields and logo", test_title_docx)

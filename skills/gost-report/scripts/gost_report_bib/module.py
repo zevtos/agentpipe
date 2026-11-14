@@ -145,8 +145,13 @@ class _BibAPI:
                 first_line_indent=Cm(indent) if indent else Pt(0),
                 space_after=Pt(0),
             )
-            run = p.add_run(f"{i}. {entry}")     # raw: тире ГОСТ не санируем
-            self._core.set_run_font(run)
+            # raw: тире ГОСТ не санируем; неразрывные дефисы (ISBN) — элементами
+            add_runs = getattr(self._core, "add_text_runs", None)
+            if add_runs is not None:
+                add_runs(p, f"{i}. {entry}")
+            else:
+                run = p.add_run(f"{i}. {entry}")
+                self._core.set_run_font(run)
         self._printed = len(ordered)
         return len(ordered)
 
