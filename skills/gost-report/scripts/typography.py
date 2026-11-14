@@ -1,7 +1,8 @@
 """Русская типографика для gost-report: неразрывные пробелы, тире, кавычки, выделение.
 
-Чистые функции без зависимостей, включаются через Report(typography=True).
-Правила и источники: references/typography.md.
+Чистые функции без зависимостей, включаются через Report(typography=True)
+целиком или по отдельности полями профиля (prose_dashes, nbsp, heading_glue,
+caption_glue). Правила и источники: references/typography.md.
 """
 from __future__ import annotations
 
@@ -89,6 +90,82 @@ def typograf(text: str, *, dashes: bool = False) -> str:
     text = _SHORT_RE.sub(lambda m: m[1] + NBSP, text)
     text = _PARTICLE_RE.sub(NBSP, text)
     return text
+
+
+_SPACED_DASH_RE = re.compile(r"(?<=\S)[ \t]+[-–—][ \t]+(?=\S)")
+_DIGIT_EM_DASH_RE = re.compile(r"(?<=\d)—(?=\d)")
+_WORD_EM_DASH_RE = re.compile(r"(?<=\w)—(?=\w)")
+
+
+def normalize_dashes(text: str, dash: str = "–") -> str:
+    """Тире под профиль вуза, без остальной типографики.
+
+    « - », « – », « — » между словами → « <dash> »; «45—60» → «45–60»;
+    «слово—слово» → «слово <dash> слово». Дефис внутри слов и между цифрами
+    («ГОСТ 7.32-2017», «2026-11-14») и короткое тире в диапазоне «45–60» не трогает.
+    """
+    if not text:
+        return text
+    text = _SPACED_DASH_RE.sub(f" {dash} ", text)
+    text = _DIGIT_EM_DASH_RE.sub("–", text)
+    if dash != "—":
+        text = _WORD_EM_DASH_RE.sub(f" {dash} ", text)
+    return text
+
+
+_REQ_INITIALS_BEFORE_RE = re.compile(
+    r"(?<![\w-])([А-ЯЁA-Z]\.)([ \t]*)([А-ЯЁA-Z]\.)?[ \t]+(?=[А-ЯЁA-Z][а-яёa-z])")
+_REQ_INITIALS_AFTER_RE = re.compile(
+    r"([А-ЯЁA-Z][а-яёa-z]+(?:-[А-ЯЁA-Z][а-яёa-z]+)?)[ \t]+([А-ЯЁA-Z]\.)([ \t]*)([А-ЯЁA-Z]\.)?")
+_REQ_ABBR_NUM_RE = re.compile(
+    r"(?<![\w-])(п|пп|с|ст|ч|гл|рис|табл|разд|прил|т|вып|см)\.[ \t]+(?=[\dА-ЯЁ])")
+_REQ_SIGN_RE = re.compile(r"([№§])[ \t]*(?=\d)")
+_REQ_ETC_RE = re.compile(r"(?<![\w-])и[ \t]+(?=т\.[ \t]*[дп]\.)")
+# «16 с.», «XX в.», «2 ч.», «10 тыс.»: короткое слово с точкой после числа это
+# сокращение, а не предлог, поэтому _NUMBER_UNIT_RE его пропускает.
+_REQ_NUM_ABBR_RE = re.compile(r"(?<![\w-])(\d[\d.,–]*|[IVXLC]+)[ \t]+(?=[а-яё]{1,4}\.)")
+
+
+def required_nbsp(text: str) -> str:
+    """Неразрывные пробелы только там, где их требуют положения о ВКР и ГОСТ 7.32,
+    без склейки предлогов и прочей полировки (режим nbsp="required" профиля).
+
+    Инициалы не отрываются от фамилии и друг от друга («Т. Г. Пискунова»,
+    «Пискунова Т. Г.»), единица и слово-счётчик от числа («14 пт», «2026 г.»,
+    «13–16 с.», «45 листов»), знак от номера («№ 5»), сокращение от номера
+    («п. 2.6», «с. 15», «рис. 3»), «т. е.», «и т. д.». Обычный пробел, не узкий:
+    так текст выглядит одинаково в любом шрифте и не растягивается иначе.
+    """
+    if not text:
+        return text
+
+    def before(m: "re.Match[str]") -> str:
+        inner = NBSP if m[2] else ""
+        return m[1] + (inner + m[3] if m[3] else "") + NBSP
+
+    def after(m: "re.Match[str]") -> str:
+        inner = NBSP if m[3] else ""
+        return m[1] + NBSP + m[2] + (inner + m[4] if m[4] else "")
+
+    text = _REQ_INITIALS_BEFORE_RE.sub(before, text)
+    text = _REQ_INITIALS_AFTER_RE.sub(after, text)
+    text = _ABBR_RE.sub(lambda m: f"{m[1]}.{NBSP}{m[2]}.", text)
+    text = _REQ_ETC_RE.sub("и" + NBSP, text)
+    text = _REQ_SIGN_RE.sub("\\1" + NBSP, text)
+    text = _REQ_ABBR_NUM_RE.sub(lambda m: f"{m[1]}.{NBSP}", text)
+    text = _NOUN_NUMBER_RE.sub(lambda m: m[1] + NBSP, text)
+    text = _REQ_NUM_ABBR_RE.sub(lambda m: m[1] + NBSP, text)
+    text = _NUMBER_UNIT_RE.sub(lambda m: m[1] + NBSP, text)
+    return text
+
+
+def glue_short_words(text: str) -> str:
+    """Предлоги, союзы и частицы короче четырёх букв не остаются в конце строки:
+    неразрывный пробел после них. Для заголовков и подписей (ГОСТ: «союзы и
+    предлоги переносятся на следующую строку»)."""
+    if not text:
+        return text
+    return _SHORT_RE.sub(lambda m: m[1] + NBSP, text)
 
 
 def split_emphasis(text: str) -> List[Tuple[str, bool, bool]]:

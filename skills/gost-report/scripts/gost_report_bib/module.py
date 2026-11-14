@@ -22,9 +22,9 @@ from __future__ import annotations
 from typing import Dict, List
 
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.shared import Pt
+from docx.shared import Cm, Pt
 
-from .format import format_entry
+from .format import format_entry_styled
 
 DEFAULT_TITLE = "Список использованных источников"
 
@@ -35,6 +35,15 @@ class _BibAPI:
         self._entries: Dict[str, dict] = {}
         self._order: List[str] = []          # ключи в порядке первого цитирования
         self._numbers: Dict[str, int] = {}
+        self._printed: int = -1              # сколько записей вывел references()
+
+    @property
+    def count(self) -> int:
+        """Число источников в списке: выведенных references(), иначе
+        процитированных (или всех добавленных, если cite() не было)."""
+        if self._printed >= 0:
+            return self._printed
+        return len(self._order) or len(self._entries)
 
     def add(self, key: str, **fields) -> str:
         """Зарегистрировать источник. type: book|article|web|conference|standard|
@@ -44,6 +53,34 @@ class _BibAPI:
             raise ValueError(f"r.bib: источник {key!r} уже добавлен")
         self._entries[key] = dict(fields)
         return key
+
+    def load(self, path) -> int:
+        """Источники из файла .toml / .json: таблица на источник, ключ —
+        метка для cite (type, authors, title, … как у add). Относительный
+        путь — от корня проекта, docs/ и текущего каталога. Возвращает число
+        добавленных источников.
+
+            [ivanov2020]
+            type = "book"
+            authors = ["Иванов И. И."]
+            title = "Название"
+        """
+        from pathlib import Path
+        import styles
+        p = Path(path).expanduser()
+        if not p.is_absolute():
+            paths = self._core.paths
+            for base in (paths.root, paths.docs, Path.cwd()):
+                if (base / p).is_file():
+                    p = base / p
+                    break
+        data = styles._read_file(p)
+        entries = data.get("sources", data)
+        if isinstance(entries, list):
+            entries = {e["key"]: {k: v for k, v in e.items() if k != "key"} for e in entries}
+        for key, fields in entries.items():
+            self.add(key, **fields)
+        return len(entries)
 
     def cite(self, *keys: str, cap: bool = False) -> str:
         """Ссылка в тексте → «[1]» / «[1, 2]». Назначает номер при первом
@@ -65,11 +102,22 @@ class _BibAPI:
         """Назначенный номер источника (после cite)."""
         return self._numbers[key]
 
-    def references(self, title: str = DEFAULT_TITLE,
+    def references(self, title: str = None,
                    *, include_uncited: bool = False) -> int:
         """Структурный элемент «Список использованных источников»: заголовок
-        (h1, в оглавление) + пронумерованные записи ГОСТ Р 7.0.5. Возвращает
+        (h1, в оглавление) + пронумерованные записи. Стиль записи, заголовок,
+        выравнивание и отступ — из профиля (bib_style: 7.1-2003 или
+        7.0.100-2018, bib_title, bib_align, bib_indent_cm). Возвращает
         число записей. Если cite() не вызывался — выводит все в порядке add()."""
+        prof = self._core.profile
+        if title is None:
+            title = getattr(prof, "bib_title", DEFAULT_TITLE)
+        style = getattr(prof, "bib_style", "7.1-2003")
+        dash = getattr(prof, "dash", "—")
+        align = {"left": WD_ALIGN_PARAGRAPH.LEFT, "justify": WD_ALIGN_PARAGRAPH.JUSTIFY,
+                 "center": WD_ALIGN_PARAGRAPH.CENTER, "right": WD_ALIGN_PARAGRAPH.RIGHT}.get(
+            getattr(prof, "bib_align", "left"), WD_ALIGN_PARAGRAPH.LEFT)
+        indent = getattr(prof, "bib_indent_cm", 0)
         if self._order:
             ordered = list(self._order)
             if include_uncited:
@@ -87,21 +135,25 @@ class _BibAPI:
             ordered = list(self._entries)
 
         self._core.h1(title)
+        nbsp = getattr(self._core, "nbsp_only", None)
         for i, key in enumerate(ordered, 1):
-            entry = format_entry(self._entries[key])
+            entry = format_entry_styled(self._entries[key], style=style, dash=dash)
+            if nbsp is not None:
+                entry = nbsp(entry)
             p = self._core.make_paragraph(
-                align=WD_ALIGN_PARAGRAPH.LEFT,
-                first_line_indent=Pt(0),
+                align=align,
+                first_line_indent=Cm(indent) if indent else Pt(0),
                 space_after=Pt(0),
             )
             run = p.add_run(f"{i}. {entry}")     # raw: тире ГОСТ не санируем
             self._core.set_run_font(run)
+        self._printed = len(ordered)
         return len(ordered)
 
 
 class BibModule:
     namespace = "bib"
-    title = "Список литературы (ГОСТ Р 7.0.5)"
+    title = "Список литературы (ГОСТ 7.1 / ГОСТ Р 7.0.100)"
     requires_extra = None          # pure-python, default-тир
 
     def check_available(self) -> None:
