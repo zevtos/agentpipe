@@ -420,6 +420,31 @@ def xlsx_richness(path: Path) -> dict[str, Any]:
     return out
 
 
+_EMBED_MEMBER_RE = re.compile(r"(?:word|ppt|xl)/embeddings/[^/]+", re.IGNORECASE)
+
+
+def embedded_object_count(path: Path, src_type: str) -> int:
+    """How many embedded objects (OLE objects, embedded files, chart-data
+    workbooks, PDF attachments) the extractor will look into — see
+    _embedded.py. OOXML: central directory only, nothing inflated. Cheap enough
+    to run on every file; a failure just reports 0."""
+    try:
+        if src_type in ("docx", "pptx", "xlsx"):
+            import zipfile
+            with zipfile.ZipFile(path) as zf:
+                return sum(1 for i in zf.infolist() if _EMBED_MEMBER_RE.fullmatch(i.filename))
+        if src_type == "pdf":
+            import pymupdf  # type: ignore
+            with pymupdf.open(str(path)) as doc:
+                n = doc.embfile_count()
+                for page in doc:
+                    n += sum(1 for _ in page.annots(types=[pymupdf.PDF_ANNOT_FILE_ATTACHMENT]))
+                return n
+    except Exception:  # noqa: BLE001 — the extractor reports real failures
+        return 0
+    return 0
+
+
 def epub_richness(path: Path) -> dict[str, Any]:
     """Parse the OPF package to count spine documents (chapters), images, and
     detect MathML, plus pull dc:title/dc:creator. `xhtml_bytes` is the summed
@@ -753,6 +778,8 @@ def scan_file(idx: int, path: Path, input_root: Path,
         info.update(xlsx_richness(path))
     elif src_type in ("md", "txt", "xml"):
         info.update(text_encoding(path))
+    if src_type in ("docx", "pptx", "xlsx", "pdf") and info.get("pdf_class") not in ("encrypted", "corrupt"):
+        info["embedded_objects"] = embedded_object_count(path, src_type)
 
     set_strategy_and_tokens(info, enable_mineru=enable_mineru)
 
@@ -780,6 +807,7 @@ def scan_file(idx: int, path: Path, input_root: Path,
     info.setdefault("has_math", None)
     info.setdefault("book_title", None)
     info.setdefault("book_authors", None)
+    info.setdefault("embedded_objects", 0)
     return info
 
 
@@ -926,6 +954,10 @@ def main() -> int:
     print(f"doc2kb scout: {len(files)} files, ~{total_tokens:,} tokens, {elapsed:.1f}s")
     print("  by type:      " + ", ".join(f"{k}={v}" for k, v in sorted(types.items())))
     print("  by strategy:  " + ", ".join(f"{k}={v}" for k, v in sorted(strategies.items())))
+    n_emb = [f.get("embedded_objects") or 0 for f in files]
+    if any(n_emb):
+        print(f"  embedded:     {sum(n_emb)} object(s) in {sum(1 for n in n_emb if n)} file(s) — "
+              "extracted as their own docs in Phase 4 (depth 4 by default)")
     if scout["user_decisions_needed"]:
         print(f"  USER DECISIONS NEEDED: {len(scout['user_decisions_needed'])} groups")
         for d in scout["user_decisions_needed"]:

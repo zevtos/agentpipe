@@ -188,10 +188,13 @@ def _scout(kb_root: Path, input_dir: Path, tier: Optional[str],
 def _extract(kb_root: Path, tier: Optional[str], *, timeout: Optional[int],
              normalize: bool, shard: bool, patch_warnings: bool,
              always_popo: bool, quiet: bool,
-             workers: Optional[int] = None) -> tuple[int, Optional[dict]]:
+             workers: Optional[int] = None,
+             embed_depth: Optional[int] = None) -> tuple[int, Optional[dict]]:
     args = [str(kb_root)]
     if timeout is not None:
         args += ["--timeout", str(timeout)]
+    if embed_depth is not None:
+        args += ["--embed-depth", str(embed_depth)]
     if workers is not None:
         args += ["--workers", str(workers)]
     if normalize:
@@ -268,6 +271,9 @@ def _report(kb_root: Path, summary: Optional[dict]) -> None:
           f"skipped={counts.get('skipped_by_decision', 0)} "
           f"errors={counts.get('error', 0)} "
           f"needs_attention={counts.get('needs_attention', 0)}")
+    if summary.get("embedded_documents"):
+        print(f"    + {summary['embedded_documents']} embedded document(s) extracted "
+              "as their own docs (docs/<id>_eNN-*.md)")
     na = summary.get("needs_attention") or []
     for item in na:
         reason = item.get("reason", "?")
@@ -277,6 +283,16 @@ def _report(kb_root: Path, summary: Optional[dict]) -> None:
         if hint:
             line += f" — {hint}"
         print(line)
+    unclassified = summary.get("unclassified_warnings") or []
+    if unclassified:
+        n_warn = sum(len(u.get("warnings") or []) for u in unclassified)
+        print(f"    ⚠ {n_warn} other warning(s) in {len(unclassified)} doc(s) — listed per doc "
+              "in INDEX.md (e.g. images that could not be rendered, embedded objects not extracted)")
+        for u in unclassified[:5]:
+            first = (u.get("warnings") or [""])[0]
+            print(f"      - {u.get('source_path', u.get('id', '?'))}: {first[:160]}")
+        if len(unclassified) > 5:
+            print(f"      … and {len(unclassified) - 5} more doc(s)")
     if summary.get("errors_log"):
         print(f"    errors logged → {summary['errors_log']}")
     print(f"    index → {kb_root / 'INDEX.md'}")
@@ -366,7 +382,7 @@ def _run_pipeline(args: argparse.Namespace) -> int:
                            normalize=args.normalize, shard=args.shard,
                            patch_warnings=args.patch_warnings,
                            always_popo=args.always_popo, quiet=args.quiet,
-                           workers=args.workers)
+                           workers=args.workers, embed_depth=args.embed_depth)
     if rc == 2:
         return _fail((summary or {}).get("reason", "extract refused to start"))
 
@@ -410,6 +426,9 @@ def _add_pipeline_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument("--workers", type=int, default=None,
                    help="parallel lightweight extractions (default: 4; 1 = serial; "
                         "mineru always runs serially)")
+    p.add_argument("--embed-depth", type=int, default=None,
+                   help="follow documents embedded in documents this deep "
+                        "(default 4; 0 = off)")
     p.add_argument("-q", "--quiet", action="store_true",
                    help="suppress per-file extract progress")
 
@@ -443,6 +462,7 @@ def main() -> int:
     p_ext.add_argument("--patch-warnings", action="store_true")
     p_ext.add_argument("--timeout", type=int, default=None)
     p_ext.add_argument("--workers", type=int, default=None)
+    p_ext.add_argument("--embed-depth", type=int, default=None)
     p_ext.add_argument("-q", "--quiet", action="store_true")
 
     p_man = sub.add_parser("manifest", help="Phase 5 only — (re)assemble the index")
@@ -499,7 +519,7 @@ def main() -> int:
                                normalize=args.normalize, shard=args.shard,
                                patch_warnings=args.patch_warnings,
                                always_popo=args.always_popo, quiet=args.quiet,
-                               workers=args.workers)
+                               workers=args.workers, embed_depth=args.embed_depth)
         return _finish_extract(kb_root, rc, summary)
     if args.command == "manifest":
         kb_root = Path(args.output_dir).expanduser().resolve()

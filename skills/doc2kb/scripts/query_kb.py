@@ -29,7 +29,7 @@ CLI:
 
 Options:
     -k / --top-k N     number of passages to return (default 8)
-    --doc ID           restrict to a single doc-id (e.g. doc-002)
+    --doc ID           restrict to one doc-id and its embedded docs (e.g. doc-002)
     --type T           restrict to a source_type (pdf, docx, pptx, ipynb, ...)
     --page N           restrict to a single source page number
     --and              require ALL query terms (default: OR + BM25 ranking)
@@ -138,8 +138,9 @@ def _filter_sql(doc: Optional[str], stype: Optional[str], page: Optional[int],
                 alias: str = "c") -> tuple[str, list[Any]]:
     clauses, params = [], []
     if doc:
-        clauses.append(f"{alias}.doc_id = ?")
-        params.append(doc)
+        # A doc id also matches its embedded documents (`doc-001_e01`, …).
+        clauses.append(f"({alias}.doc_id = ? OR {alias}.doc_id LIKE ? ESCAPE '\\')")
+        params += [doc, doc.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "\\_e%"]
     if stype:
         clauses.append(f"{alias}.source_type = ?")
         params.append(stype)

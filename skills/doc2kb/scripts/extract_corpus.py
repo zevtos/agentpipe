@@ -41,6 +41,14 @@ Scope — what this dispatcher OWNS vs. what stays the agent's:
     exits 2 and the file surfaces as `needs_install`, so the driver never
     silently auto-installs the ~3 GB ML tier (doc2kb heavy-deps-opt-in rule).
 
+Embedded documents (default on, depth 4):
+    Container extractors (DOCX/DOC/PPTX/XLSX/PDF) extract documents embedded in
+    them as their own `docs/<id>_eNN-*.md` (see _embedded.py). The dispatcher
+    starts every job with a fresh recursion state, a shared deadline
+    (`--timeout` minus 15 s) and `--embed-depth` (0 = off) in the extractor's
+    environment, and reports the child-doc total as `embedded_documents` (not
+    a `counts` bucket — those still sum to the scout file count).
+
 Per-file MinerU settings + env-gated Popo (both default-off):
     - `_scout.files[].mineru` (a structured `{backend,lang,keep_raw}` block,
       stamped by apply_overrides.py) is rendered into whitelisted CLI flags for
@@ -94,6 +102,11 @@ from _common import (  # noqa: E402
     validate_source_rel,
 )
 from extract_pdf_mineru import SUPPORTED_BACKENDS  # noqa: E402  (constant only)
+from _embedded import (  # noqa: E402  (constants only)
+    ENV_DEADLINE as EMBED_ENV_DEADLINE,
+    ENV_DEPTH as EMBED_ENV_DEPTH,
+    ENV_KEYS as EMBED_ENV_KEYS,
+)
 
 
 # Canonical scout id shape (`doc-001`, `doc-042`, …). The driver re-asserts it
@@ -198,9 +211,23 @@ def _parse_last_json_line(stdout: str) -> dict | None:
     return None
 
 
+def _extractor_env(timeout: int, embed_depth: int | None) -> dict[str, str]:
+    """Environment for one top-level extractor: a fresh embedded-document
+    recursion (level 0, empty ancestor chain, full tree budget) whose children
+    must finish a little before this job's own timeout kills the parent."""
+    env = dict(os.environ)
+    for key in EMBED_ENV_KEYS:
+        env.pop(key, None)
+    env[EMBED_ENV_DEADLINE] = f"{time.time() + max(30, timeout - 15):.3f}"
+    if embed_depth is not None:
+        env[EMBED_ENV_DEPTH] = str(max(0, embed_depth))
+    return env
+
+
 def _run_extractor(strategy: str, in_path: Path, out_path: Path,
                    doc_id: str, source_rel: str, timeout: int,
-                   extra_flags: list[str] | None = None):
+                   extra_flags: list[str] | None = None,
+                   embed_depth: int | None = None):
     """Invoke one extractor through ensure_env.py. Returns
     (returncode_or_'timeout', parsed_json_or_None, stderr_tail)."""
     script, extra = DISPATCH[strategy]
@@ -211,7 +238,8 @@ def _run_extractor(strategy: str, in_path: Path, out_path: Path,
         *(extra_flags or []),
     ]
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
+                              env=_extractor_env(timeout, embed_depth))
     except subprocess.TimeoutExpired:
         return "timeout", None, f"timeout after {timeout}s"
     return proc.returncode, _parse_last_json_line(proc.stdout or ""), (proc.stderr or "").strip()
@@ -225,7 +253,7 @@ def _classify_result(job: dict, rc, parsed, stderr_tail: str, kb_root: Path) -> 
     doc_id = job["doc_id"]
     out = {"bucket": "error", "error_row": None, "na_row": None,
            "unclassified_row": None, "flagged": False, "popo_target": None,
-           "log": None}
+           "log": None, "embedded_docs": 0}
 
     if rc == "timeout":
         out["error_row"] = {"source_path": source_rel, "error": stderr_tail}
@@ -282,6 +310,10 @@ def _classify_result(job: dict, rc, parsed, stderr_tail: str, kb_root: Path) -> 
         out["flagged"] = True
 
     out["bucket"] = "extracted"
+    try:
+        out["embedded_docs"] = int(parsed.get("embedded_docs_total") or 0)
+    except (TypeError, ValueError):
+        pass
     if job["popo_in_effect"]:
         out["popo_target"] = doc_id
     out["log"] = f"extracted {source_rel}" + (" [needs_attention]" if (mangled or dropped) else "")
@@ -296,7 +328,7 @@ def _execute_job(job: dict, args, kb_root: Path) -> dict:
         rc, parsed, stderr_tail = _run_extractor(
             job["strategy"], job["in_path"], job["out_path"],
             job["doc_id"], job["source_rel"], args.timeout,
-            extra_flags=job["extra_flags"])
+            extra_flags=job["extra_flags"], embed_depth=args.embed_depth)
         outcome = _classify_result(job, rc, parsed, stderr_tail, kb_root)
         if outcome["bucket"] == "extracted" and args.normalize:
             _normalize(job["out_path"], args.timeout)
@@ -497,6 +529,10 @@ def main() -> int:
                          "1 = serial). Each worker is an extractor child process, so "
                          "memory grows ~linearly. mineru always runs serially — the "
                          "opt-in VLM tier is memory-bound and must never run concurrently.")
+    ap.add_argument("--embed-depth", type=int, default=None,
+                    help="how deep to follow documents embedded in documents (OLE objects, "
+                         "attachments): 0 = off; default 4, or $DOC2KB_EMBED_DEPTH. Each "
+                         "embedded document becomes its own docs/<id>_eNN-*.md")
     ap.add_argument("--quiet", action="store_true", help="suppress per-file stderr progress")
     args = ap.parse_args()
 
@@ -540,6 +576,7 @@ def main() -> int:
     unclassified: list[dict] = []
     errors: list[dict] = []
     extracted_but_flagged = 0
+    embedded_documents = 0
 
     # Env-gated MinerU→Popo auto-route (default OFF — preserves the heavy-deps-
     # opt-in rule). DOC2KB_ALWAYS_POPO routes every mineru-extracted doc through
@@ -687,6 +724,7 @@ def main() -> int:
             extracted_but_flagged += 1
         if o["popo_target"]:
             popo_targets.append(o["popo_target"])
+        embedded_documents += o.get("embedded_docs") or 0
 
     # Env-gated stage 2: route every mineru-extracted doc through Popo. Runs
     # only when DOC2KB_ALWAYS_POPO (or a per-file popo=true) put docs in the
@@ -737,6 +775,7 @@ def main() -> int:
         "scout": str(scout_path),
         "counts": counts,
         "extracted_but_flagged": extracted_but_flagged,
+        "embedded_documents": embedded_documents,
         "needs_attention": needs_attention,
         "unclassified_warnings": unclassified,
         "popo": popo,

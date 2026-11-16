@@ -88,8 +88,10 @@ INDEX_NAME = "_index.md"
 
 # Asset links sit one directory shallower than a part file: a flat doc at
 # docs/x.md links `../assets/…`; a part at docs/x/001.md needs `../../assets/…`.
-_ASSET_LINK_RE = re.compile(r"\]\(\.\./assets/")
-_ASSET_LINK_DEEP = "](../../assets/"
+# Links to embedded child docs (`](../docs/<id>_eNN-….md)`, see _embedded.py)
+# deepen the same way.
+_ASSET_LINK_RE = re.compile(r"\]\(\.\./(assets|docs)/")
+_ASSET_LINK_DEEP = r"](../../\1/"
 # A block that is exactly a `[page N]` anchor (used for fence-aware page splits —
 # matched against whole blocks from split_markdown_blocks, so a `[page N]` line
 # INSIDE a fenced code block is never mistaken for a page boundary).
@@ -273,8 +275,9 @@ def _sha256_str(text: str) -> str:
 
 
 def _rewrite_asset_links(text: str) -> str:
-    """Deepen `](../assets/` → `](../../assets/` for a part file one level below
-    the flat doc. Touches link targets only; body text is untouched."""
+    """Deepen `](../assets/` → `](../../assets/` (and `](../docs/` likewise) for
+    a part file one level below the flat doc. Touches link targets only; body
+    text is untouched."""
     return _ASSET_LINK_RE.sub(_ASSET_LINK_DEEP, text)
 
 
@@ -400,6 +403,29 @@ def shard_one(doc_path: Path, *, trigger: int = DEFAULT_TRIGGER,
     return result
 
 
+def _relink_sharded(docs_dir: Path) -> int:
+    """A doc that became a folder breaks flat links to it (a parent's link to
+    an embedded child, `](../docs/<stem>.md)`). Point them at the folder's
+    `_index.md`. Flat docs only: part bodies keep their verbatim `part_sha256`.
+    Returns the number of files rewritten."""
+    stems = [idx.parent.name for idx in docs_dir.glob("*/_index.md")
+             if read_frontmatter(idx).get("sharded")]
+    if not stems:
+        return 0
+    pat = re.compile(r"\]\(\.\./docs/(" + "|".join(re.escape(s) for s in stems) + r")\.md\)")
+    n = 0
+    for doc in docs_dir.glob("*.md"):
+        try:
+            text = doc.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        new = pat.sub(r"](../docs/\1/_index.md)", text)
+        if new != text:
+            doc.write_text(new, encoding="utf-8")
+            n += 1
+    return n
+
+
 def shard_corpus(kb_dir: Path, *, trigger: int = DEFAULT_TRIGGER,
                  target: int = DEFAULT_TARGET, minimum: int = DEFAULT_MIN,
                  cap: int = DEFAULT_CAP, quiet: bool = False) -> dict[str, Any]:
@@ -428,8 +454,9 @@ def shard_corpus(kb_dir: Path, *, trigger: int = DEFAULT_TRIGGER,
                 + (f" ({res.get('parts')} parts)" if res.get("parts") else "")
                 + (f": {res['reason']}" if res.get("reason") else ""))
 
+    relinked = _relink_sharded(docs_dir)
     return {"ok": counts["failed"] == 0, "kb_dir": str(kb_dir),
-            "counts": counts, "results": results,
+            "counts": counts, "results": results, "relinked_docs": relinked,
             "thresholds": {"trigger": trigger, "target": target,
                            "min": minimum, "cap": cap}}
 

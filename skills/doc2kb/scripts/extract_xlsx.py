@@ -124,6 +124,7 @@ from _common import (  # noqa: E402
     count_tokens,
     emit_failure,
     json_stdout,
+    resolve_assets_dir,
     sanitize_heading,
     sha256_of,
     today_iso,
@@ -897,6 +898,19 @@ def main() -> int:
         if payload.get("ok"):
             shutil.move(str(part), str(out_path))
             payload["out"] = str(out_path)
+            # Embedded objects (xl/embeddings/*) are handled here in the parent,
+            # never in the openpyxl reader: they are separate documents with
+            # their own extractor processes and limits (see _embedded.py).
+            from _embedded import EmbedSession  # noqa: E402 — parent only
+            embed = EmbedSession(input_path=in_path, doc_id=args.doc_id,
+                                 source_rel=validate_source_rel(args.source_rel or in_path.name),
+                                 out_path=out_path, assets_dir=resolve_assets_dir(args, out_path),
+                                 assets_rel=args.assets_rel)
+            embed.run_ooxml(in_path)
+            embed.apply_to_file(out_path)
+            if embed.warnings:
+                payload["warnings"] = list(payload.get("warnings") or []) + embed.warnings
+            payload.update(embed.stdout_extra())
         json_stdout(payload)
         return rc if rc in (0, 1, 2) else 1
     except _Terminated as t:

@@ -23,7 +23,7 @@ returns one JSON summary:
 
 ```bash
 python3 <skill_dir>/scripts/ensure_env.py extract_corpus.py <kb_dir> \
-    [--timeout 600] [--normalize] [--quiet] [--workers 4]
+    [--timeout 600] [--normalize] [--quiet] [--workers 4] [--embed-depth 4]
 ```
 
 Summary shape (last stdout line):
@@ -34,6 +34,7 @@ Summary shape (last stdout line):
   "counts": {"extracted": N, "unchanged": N, "skipped_by_decision": N,
              "error": N, "needs_attention": N},
   "extracted_but_flagged": N,
+  "embedded_documents": N,          // child docs for embedded objects (format-spec «Embedded documents»)
   "needs_attention": [ /* see format-spec.md */ ],
   "unclassified_warnings": [ {"id","source_path","warnings":[...]} ],
   "errors_log": "<kb>/_logs/errors.json" | null
@@ -273,3 +274,49 @@ PDF-страницы часто кончаются голым номером с�
 `<kb_dir>/docs/*.md` → `<kb_dir>/assets/<file>`). Override: `--assets-dir <abs>`
 и `--assets-rel <prefix>`. Отключить: `--no-extract-images` (вернёт исходное
 поведение с loud warning).
+
+Если Pillow не декодирует картинку из PDF (JBIG2, CMYK JPX), экстрактор
+перекодирует её через MuPDF (`pymupdf.Pixmap`) в PNG, а не пропускает.
+
+### Векторные картинки (EMF/WMF/SVG/PDF/EPS) → PNG (все экстракторы)
+
+Схемы в Office часто лежат метафайлами: вставка из Visio, «векторный
+клипарт», превью старых формул. EPUB несёт SVG, DOCX иногда — PDF или EPS.
+`save_image_safe()` (общая точка для всех экстракторов, `_raster.py`)
+распознаёт их по сигнатуре, а не по расширению (python-pptx, например,
+называет EMF `wmf`), и растеризует в PNG:
+
+| формат | чем | если нет инструмента |
+|---|---|---|
+| EMF, WMF | LibreOffice `soffice --headless --convert-to pdf` (одним запуском на документ, отдельный `-env:UserInstallation` во временном каталоге) → PyMuPDF | пропуск + warning `vector image (emf) not rasterized — LibreOffice is not on PATH — install it …` |
+| SVG | PyMuPDF (внешние ссылки вырезаются, `<!ENTITY` — отказ) | — |
+| PDF-картинка | PyMuPDF, страница 1 | — |
+| EPS | Ghostscript `gs -dSAFER … -dEPSCrop` → PDF → PyMuPDF; иначе TIFF/WMF-превью DOS-EPS | пропуск + warning с `brew install ghostscript` |
+
+Отрендеренная страница обрезается по нарисованному (LibreOffice кладёт
+метафайл на лист A4) и масштабируется до 1600 px по длинной стороне. Файл в
+`assets/` получает расширение `.png`. LibreOffice и Ghostscript — системные
+инструменты, как конвертер `.doc`: в venv не ставятся, pip-зависимостей не
+добавляется. 10 метафайлов лекции ≈ 2 с.
+
+### Вложенные документы (рекурсивно, по умолчанию)
+
+DOCX/DOC/PPTX/XLSX/PDF-экстракторы после своего тела разбирают вложения:
+OLE-объекты и встроенные файлы (`*/embeddings/*`), workbook с данными
+диаграммы, вложения PDF. Каждое вложение извлекается тем же экстрактором,
+что и файл корпуса того же типа, в отдельный `docs/<id>_eNN-<slug>.md`, и
+так до глубины 4 (`--embed-depth N` у `extract_corpus.py`/`dkb`, env
+`DOC2KB_EMBED_DEPTH`; `0` выключает). В родителе — ссылка на месте объекта
+(PPTX) или в разделе `## Embedded objects`. Лимиты, формат и провенанс —
+`format-spec.md` («Embedded documents»). Всё, что не извлечено (глубина,
+неподдерживаемый тип вроде `.xls`, лимит размера, zip-бомба), видно в
+warnings родителя и поднимается до файла корпуса.
+
+### PPTX: диаграммы, SmartArt, группы
+
+- Диаграмма → строка `**Chart: <title>** (<type>)` и таблица категории ×
+  серии из закэшированных в XML значений (раньше — `*(chart)*`).
+- SmartArt → `*(SmartArt)*` и список текстов узлов (python-pptx SmartArt
+  не видит, раньше диаграмма пропадала целиком).
+- Группы обходятся на любую глубину (раньше — один уровень; текст во
+  вложенных группах терялся молча).

@@ -6,6 +6,7 @@ second session.
 
 Contents: [File layout](#file-layout) · [`_scout.json`](#_scoutjson) ·
 [doc frontmatter](#docsid-slugmd-frontmatter) · [Markdown body](#markdown-body) ·
+[Embedded documents](#embedded-documents) ·
 [Sharded documents](#sharded-documents-folder-form) · [`manifest.json`](#manifestjson) ·
 [`INDEX.md`](#indexmd) · [`llms.txt`](#llmstxt) · [`AGENTS.md`](#agentsmd) ·
 [extractor stdout JSON](#stdout-json-from-each-extract_py) ·
@@ -22,15 +23,21 @@ Contents: [File layout](#file-layout) · [`_scout.json`](#_scoutjson) ·
 ├── _scout.json            # scout output, kept for debugging
 ├── _logs/
 │   └── errors.json        # extraction failures, if any
-├── assets/                # extracted embedded images: <doc-id>-pageNN-imgM.<ext>
+├── assets/                # extracted images: <doc-id>-pageNN-imgM.<ext>, <doc-id>-slideNN-imgM.<ext>,
+│                          #   <doc-id>-imgNNN.<ext>; vector images (EMF/WMF/SVG/PDF/EPS) as .png
 └── docs/
     ├── <doc-id>-<slug>.md
+    ├── <doc-id>_e01-<slug>.md         # document embedded in <doc-id> (see "Embedded documents")
+    ├── <doc-id>_e01_e02-<slug>.md     # …and one embedded in that one
     └── ...
 ```
 
 Filenames: `<doc-id>` is `doc-NNN` (zero-padded, scout-assigned). `<slug>` is
 ASCII-normalized `Path(source).stem` lowercased (cyrillic and CJK chars are
-dropped). Maximum length 48 chars after the prefix.
+dropped). Maximum length 48 chars after the prefix. An embedded document's id
+appends `_eNN` (the object's position in its parent) to the parent id; `_` never
+occurs in a scout id or a slug, so `<doc-id>_e*` matches exactly one parent's
+descendants.
 
 ## `_scout.json`
 
@@ -79,6 +86,8 @@ Emitted by `scout_corpus.py`. Schema:
       "markdown_cells": int | null,          // ipynb
       "raw_cells": int | null,               // ipynb
       "has_outputs": bool | null,            // ipynb
+      "embedded_objects": int,               // docx/pptx/xlsx/pdf: objects Phase 4 will look into
+                                             // (OOXML */embeddings/* members, PDF attachments)
       "encoding": "utf-8" | "cp1251" | ... | null,
       "extraction_strategy": "pymupdf4llm"|"mineru"|"mammoth"|"doc"|"rtf"|"python-pptx"|"passthrough-md"|"passthrough-txt"|"trafilatura"|"xml"|"xlsx"|"ipynb"|"epub"|"needs_password"|"needs_ocr_or_vlm"|"not_in_mvp"|"skip",
       "estimated_tokens": int | null,
@@ -140,7 +149,15 @@ Per-type optional fields:
 | `has_outputs`      | ipynb      | bool — any code cell has non-empty `outputs[]` |
 | `language`         | ipynb      | language sniffed from `kernelspec`/`language_info`, allowlist-clamped (default `python`) |
 | `kernelspec_name`  | ipynb      | original kernel name (optional, sanitized) |
-| `assets`           | pdf        | list of relative paths to embedded images extracted into `<kb_dir>/assets/` and referenced from the body (only emitted when at least one image was recovered) |
+| `assets`           | pdf/docx/doc/pptx/rtf/epub | list of relative paths to images extracted into `<kb_dir>/assets/` and referenced from the body (only emitted when at least one image was recovered). Vector images (EMF/WMF/SVG/PDF/EPS) are rasterized to `.png` |
+| `embedded_objects` | docx/doc/pptx/xlsx/pdf | number of embedded objects found (OLE objects, embedded files, chart-data workbooks, PDF attachments); only when > 0 |
+| `embedded_docs`    | docx/doc/pptx/xlsx/pdf | ids of the child docs extracted from them (`[doc-001_e01, …]`) |
+| `embedded_in`      | embedded doc | id of the parent doc |
+| `embedded_member`  | embedded doc | where the object lives inside the parent (`ppt/embeddings/oleObject1.bin`, `EmbeddedFiles/x.pdf`, `page3/attachment1/x.pdf`) |
+| `embedded_name`    | embedded doc | the object's file name (an OLE Package's stored name when there is one) |
+| `embedded_location`| embedded doc | `slide 5`, `slide 7, chart data`, `page 3`, `document body`, `sheet1`, `attachment`, … when known |
+| `embedded_depth`   | embedded doc | 1 for an object in a corpus file, 2 for an object inside that, … |
+| `parent_source_sha256` | embedded doc | sha256 of the parent's bytes (the parent's own `source_sha256`) |
 | `headings`         | all        | first up to 10 top-level headings, for fast index |
 | `mineru_subset_pages` | pdf     | sorted list of original page numbers that mineru extracted, when the file was produced by `extract_pdf_mineru.py --pages` in standalone (non-splice) mode |
 | `mineru_patched_pages` | pdf    | sorted union of every page that has been replaced via `extract_pdf_mineru.py --patch-into`; accumulates across runs against the same target md |
@@ -230,11 +247,107 @@ array([1, 2, 3])
 ---
 ```
 
-Image content is **never** stored as base64 inline. Inline images in DOCX are
-replaced with `<img src="" alt="image N: original alt text">` which markdownify
-renders as `![image N: ...]()`. Image outputs inside `.ipynb` code cells are
-collapsed into a single `*(image output omitted: N)*` placeholder per cell
-plus a warning surfaced in frontmatter.
+Image content is **never** stored as base64 inline. Pictures in PDF / DOCX /
+PPTX / RTF / EPUB are written to `<kb_dir>/assets/` and linked
+(`![caption](../assets/<file>)`); vector images (EMF/WMF/SVG/PDF/EPS) are
+rasterized to PNG first. An image that cannot be saved — too small, corrupt,
+or a vector image with no rasterizer on PATH — is skipped with a warning
+(`vector image (emf) not rasterized — LibreOffice is not on PATH — install …`).
+With `--no-extract-images` DOCX images become `![image N: alt]()` placeholders.
+Image outputs inside `.ipynb` code cells are collapsed into a single
+`*(image output omitted: N)*` placeholder per cell plus a warning surfaced in
+frontmatter.
+
+PPTX objects beyond text and pictures:
+
+```markdown
+**Chart: Revenue** (column clustered)
+
+| category | 2025 | 2026 |
+| --- | --- | --- |
+| Q1 | 10 | 12 |
+
+*(SmartArt)*
+
+- node text
+- node text
+
+> Embedded **e01** `Microsoft_Word_Document1.docx` (docx, 35.8 KB) → [doc-001_e01](../docs/doc-001_e01-microsoft-word-document1.md)
+```
+
+Charts come from the values cached in the chart XML; SmartArt is its node texts
+in data-model order; an OLE object shows its preview image (unless it is shown
+as an icon) and the link to its embedded document.
+
+## Embedded documents
+
+Documents inside documents — an OLE object on a slide, a workbook in a Word
+file, a chart's data workbook, a PDF attachment — are extracted **recursively,
+by default**, each into its **own** doc:
+
+```
+docs/doc-001-lecture.md                     # parent (pptx)
+docs/doc-001_e01-microsoft-word-document1.md # its embedded Word file
+docs/doc-001_e01_e01-report.md              # a PDF inside that Word file
+```
+
+Why separate docs and not subsections: each child keeps its own
+`source_sha256` (of the embedded bytes), `extraction_method`, `warnings`,
+headings and `[page N]` anchors (which would collide with the parent's), and the
+search index cites it on its own. Its `source` is the chain
+`<parent source>#<member inside the parent>`, e.g.
+`Лекции/a.pptx#ppt/embeddings/oleObject1.bin/report.pdf` (an OLE Package's
+stored file name follows the `.bin` member), so a citation says exactly where
+the text came from.
+
+**Where it is found.** OOXML (DOCX/PPTX/XLSX, and `.doc` after its conversion to
+DOCX): every `word|ppt|xl/embeddings/*` member. PDF: the `EmbeddedFiles` name
+tree (incl. portfolios) and file-attachment annotations. `oleObject*.bin` OLE2
+wrappers are opened with olefile: an OLE Package (`\x01Ole10Native`, with its
+stored file name), a `Package` stream (OOXML), Acrobat's `CONTENTS` (PDF), or a
+whole `.doc` (`WordDocument`). Payloads are classified by magic bytes, never by
+the stored name, and extracted by the same extractor a corpus file of that type
+gets (PDFs always through `pymupdf4llm` — never the opt-in mineru tier). Images
+packaged as objects go to `assets/` and are linked in place. Equation objects
+(`Equation.3`) are listed but not extracted (their preview image is what the
+slide/page shows); legacy `.xls`/`.ppt`, Visio and other OLE types are listed
+as not supported.
+
+**Parent body.** PPTX puts the link where the object sits on the slide (and
+after a chart for its data workbook). Everything else is listed in a closing
+section:
+
+```markdown
+## Embedded objects
+
+- **e01** `notes.docx` (docx, 35.8 KB, attachment) → [doc-002_e01](../docs/doc-002_e01-notes.md)
+- **e02** `oleObject2.bin` (equation, Equation.3, 9.5 KB, document body) — not extracted: equation object — its preview image is the only rendering
+- **e03** `photo.png` (image, Package, 9.5 KB)
+
+  ![photo.png](../assets/doc-005_e03.png)
+```
+
+Links are `../docs/<file>` so they survive sharding (part files get
+`../../docs/`); when a child doc is itself sharded, `shard_doc.py` repoints flat
+links to its `_index.md`.
+
+**Limits** — each cut is a warning in the parent (and propagated up to the
+corpus file as `N object(s) inside it not extracted, e.g. …`), never silent:
+
+| limit | default | knob |
+|---|---|---|
+| depth (corpus file = level 0) | 4 | `--embed-depth N` on `extract_corpus.py`/`dkb`, env `DOC2KB_EMBED_DEPTH`; 0 = off |
+| objects examined per document | 64 | — |
+| child docs per corpus file (whole tree) | 200 | — |
+| one payload, uncompressed | 100 MiB | — |
+| zip member compression ratio (when > 1 MiB) | 200:1 | — |
+| bytes read from one container | 512 MiB | — |
+| time | the parent's `--timeout` minus 15 s | env `DOC2KB_EMBED_DEADLINE` (epoch s) |
+
+A payload whose sha256 equals an ancestor's is not re-entered (cycle); the same
+payload twice in one parent is extracted once (`same content as an earlier
+object`). Re-extracting a parent first deletes its old `<id>_e*` docs and
+assets, so a changed set of objects never leaves stale children.
 
 ## Sharded documents (folder form)
 
@@ -315,7 +428,8 @@ Emitted by `build_manifest.py`. Schema:
   "extraction_tool": "doc2kb@<VERSION>",
   "created_at": "ISO-8601 UTC",
   "corpus_root": "/abs/path/to/input",
-  "total_documents": int,
+  "total_documents": int,          // embedded docs included
+  "embedded_documents": int,       // how many of them are embedded docs
   "total_tokens_estimated": int,
   "documents": [
     {
@@ -328,6 +442,9 @@ Emitted by `build_manifest.py`. Schema:
       "tokens_estimated": int,
       "warnings": [string],
       // ... copies relevant per-type fields from the doc's frontmatter
+      // (incl. embedded_objects/embedded_docs on a parent and
+      //  embedded_in/embedded_member/embedded_location/embedded_depth/
+      //  parent_source_sha256 on an embedded doc)
       // Sharded docs (see "Sharded documents" below) add:
       "sharded": true,                 // present + true only for a sharded doc
       "part_count": int,               // number of part files
@@ -407,6 +524,12 @@ stdout. Successful extraction:
 {"ok": true, "out": "/abs/path/output.md", "tokens_estimated": int, "warnings": [string], ...per-type extras...}
 ```
 
+Container extractors (DOCX, DOC, PPTX, XLSX, PDF via pymupdf4llm) add
+`"embedded_objects": int` (found in this doc), `"embedded_docs_total": int`
+(child docs written in its whole subtree) and `"embedded_not_extracted":
+[string]` (objects in the subtree that were cut, `"<doc-id> <eNN> `name`:
+reason"`, at most 50).
+
 Failure:
 
 ```json
@@ -443,6 +566,7 @@ counted in `extracted` AND listed in `needs_attention[]` with
     "needs_attention": int          // == number of needs_install entries only
   },
   "extracted_but_flagged": int,     // subset of `extracted` also in needs_attention[]
+  "embedded_documents": int,        // child docs written for embedded objects (not in counts)
   "needs_attention": [
     { "id": "doc-007", "source_path": "rel", "reason": "needs_install",
       "doc": null, "extracted_but_flagged": false, "install_hint": "..." },

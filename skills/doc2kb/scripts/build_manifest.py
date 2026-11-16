@@ -44,6 +44,8 @@ _EXTRA_KEYS = (
     "source_encoding", "headings",
     "cells", "code_cells", "markdown_cells", "raw_cells",
     "has_outputs", "language", "kernelspec_name",
+    "embedded_in", "embedded_member", "embedded_location", "embedded_depth",
+    "parent_source_sha256", "embedded_objects", "embedded_docs",
 )
 
 
@@ -175,6 +177,7 @@ def build_manifest(kb_dir: Path) -> dict[str, Any]:
         "created_at": utc_now_iso(),
         "corpus_root": None,
         "total_documents": len(docs),
+        "embedded_documents": sum(1 for d in docs if d.get("embedded_in")),
         "total_tokens_estimated": total_tokens,
         "documents": docs,
         "skipped": [],
@@ -289,6 +292,12 @@ def write_index_md(kb_dir: Path, manifest: dict[str, Any]) -> None:
                     bits.append(f"~{d['tokens_estimated']:,} tok")
                 if d.get("sharded"):
                     bits.append(f"{d.get('part_count')} parts")
+                if d.get("embedded_docs"):
+                    bits.append(f"{len(d['embedded_docs'])} embedded doc(s): "
+                                + ", ".join(str(x) for x in d["embedded_docs"]))
+                if d.get("embedded_in"):
+                    where = d.get("embedded_location")
+                    bits.append(f"embedded in {d['embedded_in']}" + (f" ({where})" if where else ""))
                 meta = ", ".join(bits) if bits else ""
                 title = d.get("source_path") or d.get("id")
                 lines.append(f"- [{title}]({d['kb_path']})"

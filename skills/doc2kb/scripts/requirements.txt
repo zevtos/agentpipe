@@ -38,6 +38,11 @@ striprtf>=0.0.26,<1.0
 # resilient if a future pymupdf release drops the dependency.
 Pillow>=10.0,<14.0
 tiktoken>=0.7.0,<1.0
+# olefile reads OLE2 compound files: the `oleObject*.bin` wrappers Office uses
+# for embedded objects (OLE Package, Acrobat CONTENTS, a whole .doc). Pure
+# Python, no C extension, ~100 KB. _embedded.py needs it to recurse into
+# embedded documents; without it those objects are listed as unread.
+olefile>=0.46,<1.0
 # Pin lxml — transitive dep of trafilatura, historically XXE-vulnerable
 # before 4.9. Capping below 6 keeps us on tested majors.
 lxml>=4.9,<6.0

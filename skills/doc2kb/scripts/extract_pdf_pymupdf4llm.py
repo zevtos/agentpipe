@@ -44,6 +44,7 @@ from pathlib import Path
 
 # Local-only import — _common lives next to this script (loaded via the
 # doc2kb.pth that ensure_env.py wrote).
+from _embedded import EmbedSession  # noqa: E402
 from _common import (  # noqa: E402
     _RESIDUAL_LIGATURE_RE,
     PDF_WARN_DROPPED_PICTURES_PREFIX,
@@ -59,6 +60,7 @@ from _common import (  # noqa: E402
     resolve_assets_dir,
     sanitize_heading,
     save_image_safe,
+    skipped_image_note,
     sha256_of,
     strip_page_footer_numbers,
     today_iso,
@@ -262,16 +264,23 @@ def _replace_dropped_pictures_with_assets(
                 result = save_image_safe(
                     blob, target, dedup_cache=dedup_cache, source_ext=ext,
                 )
+                if not result and result.reason == "skipped_corrupt":
+                    # Pillow cannot decode some PDF image codecs (JBIG2,
+                    # CMYK JPX, …); MuPDF can — let it re-encode as PNG.
+                    try:
+                        pix = pymupdf.Pixmap(doc, xref)
+                        if pix.n - pix.alpha >= 4:
+                            pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+                        result = save_image_safe(
+                            pix.tobytes("png"), target.with_suffix(".png"),
+                            dedup_cache=dedup_cache, source_ext="png",
+                        )
+                    except Exception:  # noqa: BLE001 — keep the original skip
+                        pass
                 if not result:
-                    if result.reason == "skipped_format":
-                        warnings.append(
-                            f"page {page_no} image {idx}: skipped non-viewable "
-                            f"format ({ext})"
-                        )
-                    elif result.reason == "skipped_corrupt":
-                        warnings.append(
-                            f"page {page_no} image {idx}: corrupt image bytes — skipped"
-                        )
+                    note = skipped_image_note(result, ext)
+                    if note:
+                        warnings.append(f"page {page_no} image {idx}: {note}")
                     # too-small: silent (decorative pixel)
                     continue
                 rel = f"{assets_rel_prefix}/{result.path.name}"
@@ -566,6 +575,15 @@ def main() -> int:
         emit_failure(f"extraction failed: {e}", extra={"input": str(in_path)})
         return 1
 
+    # Attachments (EmbeddedFiles + file-attachment annotations) → child docs,
+    # listed under `## Embedded objects` at the end of the body.
+    embed = EmbedSession(input_path=in_path, doc_id=args.doc_id, source_rel=source_rel,
+                         out_path=out_path, assets_dir=assets_dir, assets_rel=args.assets_rel)
+    embed.run_pdf(in_path)
+    if embed.objects:
+        body = clean_whitespace(embed.apply(body))
+    warnings.extend(embed.warnings)
+
     fm = {
         "id": args.doc_id,
         "source": source_rel,
@@ -580,10 +598,12 @@ def main() -> int:
     }
     if extras.get("assets"):
         fm["assets"] = extras["assets"]
+    fm.update(embed.frontmatter())
     write_md(out_path, fm, body)
     emit_success(out_path, body, warnings, extra={
         "pages": extras.get("pages"),
         "assets_extracted": len(extras.get("assets", [])),
+        **embed.stdout_extra(),
     })
     return 0
 
