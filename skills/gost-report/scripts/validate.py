@@ -138,7 +138,9 @@ def _sentinel_path(docx_path: Path) -> Path:
 
 
 def write_sentinel(docx_path: Path, *, profile_name: str = "",
-                   generator_version: str = "") -> None:
+                   generator_version: str = "",
+                   allow_dashes: bool = False,
+                   style: Optional[dict] = None) -> None:
     payload = {
         "version": SENTINEL_VERSION,
         "generator": "gost_report",
@@ -147,6 +149,13 @@ def write_sentinel(docx_path: Path, *, profile_name: str = "",
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "docx": str(docx_path),
     }
+    # Report(allow_dashes=True): тире требует само задание, Stop-хук это видит.
+    if allow_dashes:
+        payload["allow_dashes"] = True
+    # Правила профиля (тире, подписи, доп. проверки): validate_docx берёт их
+    # отсюда, чтобы документ по положению МБИ не падал на правилах ИТМО.
+    if style:
+        payload["style"] = style
     sentinel = _sentinel_path(docx_path)
     sentinel.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False),
@@ -164,20 +173,103 @@ def read_sentinel(docx_path: Path) -> Optional[dict]:
         return None
 
 
+# ---- Rules: правила профиля из sentinel --------------------------------------
+
+_NUM = r"(\d+(?:\.\d+)?|[А-ЯЁA-Z]\.\d+)"
+
+
+@dataclass(frozen=True)
+class Rules:
+    """Что считать нарушением: правила профиля, с которым собран документ
+    (sentinel → "style"). Дефолты = ИТМО/ГОСТ, как до появления профилей."""
+    dash: str = "—"
+    prose_dashes: str = "strip"          # strip | normalize | keep
+    figure_label: str = "Рисунок"
+    table_label: str = "Таблица"
+    continuation_text: str = "Продолжение таблицы {n}"
+    code_font: str = "Courier New"
+    checks: Tuple[str, ...] = ()
+    keywords_min: int = 5
+    keywords_max: int = 15
+    bib_min_sources: int = 0
+    bib_title: str = ""
+    appendix_label: str = "ПРИЛОЖЕНИЕ"
+    title_page: bool = True
+
+    @classmethod
+    def from_style(cls, style: Optional[dict]) -> "Rules":
+        if not style:
+            return cls()
+        known = {f for f in cls.__dataclass_fields__}
+        kw = {k: v for k, v in style.items() if k in known}
+        if "checks" in kw:
+            kw["checks"] = tuple(kw["checks"])
+        return cls(**kw)
+
+    def enabled(self, name: str) -> bool:
+        return "all" in self.checks or name in self.checks
+
+    @property
+    def figure_re(self):
+        return _caption_re(self.figure_label, self.dash)
+
+    @property
+    def table_re(self):
+        return _caption_re(self.table_label, self.dash)
+
+    @property
+    def continuation_re(self):
+        head, _, tail = self.continuation_text.partition("{n}")
+        return re.compile("^" + re.escape(head) + _NUM + re.escape(tail) + r"\s*$")
+
+
+_CAPTION_CACHE: dict = {}
+
+
+def _caption_re(label: str, dash: str):
+    key = (label, dash)
+    if key not in _CAPTION_CACHE:
+        _CAPTION_CACHE[key] = re.compile(
+            "^" + re.escape(label) + " " + _NUM + " " + re.escape(dash) + " ")
+    return _CAPTION_CACHE[key]
+
+
+DEFAULT_RULES = Rules()
+
+
 # ---- Paragraph classification ----------------------------------------------
 
 _FIGURE_CAPTION_RE = re.compile(r"^Рисунок (\d+) — ")
 _TABLE_CAPTION_RE = re.compile(r"^Таблица (\d+) — ")
 
 
-def _para_is_caption(text: str) -> bool:
-    return bool(_FIGURE_CAPTION_RE.match(text)
-                or _TABLE_CAPTION_RE.match(text))
+def _para_is_caption(text: str, rules: Rules = DEFAULT_RULES) -> bool:
+    return bool(rules.figure_re.match(text) or rules.table_re.match(text))
 
 
-# Заголовок структурного элемента «Список использованных источников» /
-# «Список литературы» / «Библиографический список» — после него идут записи по
-# ГОСТ Р 7.0.5, где « — » обязательный разделитель областей описания.
+def _number_key(n: str) -> Tuple[str, int]:
+    """«3» → ("", 3); «1.2» → ("1", 2); «А.1» → ("А", 1)."""
+    if "." in n:
+        prefix, _, idx = n.rpartition(".")
+        return prefix, int(idx)
+    return "", int(n)
+
+
+class _Sequence:
+    """Нумерация без дыр: сквозная или внутри главы / приложения."""
+
+    def __init__(self):
+        self._last: dict = {}
+
+    def expected(self, n: str) -> Optional[str]:
+        prefix, idx = _number_key(n)
+        want = self._last.get(prefix, 0) + 1
+        self._last[prefix] = idx
+        if idx != want:
+            return f"{prefix}.{want}" if prefix else str(want)
+        return None
+
+
 _BIB_TITLE_RE = re.compile(
     r"^(СПИСОК\s+(ИСПОЛЬЗОВАННЫХ\s+)?(ИСТОЧНИКОВ|ЛИТЕРАТУРЫ)"
     r"|БИБЛИОГРАФИЧЕСКИЙ\s+СПИСОК|БИБЛИОГРАФИЯ)", re.IGNORECASE)
@@ -192,11 +284,23 @@ def _para_is_heading(paragraph) -> bool:
     return name.startswith("Heading") or name.startswith("Заголовок")
 
 
-def _para_is_code(paragraph) -> bool:
+def _para_is_code(paragraph, rules: Rules = DEFAULT_RULES) -> bool:
     for run in paragraph.runs:
-        if run.font.name == "Courier New":
+        if run.font.name == rules.code_font:
             return True
     return False
+
+
+def _title_section_end(doc, rules: Rules) -> int:
+    """Индекс первого абзаца после титула (абзац с w:sectPr закрывает секцию
+    титула). 0 — титула нет."""
+    if not rules.title_page or qn is None:
+        return 0
+    for i, p in enumerate(doc.paragraphs):
+        ppr = p._element.find(qn("w:pPr"))
+        if ppr is not None and ppr.find(qn("w:sectPr")) is not None:
+            return i + 1
+    return 0
 
 
 def _para_has_drawing(paragraph) -> bool:
@@ -220,9 +324,34 @@ def _para_text_from_xml(p_element) -> str:
 # ---- Tier (a) checks: hard fail --------------------------------------------
 
 _PROHIBITED_DASH_RE = re.compile(r"[—–]")
+_WHERE_LINE_RE = re.compile(r"^\s*(?:где\s*)?[—–]\s")
+_M_OMATH = "{http://schemas.openxmlformats.org/officeDocument/2006/math}oMath"
+_SPACED_HYPHEN_RE = re.compile(r"(?<=[^\s\d])[ \u00a0]-[ \u00a0](?=[^\s\d])")
 
 
-def _check_dashes(doc) -> List[Violation]:
+def _dash_violation(text: str, rules: Rules) -> Optional[Tuple[int, int, str]]:
+    """(start, end, что не так) или None. strip — любое тире; normalize —
+    «чужое» тире и дефис с пробелами вместо тире; keep — ничего."""
+    if rules.prose_dashes == "keep":
+        return None
+    if rules.prose_dashes == "normalize":
+        other = "—" if rules.dash != "—" else "–"
+        rx = re.compile((r"[ \u00a0]" + other + r"[ \u00a0]") if other == "–" else other)
+        m = rx.search(text)
+        if m:
+            name = "длинное «—»" if other == "—" else "короткое «–» с пробелами"
+            return m.start(), m.end(), f"{name} вместо «{rules.dash}»"
+        m = _SPACED_HYPHEN_RE.search(text)
+        if m:
+            return m.start(), m.end(), f"дефис с пробелами вместо тире «{rules.dash}»"
+        return None
+    m = _PROHIBITED_DASH_RE.search(text)
+    if m:
+        return m.start(), m.end(), "длинное/среднее тире"
+    return None
+
+
+def _check_dashes(doc, rules: Rules = DEFAULT_RULES) -> List[Violation]:
     violations: List[Violation] = []
     in_bibliography = False
     for i, p in enumerate(doc.paragraphs):
@@ -230,28 +359,35 @@ def _check_dashes(doc) -> List[Violation]:
         if not text:
             continue
         stripped = text.strip()
-        # Вход/выход из секции списка литературы (там « — » обязателен по ГОСТ
-        # Р 7.0.5). Заголовок-список → вход; следующий структурный заголовок → выход.
+        # Вход/выход из секции списка литературы (там тире обязательно по ГОСТ
+        # Р 7.0.5 / 7.0.100). Заголовок-список → вход; следующий структурный заголовок → выход.
         if _BIB_TITLE_RE.match(stripped):
             in_bibliography = True
             continue
         if in_bibliography and _para_is_heading(p) and not _BIB_TITLE_RE.match(stripped):
             in_bibliography = False
-        if _para_is_caption(text):
+        if _para_is_code(p, rules):
             continue
-        if _para_is_code(p):
-            continue
-        # Записи библиографии («N. Автор. — …») — em-dash легален по стандарту.
+        # Записи библиографии («N. Автор. — …») — тире легально по стандарту.
         if in_bibliography and _BIB_ENTRY_RE.match(stripped):
             continue
-        m = _PROHIBITED_DASH_RE.search(text)
-        if m:
-            start = max(0, m.start() - 20)
-            end = min(len(text), m.end() + 20)
-            snippet = text[start:end]
+        cap = rules.figure_re.match(text) or rules.table_re.match(text)
+        if cap:
+            if rules.prose_dashes != "normalize":
+                continue
+            text = text[cap.end():]
+        # «где m — масса, кг;» из r.formula(where=[...]): символ — формула (его
+        # нет в p.text), тире после него ставит библиотека, как в подписях.
+        where = _WHERE_LINE_RE.match(text)
+        if where and p._element.find(".//" + _M_OMATH) is not None:
+            text = text[where.end():]
+        found = _dash_violation(text, rules)
+        if found:
+            a, b, what = found
+            snippet = text[max(0, a - 20):min(len(text), b + 20)]
             violations.append(Violation(
                 tier=TIER_FAIL, code="dashes",
-                message=f"длинное/среднее тире в основном тексте: «...{snippet}...»",
+                message=f"{what} в основном тексте: «...{snippet}...»",
                 location=f"параграф {i + 1}",
             ))
     # doc.paragraphs не обходит таблицы → тире в ячейках остаётся незамеченным.
@@ -266,14 +402,13 @@ def _check_dashes(doc) -> List[Violation]:
                     ctext = cp.text
                     if not ctext:
                         continue
-                    m = _PROHIBITED_DASH_RE.search(ctext)
-                    if m:
-                        start = max(0, m.start() - 20)
-                        end = min(len(ctext), m.end() + 20)
-                        snippet = ctext[start:end]
+                    found = _dash_violation(ctext, rules)
+                    if found:
+                        a, b, what = found
+                        snippet = ctext[max(0, a - 20):min(len(ctext), b + 20)]
                         violations.append(Violation(
                             tier=TIER_FAIL, code="dashes",
-                            message=f"длинное/среднее тире в ячейке таблицы: «...{snippet}...»",
+                            message=f"{what} в ячейке таблицы: «...{snippet}...»",
                             location=f"таблица {ti + 1}, строка {ri + 1}, столбец {ci + 1}",
                         ))
     return violations
@@ -288,11 +423,11 @@ _BARE_LATEX_RE = re.compile(
 )
 
 
-def _check_bare_latex(doc) -> List[Violation]:
+def _check_bare_latex(doc, rules: Rules = DEFAULT_RULES) -> List[Violation]:
     violations: List[Violation] = []
     for i, p in enumerate(doc.paragraphs):
         text = p.text
-        if not text or _para_is_code(p):
+        if not text or _para_is_code(p, rules):
             continue
         m = _BARE_LATEX_RE.search(text)
         if m:
@@ -305,81 +440,94 @@ def _check_bare_latex(doc) -> List[Violation]:
     return violations
 
 
-def _check_figure_captions(doc) -> List[Violation]:
+def _check_figure_captions(doc, rules: Rules = DEFAULT_RULES) -> List[Violation]:
     violations: List[Violation] = []
     paragraphs = doc.paragraphs
-    expected = 1
+    seq = _Sequence()
+    skip = _title_section_end(doc, rules)   # логотип бланка на титуле не рисунок
+    label, dash = rules.figure_label, rules.dash
     for i, p in enumerate(paragraphs):
-        if not _para_has_drawing(p):
+        if i < skip or not _para_has_drawing(p):
             continue
-        # Caption — следующий непустой параграф (макс 2 шага вперёд).
-        caption = ""
-        for j in range(i + 1, min(i + 3, len(paragraphs))):
-            if paragraphs[j].text.strip():
-                caption = paragraphs[j].text
+        # Подпись — в ближайших абзацах после изображения (между ними может
+        # стоять экспликация рисунка).
+        m = None
+        for j in range(i + 1, min(i + 4, len(paragraphs))):
+            t = paragraphs[j].text
+            if not t.strip():
+                continue
+            m = rules.figure_re.match(t)
+            if m or _para_has_drawing(paragraphs[j]):
                 break
-        m = _FIGURE_CAPTION_RE.match(caption)
         if not m:
             violations.append(Violation(
                 tier=TIER_FAIL, code="figure-no-caption",
-                message=("у рисунка нет подписи «Рисунок N — Описание» "
+                message=(f"у рисунка нет подписи «{label} N {dash} Описание» "
                          "сразу после изображения."),
                 location=f"параграф {i + 1}",
             ))
             continue
-        n = int(m.group(1))
-        if n != expected:
+        want = seq.expected(m.group(1))
+        if want:
             violations.append(Violation(
                 tier=TIER_FAIL, code="figure-numbering",
-                message=(f"номер рисунка {n}, ожидался {expected}. "
+                message=(f"номер рисунка {m.group(1)}, ожидался {want}. "
                          "Нумерация не должна прыгать."),
                 location=f"параграф {i + 1}",
             ))
-        expected = n + 1
     return violations
 
 
-def _check_table_captions(doc) -> List[Violation]:
+def _check_table_captions(doc, rules: Rules = DEFAULT_RULES) -> List[Violation]:
     """Каждая таблица должна иметь подпись «Таблица N — ...» прямо перед ней.
 
     Плавающие borderless-таблицы (городкод/год на титульнике, у них
     `<w:tblpPr>` внутри `<w:tblPr>`) пропускаются — у них нет подписи по
-    дизайну.
+    дизайну. Часть таблицы после «Продолжение таблицы N» — продолжение, не
+    новая таблица. Таблицы титула (бланк) не проверяются.
     """
     violations: List[Violation] = []
     if qn is None:
         return violations
     body = doc.element.body
-    expected = 1
+    seq = _Sequence()
     last_nonempty_text = ""
+    in_title = rules.title_page
+    label, dash = rules.table_label, rules.dash
     for child in body:
         local = child.tag.split("}", 1)[-1]
         if local == "p":
             text = _para_text_from_xml(child)
             if text.strip():
                 last_nonempty_text = text
+            ppr = child.find(qn("w:pPr"))
+            if in_title and ppr is not None and ppr.find(qn("w:sectPr")) is not None:
+                in_title = False
+                last_nonempty_text = ""
         elif local == "tbl":
             tblpr = child.find(qn("w:tblPr"))
             is_floating = (tblpr is not None
                            and tblpr.find(qn("w:tblpPr")) is not None)
-            if is_floating:
+            if is_floating or in_title:
                 last_nonempty_text = ""
                 continue
-            m = _TABLE_CAPTION_RE.match(last_nonempty_text)
+            if rules.continuation_re.match(last_nonempty_text.strip()):
+                last_nonempty_text = ""
+                continue
+            m = rules.table_re.match(last_nonempty_text)
             if not m:
                 violations.append(Violation(
                     tier=TIER_FAIL, code="table-no-caption",
-                    message=("у таблицы нет подписи «Таблица N — Описание» "
+                    message=(f"у таблицы нет подписи «{label} N {dash} Описание» "
                              "прямо перед ней."),
                 ))
             else:
-                n = int(m.group(1))
-                if n != expected:
+                want = seq.expected(m.group(1))
+                if want:
                     violations.append(Violation(
                         tier=TIER_FAIL, code="table-numbering",
-                        message=f"номер таблицы {n}, ожидался {expected}.",
+                        message=f"номер таблицы {m.group(1)}, ожидался {want}.",
                     ))
-                expected = n + 1
             last_nonempty_text = ""
     return violations
 
@@ -389,7 +537,7 @@ def _check_table_captions(doc) -> List[Violation]:
 _PLACEHOLDER_NAME_RE = re.compile(r"Фамилия\s+И\.О\.")
 
 
-def _check_placeholder_name(doc) -> List[Violation]:
+def _check_placeholder_name(doc, rules: Rules = DEFAULT_RULES) -> List[Violation]:
     """Tier (b): шаблонное ФИО из примеров скилла. Warn, не fail —
     у юзера могут быть законные причины (тест, демо, etc.); ложный fail
     на example_lab.py хуже, чем пропущенный warn."""
@@ -415,11 +563,11 @@ _AI_TONE_PATTERNS = [
 ]
 
 
-def _check_ai_tone(doc) -> List[Violation]:
+def _check_ai_tone(doc, rules: Rules = DEFAULT_RULES) -> List[Violation]:
     violations: List[Violation] = []
     for i, p in enumerate(doc.paragraphs):
         text = p.text
-        if not text or _para_is_caption(text) or _para_is_code(p):
+        if not text or _para_is_caption(text, rules) or _para_is_code(p, rules):
             continue
         for rx in _AI_TONE_PATTERNS:
             m = rx.search(text)
@@ -434,11 +582,11 @@ def _check_ai_tone(doc) -> List[Violation]:
     return violations
 
 
-def _check_caption_short(doc) -> List[Violation]:
+def _check_caption_short(doc, rules: Rules = DEFAULT_RULES) -> List[Violation]:
     violations: List[Violation] = []
     for i, p in enumerate(doc.paragraphs):
         text = p.text
-        m = _FIGURE_CAPTION_RE.match(text)
+        m = rules.figure_re.match(text)
         if not m:
             continue
         after = text[m.end():].strip()
@@ -450,6 +598,167 @@ def _check_caption_short(doc) -> List[Violation]:
                 location=f"параграф {i + 1}",
             ))
     return violations
+
+
+# ---- Проверки по профилю (Rules.checks): все WARN ---------------------------
+
+_M_T = "{http://schemas.openxmlformats.org/officeDocument/2006/math}t"
+
+
+def _full_text(p_el) -> str:
+    """Текст абзаца вместе с инлайн-формулами (m:t): иначе «где $m$ – …»
+    выглядит как «где  – …» с двойным пробелом."""
+    return "".join(el.text or "" for el in p_el.iter(qn("w:t"), _M_T))
+
+
+def _check_double_space(doc, rules: Rules = DEFAULT_RULES) -> List[Violation]:
+    out: List[Violation] = []
+    for i, p in enumerate(doc.paragraphs):
+        if "  " in _full_text(p._element) and not _para_is_code(p, rules):
+            out.append(Violation(TIER_WARN, "double-space",
+                                 "двойной пробел в тексте", f"параграф {i + 1}"))
+    return out
+
+
+def _check_heading_period(doc, rules: Rules = DEFAULT_RULES) -> List[Violation]:
+    out: List[Violation] = []
+    for i, p in enumerate(doc.paragraphs):
+        if not _para_is_heading(p):
+            continue
+        text = p.text.strip()
+        if text.endswith(".") and not text.endswith(("и др.", "т. д.", "т. п."))\
+                and ". " not in text[:-1]:
+            out.append(Violation(TIER_WARN, "heading-period",
+                                 f"точка в конце заголовка: «{text[-40:]}»",
+                                 f"параграф {i + 1}"))
+    return out
+
+
+def _spacing_pt(p_el) -> Tuple[float, float]:
+    ppr = p_el.find(qn("w:pPr"))
+    sp = ppr.find(qn("w:spacing")) if ppr is not None else None
+    if sp is None:
+        return 0.0, 0.0
+    before = sp.get(qn("w:before")) or "0"
+    after = sp.get(qn("w:after")) or "0"
+    try:
+        return int(before) / 20, int(after) / 20
+    except ValueError:
+        return 0.0, 0.0
+
+
+def _check_paragraph_spacing(doc, rules: Rules = DEFAULT_RULES) -> List[Violation]:
+    """Интервалы до/после у абзацев основного текста (по ширине), кроме
+    формул и их «где …»: положения запрещают межабзацные интервалы."""
+    out: List[Violation] = []
+    if qn is None:
+        return out
+    skip = _title_section_end(doc, rules)
+    for i, p in enumerate(doc.paragraphs):
+        if i < skip or _para_is_heading(p) or not p.text.strip():
+            continue
+        el = p._element
+        ppr = el.find(qn("w:pPr"))
+        jc = ppr.find(qn("w:jc")) if ppr is not None else None
+        if jc is None or jc.get(qn("w:val")) not in ("both", "distribute"):
+            continue
+        ind = ppr.find(qn("w:ind"))
+        if (ind is not None and (ind.get(qn("w:left")) or "0") not in ("0", "")) \
+                or p.text.lstrip().startswith("где ") \
+                or el.find(".//{http://schemas.openxmlformats.org/officeDocument/2006/math}oMath") is not None:
+            continue
+        before, after = _spacing_pt(el)
+        if before > 0 or after > 0:
+            out.append(Violation(TIER_WARN, "paragraph-spacing",
+                                 f"интервал до/после абзаца ({before:g}/{after:g} пт)",
+                                 f"параграф {i + 1}"))
+    return out
+
+
+def _mentioned_numbers(text: str, stem: str) -> set:
+    """Номера из «таблице 2», «таблицах 1–3», «рисунках 1.1 и 1.2»."""
+    found: set = set()
+    rx = re.compile(stem + r"\w*\.?[\s\u00a0]+(" + _NUM + r"(?:\s*(?:[–—-]|,|и)\s*" + _NUM + r")*)",
+                    re.IGNORECASE)
+    for m in rx.finditer(text):
+        chunk = m.group(1)
+        nums = re.findall(_NUM, chunk)
+        found.update(nums)
+        for a, b in re.findall(_NUM + r"\s*[–—-]\s*" + _NUM, chunk):
+            pa, ia = _number_key(a)
+            pb, ib = _number_key(b)
+            if pa == pb and ib > ia:
+                found.update((f"{pa}.{k}" if pa else str(k)) for k in range(ia, ib + 1))
+    return found
+
+
+def _check_mentions(doc, rules: Rules, *, kind: str) -> List[Violation]:
+    out: List[Violation] = []
+    is_table = kind == "table"
+    cap_re = rules.table_re if is_table else rules.figure_re
+    stem = r"табл" if is_table else r"рис"
+    paragraphs = [p.text for p in doc.paragraphs]
+    for i, text in enumerate(paragraphs):
+        m = cap_re.match(text)
+        if not m:
+            continue
+        n = m.group(1)
+        scope = paragraphs[:i] if is_table else paragraphs[:i] + paragraphs[i + 1:]
+        scope = [t for t in scope if not cap_re.match(t)]
+        if n not in _mentioned_numbers("\n".join(scope), stem):
+            what = "таблицу" if is_table else "рисунок"
+            where = " до неё" if is_table else ""
+            out.append(Violation(TIER_WARN, f"{kind}-mention",
+                                 f"нет ссылки на {what} {n} в тексте{where}",
+                                 f"параграф {i + 1}"))
+    return out
+
+
+def _check_table_mention(doc, rules: Rules = DEFAULT_RULES) -> List[Violation]:
+    return _check_mentions(doc, rules, kind="table")
+
+
+def _check_figure_mention(doc, rules: Rules = DEFAULT_RULES) -> List[Violation]:
+    return _check_mentions(doc, rules, kind="figure")
+
+
+def _check_keywords_count(doc, rules: Rules = DEFAULT_RULES) -> List[Violation]:
+    out: List[Violation] = []
+    for i, p in enumerate(doc.paragraphs):
+        try:
+            name = p.style.name or ""
+        except Exception:
+            name = ""
+        if name != "Keywords":
+            continue
+        n = len([w for w in p.text.split(",") if w.strip()])
+        if not rules.keywords_min <= n <= rules.keywords_max:
+            out.append(Violation(TIER_WARN, "keywords-count",
+                                 f"ключевых слов {n}, нужно "
+                                 f"{rules.keywords_min}–{rules.keywords_max}",
+                                 f"параграф {i + 1}"))
+    return out
+
+
+def _check_bib_count(doc, rules: Rules = DEFAULT_RULES) -> List[Violation]:
+    if not rules.bib_min_sources:
+        return []
+    count, inside, seen = 0, False, False
+    for p in doc.paragraphs:
+        text = p.text.strip()
+        if _BIB_TITLE_RE.match(text):
+            inside = seen = True
+            continue
+        if inside and _para_is_heading(p):
+            inside = False
+        if inside and _BIB_ENTRY_RE.match(text):
+            count += 1
+    # Без списка источников (наброски, глава отдельным файлом) — не о чем говорить.
+    if seen and count < rules.bib_min_sources:
+        return [Violation(TIER_WARN, "bib-count",
+                          f"источников {count}, положение требует не менее "
+                          f"{rules.bib_min_sources}")]
+    return []
 
 
 # ---- Orchestration ---------------------------------------------------------
@@ -464,13 +773,24 @@ _ALL_CHECKS = [
     _check_caption_short,
 ]
 
+# Проверки по требованию профиля: имя в UniversityProfile.checks → функция.
+_PROFILE_CHECKS = {
+    "double-space": _check_double_space,
+    "heading-period": _check_heading_period,
+    "paragraph-spacing": _check_paragraph_spacing,
+    "table-mention": _check_table_mention,
+    "figure-mention": _check_figure_mention,
+    "keywords-count": _check_keywords_count,
+    "bib-count": _check_bib_count,
+}
 
-def _safe_run_check(check, doc) -> List[Violation]:
+
+def _safe_run_check(check, doc, rules: Rules = DEFAULT_RULES) -> List[Violation]:
     """Один правило-чек, обёрнутый в try/except. Ошибки внутри правила
     становятся `rule-error` WARN'ом, чтобы не ронять остальные правила.
     Единая точка реакции на внутренние сбои валидатора."""
     try:
-        return list(check(doc))
+        return list(check(doc, rules))
     except Exception as e:
         return [Violation(
             tier=TIER_WARN, code="rule-error",
@@ -478,7 +798,9 @@ def _safe_run_check(check, doc) -> List[Violation]:
         )]
 
 
-def validate_docx(path: Path) -> List[Violation]:
+def validate_docx(path: Path, *, style: Optional[dict] = None) -> List[Violation]:
+    """Проверка .docx. Правила — style (если передан), иначе из sentinel
+    рядом с файлом, иначе дефолты ИТМО/ГОСТ."""
     if not _load_docx():
         return [Violation(
             tier=TIER_FAIL, code="missing-deps",
@@ -492,9 +814,17 @@ def validate_docx(path: Path) -> List[Violation]:
             tier=TIER_FAIL, code="read-failed",
             message=f"не смог открыть .docx: {e}",
         )]
+    sentinel = read_sentinel(path) or {}
+    rules = Rules.from_style(style if style is not None else sentinel.get("style"))
+    allow_dashes = bool(sentinel.get("allow_dashes")) and style is None
     violations: List[Violation] = []
     for check in _ALL_CHECKS:
-        violations.extend(_safe_run_check(check, doc))
+        if (allow_dashes or rules.prose_dashes == "keep") and check is _check_dashes:
+            continue
+        violations.extend(_safe_run_check(check, doc, rules))
+    for name, check in _PROFILE_CHECKS.items():
+        if rules.enabled(name):
+            violations.extend(_safe_run_check(check, doc, rules))
     return violations
 
 
@@ -626,8 +956,16 @@ def _hook_main(cwd: Path, argv: Optional[List[str]] = None) -> int:
     return 0
 
 
-def _check_main(path_str: str) -> int:
+def _profile_style(spec: str) -> dict:
+    """--profile NAME|path.toml → правила проверки этого стиля."""
+    import gost_report
+    profile = gost_report.load_profile(spec)
+    return gost_report.validation_style(profile)
+
+
+def _check_main(path_str: str, profile: Optional[str] = None) -> int:
     """`--check <path>`: ручная проверка одного .docx, человеко-читаемый отчёт.
+    `--profile mbi` — правила стиля для .docx без sentinel (чужой файл).
 
     Exit: 0 если passed (включая warnings-only), 1 если есть FAIL,
     2 при ошибке вызова.
@@ -636,7 +974,8 @@ def _check_main(path_str: str) -> int:
     if not path.exists():
         print(f"validate.py: file not found: {path}", file=sys.stderr)
         return 2
-    violations = validate_docx(path)
+    style = _profile_style(profile) if profile else None
+    violations = validate_docx(path, style=style)
     if not violations:
         print(f"validate.py: {path} — passed (0 нарушений)")
         return 0
@@ -652,6 +991,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="Stop-hook: сканирует cwd, JSON decision-block")
     parser.add_argument("--check", metavar="PATH",
                         help="ручная проверка одного .docx")
+    parser.add_argument("--profile", metavar="STYLE",
+                        help="стиль для --check (mbi, путь к .toml); без него — "
+                             "правила из sentinel рядом с файлом или ИТМО/ГОСТ")
     args = parser.parse_args(parsed_argv)
 
     try:
@@ -662,7 +1004,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.check:
             if not _load_docx():
                 _maybe_reexec_in_venv(parsed_argv)
-            return _check_main(args.check)
+            return _check_main(args.check, args.profile)
         parser.print_help()
         return 2
     except Exception:

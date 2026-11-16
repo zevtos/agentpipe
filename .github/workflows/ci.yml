@@ -4,7 +4,7 @@ name: ci
 # assertion-based consistency validators (the same ones the pre-commit hook and
 # release.yml run) so docs-vs-disk drift, malformed frontmatter, or an
 # unparseable installer fail fast on every push/PR instead of slipping to a tag.
-# Mirrors what `agent-ci run --workflow .github/workflows/ci.yml` runs locally
+# Mirrors what `local-ci run --workflow .github/workflows/ci.yml` runs locally
 # before a push.
 
 on:
