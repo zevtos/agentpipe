@@ -1,0 +1,102 @@
+# Заготовка стиля вуза для gost-report. Скопируй в <project>/.gost-report/styles/<имя>.toml
+# (или ~/.config/gost-report/styles/ — на все проекты) и выбери: Report(..., profile="<имя>").
+# Раскомментируй только то, что в методичке отличается от родителя (extends).
+# Полный список полей: python3 <skill_dir>/scripts/styles.py fields
+# Проверка файла:      python3 <skill_dir>/scripts/styles.py check <путь>
+
+description = "Название вуза: что это за стиль"
+extends = "gost"                 # gost | itmo | mbi | имя другого стиля | путь
+
+# university_full = "федеральное государственное бюджетное образовательное учреждение высшего образования"
+# university_short = "«Название университета»"
+# faculty = "Факультет …"
+# city = "Город"
+# ministry = ""                  # пусто — без строки министерства
+# checks = ["all"]               # доп. проверки валидатора (WARN)
+
+[page]
+# margin_left = 30               # мм
+# margin_right = 15
+# margin_top = 20
+# margin_bottom = 20
+# number_position = "bottom-center"
+# number_size = 12
+
+[body]
+# font_size = 14
+# line_spacing = 1.5
+# indent_cm = 1.25
+# block_space_pt = 0             # 0 — без интервалов вокруг рисунков и подписей
+# dash = "–"                     # тире в подписях: «Таблица 1 – …»
+# prose_dashes = "normalize"     # strip | normalize | keep
+# nbsp = "required"              # off | required | full
+# hyphenation = true
+# widow_control = true
+
+[headings]
+# toc_title = "СОДЕРЖАНИЕ"
+# numbering = true               # «1», «1.1» автоматически
+# glue = true                    # предлоги не в конце строки заголовка
+
+[h1]
+# size = 14
+# align = "center"
+# uppercase = true
+# new_page = true
+# space_after = "1line"
+
+[h2]
+# size = 14
+# align = "justify"              # center | left | right | justify
+# indent_cm = 1.25
+# space_before = "1line"
+# space_after = "1line"
+
+[caption]
+# table_align = "left"
+# figure_align = "center"
+# font_size = 12
+# line_spacing = 1.0
+# hyphenation = false
+# keep_with_next = true
+# numbering = "chapter"          # global | chapter
+
+[table]
+# font_size = 12
+# line_spacing = 1.0
+# repeat_header = true
+# cant_split = true
+# continuation = true            # «Продолжение таблицы N»
+
+[list]
+# layout = "paragraph"           # hanging | paragraph
+# bullet = "–"
+# numbered = "%1)"
+
+[formula]
+# space_pt = 12
+# where_indent = true
+
+[bib]
+# style = "7.0.100-2018"         # 7.1-2003 | 7.0.100-2018
+# align = "justify"
+# indent_cm = 1.25
+# min_sources = 25
+
+[appendix]
+# font_size = 12
+
+# Титул по форме вуза — блоками (см. references/profiles.md, «Титульный лист»)
+# или готовым бланком: [title] docx = "titul.docx"
+# [title]
+# required = ["topic", "student_name", "year"]
+# block_defaults = { line_spacing = 1.0 }
+# [[title.blocks]]
+# lines = ["{university_full}", "{university_short}"]
+# [[title.blocks]]
+# text = "{topic}"
+# bold = true
+# blank_before = 6
+# [[title.blocks]]
+# text = "{city}, {year}"
+# anchor = "bottom"

@@ -1,8 +1,8 @@
-# PDF parsing — troubleshooting (ultrasearch Stage 1)
+# PDF parsing — troubleshooting (ultrasearch)
 
-## Default: `pymupdf4llm`
+## Default: `pymupdf4llm` + per-page docling fallback
 
-Stage 1 uses **only** `pymupdf4llm` (see `scripts/parse.py`). Stage 2 will add a docling fallback for math/table-heavy pages, gated by a per-page heuristic.
+The default parse is `pymupdf4llm` (see `scripts/parse.py`); math/table-heavy pages are re-parsed by the **docling fallback** (ships — gate it off with `--no-docling`), selected by a per-page heuristic.
 
 ### License — AGPL v3
 
@@ -12,7 +12,7 @@ Stage 1 uses **only** `pymupdf4llm` (see `scripts/parse.py`). Stage 2 will add a
 - The ultrasearch skill itself is fine to share, redistribute, embed in research workflows.
 - See PyMuPDF Discussion #971 for the canonical Artifex statement on this.
 
-If a future user needs a non-AGPL parser, Stage 3 `--parser docling` is the supported alternative (Apache-2 from IBM via LF AI & Data).
+If a user needs a non-AGPL parser, docling (Apache-2 from IBM via LF AI & Data) is the shipped alternative — it already handles the math/table pages via the fallback.
 
 ## Apple Silicon (MPS) device detection
 
@@ -26,7 +26,8 @@ torch.backends.mps.is_available()   # → True on M1/M2/M3/M4
 If MPS is unavailable (older macOS, Intel Mac, or a corrupt PyTorch build), the embedder falls back to CPU at ~10× slowdown. Check with:
 
 ```bash
-~/.claude/skills/ultrasearch/.venv/bin/python -c \
+# venv lives in the global state dir (ADR-008), not inside the skill folder:
+"${ULTRASEARCH_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/agentpipe/ultrasearch}/venv/bin/python" -c \
   "import torch; print('mps:', torch.backends.mps.is_available(), 'cuda:', torch.cuda.is_available())"
 ```
 
@@ -55,13 +56,13 @@ If you want OCR for scanned PDFs, use `doc2kb` (which has a marker/docling tier)
 
 Symptom: a markdown table whose cells contain runs of `single-char + <br> + single-char + <br>…`. This is `pymupdf4llm` collapsing positioned math (subscripts, fraction bars, primes) into an orphan-fragment table.
 
-Stage 1 emits a warning but keeps the (broken) text. Stage 2 will re-parse the affected pages with docling, which handles positioned math correctly. Workaround: skip the offending paper or read it via Claude's `Read` tool, which renders the PDF visually.
+A warning is emitted but the (broken) text is kept. The docling fallback re-parses the affected pages (ships — unless `--no-docling`), handling positioned math correctly. Workaround if docling is disabled: skip the offending paper or read it via Claude's `Read` tool, which renders the PDF visually.
 
 ### `dropped_pictures:N`
 
 Symptom: `pymupdf4llm` emitted `==> picture [WxH] intentionally omitted <==` placeholders for math-heavy pages. The body text references "equation (3)" but the equation itself is gone.
 
-Stage 1 strips the placeholders and surfaces a warning if the per-page density crosses 2.0 or absolute count crosses 5. Stage 2 docling fallback handles this — for now, the paper is indexed but its math content is missing.
+The placeholders are stripped and a warning surfaces if the per-page density crosses 2.0 or absolute count crosses 5. The docling fallback handles these pages; with `--no-docling` the paper is indexed but its math content is missing.
 
 ### `pdf_encrypted`
 
@@ -75,11 +76,13 @@ Bootstrap failure. Run:
 python3 ~/.claude/skills/ultrasearch/scripts/ensure_env.py
 ```
 
-If it still fails, delete `~/.claude/skills/ultrasearch/.venv/` and run the bootstrap again.
+If it still fails, delete the venv in the global state dir
+(`"${ULTRASEARCH_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/agentpipe/ultrasearch}/venv"`)
+and run the bootstrap again.
 
-## Per-page heuristic (Stage 2 preview)
+## Per-page heuristic (docling trigger)
 
-Stage 2 will compute, per page:
+Per page, the parser computes:
 
 - `pipe_count = body.count('|')` — table density
 - `math_marker = re.search(r'\\$\\$|\\\\begin\\{(equation|align|matrix)\\}', body)`

@@ -1,6 +1,6 @@
 ---
 description: "Repository tidy-up: revalidate docs against the real repo and prune cruft, with git as the safety net — one reviewable commit, recoverable removals, never an irreversible delete. Hygiene only; code smells go to /refactor."
-argument-hint: [optional: focus area — 'docs'|'artifacts'|'refs'|'all']
+argument-hint: "[optional: focus area — 'docs'|'artifacts'|'refs'|'all']"
 ---
 
 You are orchestrating a repository tidy-up: making the repo's own claims true again and removing cruft that should not be tracked. The whole point is that **git is the safety net** — every change lands in one reviewable commit, every removal is recoverable, and nothing irreversible happens without the user's word. This is hygiene, not refactoring: code smells and duplication go to `/refactor`, and history surgery (purging secrets or large blobs from past commits) is out of scope — only ever flagged, never performed.
@@ -44,7 +44,7 @@ Derive the repo's real state, because the docs can't be trusted for it: the actu
 
 ### Step 3: Detect & Correct (Docs Agent)
 Run the `docs` agent:
-"Audit this repository against its actual current state, using the ground truth from Step 1.
+"Audit this repository against its actual current state, using the ground truth from Step 2.
 
 Apply directly (these are tracked-file edits that land in tidy's single commit): claims that are now FALSE — wrong counts or item lists, broken internal links and anchors, references to files/functions/flags/paths that were renamed or removed, setup/usage commands that no longer work, and sync-pair divergences. Correct each to match reality.
 

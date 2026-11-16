@@ -29,7 +29,7 @@ CLI:
 
 Options:
     -k / --top-k N     number of passages to return (default 8)
-    --doc ID           restrict to a single doc-id (e.g. doc-002)
+    --doc ID           restrict to one doc-id and its embedded docs (e.g. doc-002)
     --type T           restrict to a source_type (pdf, docx, pptx, ipynb, ...)
     --page N           restrict to a single source page number
     --and              require ALL query terms (default: OR + BM25 ranking)
@@ -71,10 +71,19 @@ _TOKEN_RE = re.compile(r"[0-9A-Za-zÀ-ɏЀ-ӿ]+")
 
 
 def _fold(s: str) -> str:
-    """Lowercase + strip combining diacritics (mirrors FTS5 unicode61
-    remove_diacritics on the fallback path so both backends tokenize alike)."""
-    s = unicodedata.normalize("NFKD", s.lower())
-    return "".join(c for c in s if not unicodedata.combining(c))
+    """Lowercase + strip diacritics from LATIN characters only (mirrors FTS5
+    unicode61 remove_diacritics, which never touches non-Latin scripts).
+    Blanket NFKD-stripping would corrupt Cyrillic: й decomposes to и+breve
+    and ё to е+diaeresis, so a folded query word ("неиро…") can never match
+    the intact indexed token ("нейро…")."""
+    out = []
+    for ch in s.lower():
+        d = unicodedata.normalize("NFKD", ch)
+        if d != ch and d[:1].isascii():
+            out.append("".join(c for c in d if not unicodedata.combining(c)))
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 def _tokenize(text: str) -> list[str]:
@@ -96,7 +105,7 @@ def _open_db(kb_dir: Path) -> sqlite3.Connection:
     if not db_path.is_file():
         raise FileNotFoundError(
             f"no {INDEX_DB_NAME} in {kb_dir} — build it with "
-            f"`ensure_env.py index_kb.py {kb_dir}` (doc2kb Phase 5.5)"
+            f"`ensure_env.py index_kb.py {kb_dir}` (doc2kb Phase 4.5)"
         )
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
@@ -129,8 +138,9 @@ def _filter_sql(doc: Optional[str], stype: Optional[str], page: Optional[int],
                 alias: str = "c") -> tuple[str, list[Any]]:
     clauses, params = [], []
     if doc:
-        clauses.append(f"{alias}.doc_id = ?")
-        params.append(doc)
+        # A doc id also matches its embedded documents (`doc-001_e01`, …).
+        clauses.append(f"({alias}.doc_id = ? OR {alias}.doc_id LIKE ? ESCAPE '\\')")
+        params += [doc, doc.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "\\_e%"]
     if stype:
         clauses.append(f"{alias}.source_type = ?")
         params.append(stype)

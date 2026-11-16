@@ -51,6 +51,11 @@ from _common import (  # type: ignore
 # refined at extract time. Tuned to match the PDF sampling pattern (≤12).
 IPYNB_SCOUT_MAX_CELLS = 4000
 
+# Number of spine documents the EPUB scout samples for MathML before giving up
+# — math is usually flagged in the first chapters, and reading every chapter of
+# a large book is too slow for scout. Refined nothing downstream; informational.
+EPUB_SCOUT_MATH_SAMPLE = 12
+
 
 # Schema version of the scout JSON output. Bump on breaking changes.
 SCHEMA_VERSION = "1.0"
@@ -84,6 +89,8 @@ EXT_TO_TYPE = {
     ".txt": "txt",
     ".html": "html",
     ".htm": "html",
+    ".xhtml": "html",
+    ".xml": "xml",
     ".ipynb": "ipynb",
     ".epub": "epub",
     ".rtf": "rtf",
@@ -149,6 +156,10 @@ def detect_source_type(path: Path, mime: str | None) -> tuple[str, str]:
             mime_type = "md"
         elif mime.startswith("text/html"):
             mime_type = "html"
+        elif mime in ("application/xhtml+xml",):
+            mime_type = "html"
+        elif mime in ("text/xml", "application/xml"):
+            mime_type = "xml"
         elif mime in ("application/x-ipynb+json",):
             mime_type = "ipynb"
         elif mime in ("application/epub+zip",):
@@ -387,6 +398,105 @@ def ipynb_richness(path: Path) -> dict[str, Any]:
     return out
 
 
+def xlsx_richness(path: Path) -> dict[str, Any]:
+    """Count worksheets and sum the uncompressed size of the worksheet parts and
+    sharedStrings.xml — the token proxy, unlike the compressed `size_bytes`.
+    Central directory only (stdlib zipfile): nothing is inflated or parsed, the
+    zip-bomb checks belong to extract_xlsx.py."""
+    out: dict[str, Any] = {"sheets": 0, "xlsx_xml_bytes": 0}
+    try:
+        import zipfile
+
+        with zipfile.ZipFile(path) as zf:
+            for info in zf.infolist():
+                name = info.filename
+                if re.fullmatch(r"xl/worksheets/[^/]+\.xml", name):
+                    out["sheets"] += 1
+                    out["xlsx_xml_bytes"] += info.file_size
+                elif name == "xl/sharedStrings.xml":
+                    out["xlsx_xml_bytes"] += info.file_size
+    except Exception:
+        pass  # not a readable zip: the extractor reports why
+    return out
+
+
+_EMBED_MEMBER_RE = re.compile(r"(?:word|ppt|xl)/embeddings/[^/]+", re.IGNORECASE)
+
+
+def embedded_object_count(path: Path, src_type: str) -> int:
+    """How many embedded objects (OLE objects, embedded files, chart-data
+    workbooks, PDF attachments) the extractor will look into — see
+    _embedded.py. OOXML: central directory only, nothing inflated. Cheap enough
+    to run on every file; a failure just reports 0."""
+    try:
+        if src_type in ("docx", "pptx", "xlsx"):
+            import zipfile
+            with zipfile.ZipFile(path) as zf:
+                return sum(1 for i in zf.infolist() if _EMBED_MEMBER_RE.fullmatch(i.filename))
+        if src_type == "pdf":
+            import pymupdf  # type: ignore
+            with pymupdf.open(str(path)) as doc:
+                n = doc.embfile_count()
+                for page in doc:
+                    n += sum(1 for _ in page.annots(types=[pymupdf.PDF_ANNOT_FILE_ATTACHMENT]))
+                return n
+    except Exception:  # noqa: BLE001 — the extractor reports real failures
+        return 0
+    return 0
+
+
+def epub_richness(path: Path) -> dict[str, Any]:
+    """Parse the OPF package to count spine documents (chapters), images, and
+    detect MathML, plus pull dc:title/dc:creator. `xhtml_bytes` is the summed
+    uncompressed size of the spine documents — a real token proxy, unlike the
+    compressed `size_bytes` of the .epub zip itself."""
+    out: dict[str, Any] = {
+        "spine_documents": 0,
+        "images": 0,
+        "has_math": False,
+        "xhtml_bytes": 0,
+        "book_title": None,
+        "book_authors": None,
+    }
+    try:
+        import zipfile
+
+        from _common import parse_epub_structure  # type: ignore
+    except Exception as e:  # pragma: no cover - import guard
+        out["warnings"] = [f"epub scout unavailable: {str(e)[:200]}"]
+        return out
+    try:
+        with zipfile.ZipFile(path) as zf:
+            struct = parse_epub_structure(zf)
+            names = set(zf.namelist())
+            out["images"] = sum(
+                1 for _href, mt in struct["items"].values()
+                if mt.startswith("image/")
+            )
+            out["book_title"] = struct.get("title")
+            out["book_authors"] = struct.get("authors")
+            sampled = 0
+            for href in struct["spine"]:
+                if href not in names:
+                    continue
+                out["spine_documents"] += 1
+                try:
+                    out["xhtml_bytes"] += zf.getinfo(href).file_size
+                except KeyError:
+                    pass
+                if sampled < EPUB_SCOUT_MATH_SAMPLE and not out["has_math"]:
+                    try:
+                        chunk = zf.read(href)[:200_000].decode("utf-8", "ignore")
+                        if "<math" in chunk or "MathML" in chunk:
+                            out["has_math"] = True
+                    except Exception:
+                        pass
+                    sampled += 1
+    except Exception as e:
+        out["warnings"] = [f"epub scout failed: {str(e)[:200]}"]
+    return out
+
+
 def text_encoding(path: Path, sample_bytes: int = 65536) -> dict[str, Any]:
     out: dict[str, Any] = {"encoding": "utf-8"}
     try:
@@ -504,6 +614,11 @@ def set_strategy_and_tokens(info: dict[str, Any], *, enable_mineru: bool = False
     elif t == "html":
         info["extraction_strategy"] = "trafilatura"
         info["estimated_tokens"] = max(info.get("size_bytes", 0) // 6, 100)
+    elif t == "xml":
+        # Tag overhead ≈ html; XHTML routes through trafilatura inside the
+        # extractor, generic XML flattens to text blocks.
+        info["extraction_strategy"] = "xml"
+        info["estimated_tokens"] = max(info.get("size_bytes", 0) // 6, 100)
     elif t == "ipynb":
         cells = info.get("cells") or 0
         code_cells = info.get("code_cells") or 0
@@ -512,7 +627,23 @@ def set_strategy_and_tokens(info: dict[str, Any], *, enable_mineru: bool = False
         info["estimated_tokens"] = (
             max(cells * 80 + code_cells * 60, 200) if cells else None
         )
-    elif t in {"xlsx", "epub", "odt", "image"}:
+    elif t == "epub":
+        # Pandoc preferred (spine order + images + MathML→LaTeX); the
+        # zip+markdownify route is the pure-Python lightweight fallback, so
+        # epub always has a working path. Token proxy from summed uncompressed
+        # XHTML bytes (~6 chars/token), not the compressed .epub size.
+        info["extraction_strategy"] = "epub"
+        xhtml = info.get("xhtml_bytes") or 0
+        info["estimated_tokens"] = max(xhtml // 6, 100) if xhtml else None
+    elif t == "xlsx":
+        # openpyxl read-only through defusedxml; zip-bomb pre-check and
+        # sheet/row/cell caps (explicit truncation marker) live in the
+        # extractor. Token proxy from the uncompressed sheet XML: most of it
+        # is tag overhead (~12 bytes per token of cell text).
+        info["extraction_strategy"] = "xlsx"
+        xml_bytes = info.get("xlsx_xml_bytes") or 0
+        info["estimated_tokens"] = max(xml_bytes // 12, 100) if xml_bytes else None
+    elif t in {"odt", "image"}:
         info["extraction_strategy"] = "not_in_mvp"
         info["estimated_tokens"] = None
         warnings.append(f"{t}: not supported in MVP (follow-up release)")
@@ -529,7 +660,8 @@ def set_strategy_and_tokens(info: dict[str, Any], *, enable_mineru: bool = False
         warnings.append(f"large file: {info['size_bytes'] // (1024 * 1024)} MB")
         if info.get("extraction_strategy") in (
             "pymupdf4llm", "mammoth", "doc", "rtf", "python-pptx",
-            "passthrough-md", "passthrough-txt", "trafilatura", "ipynb",
+            "passthrough-md", "passthrough-txt", "trafilatura", "ipynb", "epub",
+            "xml", "xlsx",
         ) and not info.get("action_required"):
             info["action_required"] = "ask_user_proceed_huge"
 
@@ -640,14 +772,21 @@ def scan_file(idx: int, path: Path, input_root: Path,
         info.update(pptx_richness(path))
     elif src_type == "ipynb":
         info.update(ipynb_richness(path))
-    elif src_type in ("md", "txt"):
+    elif src_type == "epub":
+        info.update(epub_richness(path))
+    elif src_type == "xlsx":
+        info.update(xlsx_richness(path))
+    elif src_type in ("md", "txt", "xml"):
         info.update(text_encoding(path))
+    if src_type in ("docx", "pptx", "xlsx", "pdf") and info.get("pdf_class") not in ("encrypted", "corrupt"):
+        info["embedded_objects"] = embedded_object_count(path, src_type)
 
     set_strategy_and_tokens(info, enable_mineru=enable_mineru)
 
     # Normalize: ensure known keys present even when None — keeps schema stable.
     info.setdefault("pages", None)
     info.setdefault("slides", None)
+    info.setdefault("sheets", None)
     info.setdefault("has_notes", None)
     info.setdefault("notes_chars", 0)
     info.setdefault("inline_images", 0)
@@ -662,6 +801,13 @@ def scan_file(idx: int, path: Path, input_root: Path,
     info.setdefault("has_outputs", None)
     info.setdefault("language", None)
     info.setdefault("kernelspec_name", None)
+    info.setdefault("spine_documents", None)
+    info.setdefault("images", None)
+    info.setdefault("xhtml_bytes", None)
+    info.setdefault("has_math", None)
+    info.setdefault("book_title", None)
+    info.setdefault("book_authors", None)
+    info.setdefault("embedded_objects", 0)
     return info
 
 
@@ -808,6 +954,10 @@ def main() -> int:
     print(f"doc2kb scout: {len(files)} files, ~{total_tokens:,} tokens, {elapsed:.1f}s")
     print("  by type:      " + ", ".join(f"{k}={v}" for k, v in sorted(types.items())))
     print("  by strategy:  " + ", ".join(f"{k}={v}" for k, v in sorted(strategies.items())))
+    n_emb = [f.get("embedded_objects") or 0 for f in files]
+    if any(n_emb):
+        print(f"  embedded:     {sum(n_emb)} object(s) in {sum(1 for n in n_emb if n)} file(s) — "
+              "extracted as their own docs in Phase 4 (depth 4 by default)")
     if scout["user_decisions_needed"]:
         print(f"  USER DECISIONS NEEDED: {len(scout['user_decisions_needed'])} groups")
         for d in scout["user_decisions_needed"]:

@@ -1,6 +1,6 @@
-# Academic API reference — ultrasearch Stage 1
+# Academic API reference — ultrasearch
 
-Endpoint specs, rate budgets, and environment variables for the three Stage 1 discovery sources. Stage 2 sources (Crossref, Europe PMC, CORE, paperscraper) are documented in this file as deferred entries.
+Endpoint specs, rate budgets, and environment variables for the discovery sources. The first three (OpenAlex, Semantic Scholar, arXiv) are documented in full; the later additions (Crossref, Europe PMC, CORE, DataCite, HuggingFace) ship too and are summarized in the tables below.
 
 ## Environment variables
 
@@ -8,7 +8,7 @@ Endpoint specs, rate budgets, and environment variables for the three Stage 1 di
 |---|---|---|---|
 | `OPENALEX_API_KEY` | **Yes** after 13 Feb 2026 | `discover.py` (OpenAlex) | Free API key from <https://openalex.org/account>. Without it OpenAlex returns 401 to new users. |
 | `OPENALEX_EMAIL` | Strongly recommended | `discover.py` (OpenAlex polite pool) | Identifies you in OpenAlex logs. Improves throughput in the polite pool. |
-| `UNPAYWALL_EMAIL` | **Yes** | `fetch.py` Tier 1 | Required by Unpaywall TOS. Without it Tier 1 is skipped and we fall back to arXiv-only fetch. |
+| `UNPAYWALL_EMAIL` | **Yes** | `fetch.py` Tier 2 | Required by Unpaywall TOS. Without it the Unpaywall tier is skipped — the largest OA tier after the free OpenAlex hint. |
 | `S2_API_KEY` | Optional | `discover.py` (Semantic Scholar) | Dedicated 1 RPS pool. Without it you share the 5000-req-per-5-min anonymous bucket with the world. |
 
 Set them in your shell before invoking the skill:
@@ -58,7 +58,7 @@ done
 - Bare-ID detection: if the query looks like an arXiv ID (digits + dot + digits) we use `id_list` for direct lookup, which costs zero search-quota
 - Sort: by relevance for keyword queries, default order for ID lookups
 
-## Unpaywall (fetch only — Stage 1)
+## Unpaywall (fetch Tier 2)
 
 - Base URL: `https://api.unpaywall.org/v2`
 - Endpoint used: `GET /v2/{DOI}?email=<EMAIL>`
@@ -66,25 +66,26 @@ done
 - Soft cap: 100k req/day
 - Returns `{is_oa, best_oa_location: {url_for_pdf, url, ...}}` — we follow `best_oa_location.url_for_pdf` first, then `best_oa_location.url`
 
-## Deferred to Stage 2
+## Shipped Stage 2/3 sources (summary)
 
-| Source | Lib | Endpoint | Why deferred |
-|---|---|---|---|
-| Crossref | `habanero` | `https://api.crossref.org/works` | Stage 2 expands discovery and provides backward refs for traversal |
-| Europe PMC | direct REST | `https://www.ebi.ac.uk/europepmc/webservices/rest/search` | Bio/medical full-text |
-| CORE | direct REST | `https://api.core.ac.uk/v3` | 449M OA articles, free key required |
-| paperscraper | `paperscraper` | bioRxiv/medRxiv/chemRxiv dumps | Local NDJSON over scraping |
-| Retraction Watch | Crossref filter | `filter=update-type:retraction` | Quality flag in Stage 2 |
-| Zotero export | `pyzotero` | <https://www.zotero.org/support/dev/web_api/v3/start> | Bibliography handoff |
+All implemented via direct REST in `discover.py` / `quality.py` / `zotero.py` (no habanero/paperscraper — not in requirements.txt):
 
-## Deferred to Stage 3
+| Source | Endpoint | Notes |
+|---|---|---|
+| Crossref | `https://api.crossref.org/works` | DOI metadata + backward refs for traversal |
+| Europe PMC | `https://www.ebi.ac.uk/europepmc/webservices/rest/search` | bio/medical; PDF tier reserved (XML only) |
+| CORE | `https://api.core.ac.uk/v3` | 449M OA articles; `CORE_API_KEY` enables it, other sources cover without |
+| DataCite | `https://api.datacite.org/dois` | datasets + grey lit (Stage 3) |
+| HuggingFace Papers | hub daily-papers API | ML-domain (Stage 3) |
+| Retraction Watch | CSV from gitlab.com/crossref/retraction-watch-data | `--refresh-retractions`; DOI join via `quality.py` |
+| Zotero export | Zotero Web API v3 (`pyzotero`-compatible REST) | `--export-zotero`; needs `ZOTERO_API_KEY` + `ZOTERO_USER_ID` |
+| sci-hub `--grey` | opt-in tier 8 | legal gray zone — explicit flag + disclaimer only |
 
-| Source | Why deferred |
+## Still deferred (post-v1.0)
+
+| Source | Status |
 |---|---|
-| КиберЛенинка (OAI-PMH) | RU sources — Stage 3 has `argos-translate` query expansion |
-| OATD, BASE, DataCite | EU grey-lit + datasets |
-| HuggingFace Hub (daily papers) | ML-domain |
-| `scidownl` / sci-hub `--grey` opt-in | Legal grey zone — Stage 3 only behind explicit flag |
+| КиберЛенинка (OAI-PMH), OATD, BASE | stubs registered; OAI-PMH parsing pending (v1.1) |
 
 ## Troubleshooting
 
@@ -94,4 +95,4 @@ done
 
 **arXiv hangs:** the `arxiv` package has a built-in 3 s sleep between requests. A 50-result query takes ~25-30 s with no concurrency. This is by design — arXiv asks crawlers to respect it.
 
-**Unpaywall returns 404:** the DOI has no OA version known to them. Try Stage 2's expanded cascade (Europe PMC, publisher templates) or use `--grey` in Stage 3.
+**Unpaywall returns 404:** the DOI has no OA version known to them. The cascade continues automatically (arXiv, publisher templates, Zenodo); `--grey` is the explicit last-resort opt-in.

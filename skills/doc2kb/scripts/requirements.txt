@@ -11,7 +11,17 @@ python-docx>=1.1.0,<2.0
 mammoth>=1.6.0,<2.0
 python-pptx>=0.6.23,<2.0
 openpyxl>=3.1.0,<4.0
+# defusedxml is what openpyxl parses untrusted workbooks through: with it
+# installed (and OPENPYXL_LXML=False, which extract_xlsx.py sets) every
+# fromstring/iterparse is defusedxml's, so entity declarations and external
+# references raise instead of expanding. extract_xlsx.py refuses to run when
+# openpyxl did not pick it up.
+defusedxml>=0.7.1,<1.0
 trafilatura>=1.12.0,<3.0
+# markdownify powers the HTML extractor's fallback AND the pure-Python EPUB
+# route (extract_epub.py walks the OPF spine via stdlib zipfile/ElementTree and
+# markdownifies each XHTML chapter). pandoc remains the preferred EPUB route
+# when on PATH; no new dependency is needed for the lightweight EPUB path.
 markdownify>=0.13.0,<2.0
 charset-normalizer>=3.3.0,<4.0
 # striprtf powers the pure-Python RTF fallback (extract_rtf.py) when pandoc is
@@ -28,6 +38,11 @@ striprtf>=0.0.26,<1.0
 # resilient if a future pymupdf release drops the dependency.
 Pillow>=10.0,<14.0
 tiktoken>=0.7.0,<1.0
+# olefile reads OLE2 compound files: the `oleObject*.bin` wrappers Office uses
+# for embedded objects (OLE Package, Acrobat CONTENTS, a whole .doc). Pure
+# Python, no C extension, ~100 KB. _embedded.py needs it to recurse into
+# embedded documents; without it those objects are listed as unread.
+olefile>=0.46,<1.0
 # Pin lxml — transitive dep of trafilatura, historically XXE-vulnerable
 # before 4.9. Capping below 6 keeps us on tested majors.
 lxml>=4.9,<6.0

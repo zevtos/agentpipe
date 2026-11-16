@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Gated pipeline orchestration for Claude Code and Codex CLI.</strong><br>
-  9 specialist agents, 16 multi-agent workflows, multi-vendor skills — installed globally in 30 seconds.
+  9 specialist agents, 17 multi-agent workflows, multi-vendor skills — installed globally in 30 seconds.
 </p>
 
 <p align="center">
@@ -53,7 +53,7 @@ Vanilla Claude Code already ships agents, commands, and skills — but they're *
 | | Vanilla Claude Code | + agentpipe |
 |---|---|---|
 | Agents | meta/utility (`general-purpose`, `Explore`, `Plan`, `claude-code-guide`, `statusline-setup`) — generic helpers | **9 domain specialists** with role-bounded tool access (architect, dba, devops, docs, pm, refactorer, reviewer, security, tester) — e.g. reviewer = Read+Grep only, can't accidentally edit |
-| Slash commands | session/config (`/init`, `/clear`, `/agents`, `/mcp`, `/model`, `/config`, ...) | **16 gated multi-agent workflows** (`/feature`, `/sprint`, `/audit`, `/release`, `/refactor`, ...) with conditional steps and parallel gates |
+| Slash commands | session/config (`/init`, `/clear`, `/agents`, `/mcp`, `/model`, `/config`, ...) | **17 gated multi-agent workflows** (`/feature`, `/sprint`, `/audit`, `/release`, `/refactor`, ...) with conditional steps and parallel gates |
 | Skills | dev-tooling utilities (`claude-api`, `loop`, `schedule`, `update-config`, ...) — for power-users of Claude Code | **end-user domain skills** — `gost-report` (Russian academic .docx), `doc2kb` (heterogeneous document corpus → LLM-optimized knowledge base) |
 | Per-agent model selection | global / manual | **auto** — opus for high-reasoning roles (architect, security), sonnet for the rest. Override at install: `--model-profile opus` / `sonnet` / `mixed` (default), persisted across updates. |
 | Multi-vendor distribution | Claude Code only | **same skills** in Codex CLI via `bash install.sh --target codex` |
@@ -81,6 +81,7 @@ Vanilla Claude Code already ships agents, commands, and skills — but they're *
 |---------|---------|-------------|
 | `/next` | What should I work on? Strategic project analysis | architect |
 | `/kickoff` | Bootstrap a new project from an idea | pm + architect + dba + devops |
+| `/backlog` | Turn specs into a sprint-ready GitHub backlog | pm + architect |
 | `/plan` | Architecture planning (design only, no code) | architect |
 | `/feature` | End-to-end feature development | pm + architect + reviewer + security + tester + docs |
 | `/fix` | Bug investigation and fix | reviewer + tester |
@@ -102,8 +103,8 @@ Vanilla Claude Code already ships agents, commands, and skills — but they're *
 
 | Skill | Purpose | Triggers on |
 |-------|---------|-------------|
-| `gost-report` | Russian academic reports (`.docx`) to GOST 7.32 — лабораторные, отчёты по практике, курсовые, ВКР. Built-in `ITMO_PROFILE` / `GOST_PROFILE` plus `UniversityProfile` for any other vuz. Opt-in plugin modules: `r.plot.*` (matplotlib charts, GOST style) and `r.diagram` (mermaid → PNG), sharing one figure counter. | «лабораторную», «отчёт по ГОСТ», «курсовую», «ИТМО», etc. |
-| `doc2kb` | A folder of mixed documents (PDF, DOCX, DOC, PPTX, IPYNB, RTF, MD, TXT, HTML) → LLM-optimized knowledge base: per-source Markdown + `manifest.json` + `INDEX.md` + `AGENTS.md` + a **built-in BM25 search index** the second agent queries with citations (`./query.sh "<question>"` — SQLite FTS5, pure-stdlib portable fallback, no embeddings/API, Cyrillic + Latin). Local-first, no paid APIs; the heavy MinerU VLM tier is strictly opt-in (`ensure_env.py --tier mineru`). Legacy `.doc` uses a system converter (LibreOffice/`textutil`/`antiword`). Ships a **standalone `dkb` CLI** (`scripts/dkb.py`) that runs the whole pipeline in one command — `dkb <input_dir> <output_kb_dir>` — for no-agent use. | «обработай папку с документами», «сделай базу знаний», «найди в моих документах», "build a knowledge base", "make documents searchable", "RAG prep". |
+| `gost-report` | Russian academic reports (`.docx`) to GOST 7.32 — лабораторные, отчёты по практике, курсовые, ВКР. Styles as reusable TOML files with `extends` (built-in `itmo`, `gost`, `mbi`) cover any university's regulations: dashes, hyphenation, headings, captions, tables with «Продолжение таблицы», lists, title page, bibliography per ГОСТ 7.1 or Р 7.0.100, validator rules. Content from Python calls or Markdown. Opt-in plugin modules: `r.plot.*` (matplotlib charts, GOST style) and `r.diagram` (Graphviz → PNG), sharing one figure counter. | «лабораторную», «отчёт по ГОСТ», «курсовую», «ИТМО», etc. |
+| `doc2kb` | A folder of mixed documents (PDF, DOCX, DOC, PPTX, XLSX, IPYNB, RTF, EPUB, MD, TXT, HTML, XML) → LLM-optimized knowledge base: per-source Markdown + `manifest.json` + `INDEX.md` + `AGENTS.md` + a **built-in BM25 search index** the second agent queries with citations (`./query.sh "<question>"` — SQLite FTS5, pure-stdlib portable fallback, no embeddings/API, Cyrillic + Latin). Local-first, no paid APIs; the heavy MinerU VLM tier is strictly opt-in (`ensure_env.py --tier mineru`). Legacy `.doc` uses a system converter (LibreOffice/`textutil`/`antiword`); `.epub` uses pandoc when present, else a pure-Python `zip`+`markdownify` fallback. Vector diagrams (EMF/WMF/SVG/PDF/EPS) are rasterized to PNG (LibreOffice/Ghostscript/PyMuPDF); documents embedded in documents (OLE objects, chart data, PDF attachments) are extracted recursively (depth 4) as their own cited docs. Opt-in `--shard` splits oversized books/PDFs into per-chapter folders (heading-first, verbatim-checked) so a search hit cites one small chapter file, not a 300k-token book. Ships a **standalone `dkb` CLI** (`scripts/dkb.py`) that runs the whole pipeline in one command — `dkb <input_dir> <output_kb_dir>` — for no-agent use. | «обработай папку с документами», «сделай базу знаний», «найди в моих документах», "build a knowledge base", "make documents searchable", "RAG prep". |
 | `ultrasearch` | Thesis-level literature research: queries OpenAlex + Semantic Scholar + arXiv, downloads OA PDFs, embeds into a persistent `sqlite-vec` corpus, synthesizes a markdown report with grounded `[Sn]` → DOI citations. Stage-1 MVP. | "literature review", "related work", «систематический обзор», «ВКР», «найди все статьи про X». |
 
 Each release attaches every skill as a standalone `.zip` to the GitHub release page. Two install paths depending on where you use Claude:
@@ -137,7 +138,7 @@ If you use both clients, run the installer twice — once per target. The instal
 ```
 agentpipe/
   agents/                9 specialist agent definitions
-  commands/              16 orchestration commands
+  commands/              17 orchestration commands
   skills/                Domain-specific skills (folders with SKILL.md + assets)
   research/              19 reference documents
   tests/                 Agent eval scenarios — empty by default, see docs/eval.md
@@ -172,7 +173,7 @@ Each gate must pass before proceeding. Agents have bounded tool access (reviewer
 | attribution-fix · CLAUDE.md baseline · gost-validation hook | — | ✅ | ✅ | ✅ | — |
 | Stop sound hook | — | — | ✅ | ✅ | ✅ |
 | thinking summaries | — | — | ✅ | ✅ | — |
-| env defaults (`CLAUDE_CODE_EFFORT_LEVEL=xhigh` + disable adaptive thinking + non-essential traffic) | — | — | ✅ | ✅ | — |
+| settings defaults (`effortLevel=xhigh` + disable non-essential traffic env) | — | — | ✅ | ✅ | — |
 | ccstatusline (`statusLine`, install-if-missing) | — | — | — | ✅ | — |
 | caveman (third-party, pinned SHA + sha256-verified, gated) | — | — | — | ✅ | — |
 | MinerU pre-warm (~3 GB, gated) | — | — | — | ✅ | — |
@@ -201,7 +202,7 @@ Per-layer override flags: `--with-mineru` / `--no-mineru`, `--with-env-defaults`
 - **Opt-in personal preferences**: `--with-sound-hooks` (Stop sound hook only — one beep when Claude or Codex finishes a turn, OS auto-detected), `--with-notification-sound` (Claude-only Notification sound hook — beep on permission prompts and "waiting for input"), `--with-thinking-summaries` (`showThinkingSummaries: true`). Passing both sound flags is allowed but warns on Claude: Notification often fires right after Stop, producing two beeps in sequence. Use `--clean-sound-hooks` (`-CleanSoundHooks` on PowerShell) to strip every sound hook from `settings.json`/`hooks.json` without touching unrelated hooks (gost-validation, user customs).
 - **Skills-only updates**: `--skills-only` (`-SkillsOnly` on PowerShell) copies only `skills/*` and skips agents, commands, and every `settings.json`/hook layer. Works with both targets and composes with `--dry` / `--diff` / `--pull` / `--uninstall`. Handy for fast iteration on a single skill: `bash install.sh --skills-only` re-syncs `~/.claude/skills/` without re-running the full settings merge.
 - **Per-agent model profile**: `--model-profile opus` puts every agent on opus, `--model-profile sonnet` downgrades all to sonnet, default is `mixed` (canonical opus-for-architect+security, sonnet-for-the-rest). Choice is persisted to `settings.json` so `update.sh` re-uses it. Source files are never modified — rewrite happens at copy time. See [docs/installation.md](docs/installation.md#per-agent-model-profile---model-profile).
-- **Optional shell env vars**: `scripts/agentpipe.env.example` documents reasoning-effort, adaptive-thinking, and telemetry-bundle vars. Not auto-installed — copy what you want into your shell rc. The `senior`/`god` presets (or `--with-env-defaults`) merge a maxed non-secret subset (`CLAUDE_CODE_EFFORT_LEVEL=xhigh` + disable adaptive thinking + non-essential traffic) into `settings.json` `"env"` instead of your rc. See [docs/installation.md](docs/installation.md#optional-shell-environment-variables).
+- **Optional shell env vars**: `scripts/agentpipe.env.example` documents reasoning-effort, adaptive-thinking, and telemetry-bundle vars. Not auto-installed — copy what you want into your shell rc. The `senior`/`god` presets (or `--with-env-defaults`) merge maxed non-secret defaults into `settings.json` instead of your rc: top-level `effortLevel: "xhigh"` (the same key `/effort` writes; explicit effort disables adaptive thinking) plus `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` in `"env"`. See [docs/installation.md](docs/installation.md#optional-shell-environment-variables).
 - **Update entry point**: `bash update.sh` (or `.\update.ps1`) — pulls latest and re-installs. Same thing as `install.sh --update`, just a clearer entry point.
 
 ## Building Release Archives
@@ -253,3 +254,4 @@ The `research/` directory contains the reference material the agent prompts were
 | 16 | ultrasearch — Claude Code skill design |
 | 17 | ultrasearch v2 design |
 | 18 | Repository tidy & cruft cleanup (backs `/tidy`) |
+| 19 | gost-report module architecture |

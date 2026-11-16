@@ -53,7 +53,7 @@ HTTP_TIMEOUT = default_http_timeout(read=60.0)
 MAX_PDF_BYTES = 50 * 1024 * 1024   # 50 MB
 DOWNLOAD_CHUNK = 1 << 16
 USER_AGENT = "ultrasearch/0.1 (+https://github.com/zevtos/agentpipe)"
-DEFAULT_CONCURRENCY = 4
+DEFAULT_CONCURRENCY = 8
 
 
 FETCH_SOURCE = Literal[
@@ -328,39 +328,29 @@ async def fetch_pdf(client: httpx.AsyncClient, c: Candidate, *,
     dest = pdf_cache or cache_dir("pdfs")
     unpaywall_email = unpaywall_email or get_env("UNPAYWALL_EMAIL")
 
-    tier_sources: list[tuple[FETCH_SOURCE, Any]] = []
-
-    # Tier 1: OpenAlex hint
-    oa_url = await _try_openalex_pdf(c)
-    if oa_url:
-        tier_sources.append(("openalex_pdf", oa_url))
-
-    # Tier 2: Unpaywall
+    # Tier resolvers in priority order. Resolution is LAZY: a tier's URL is
+    # resolved only after every earlier tier failed to download. Unpaywall and
+    # Zenodo resolvers are themselves network GETs — eagerly resolving them
+    # burned 1-2 API round-trips per paper even when the free OpenAlex hint
+    # (the common case) won the download.
+    # Tier 4 (Europe PMC) returns XML, not PDF — skipped in Stage 2, hook reserved.
+    tier_resolvers: list[tuple[FETCH_SOURCE, Any]] = [
+        ("openalex_pdf", lambda: _try_openalex_pdf(c)),               # Tier 1
+    ]
     if c.get("doi") and unpaywall_email:
-        up_url = await _try_unpaywall(client, c, unpaywall_email)
-        if up_url:
-            tier_sources.append(("unpaywall", up_url))
+        tier_resolvers.append(
+            ("unpaywall", lambda: _try_unpaywall(client, c, unpaywall_email)))  # Tier 2
+    tier_resolvers += [
+        ("arxiv",        lambda: _try_arxiv(c)),                      # Tier 3
+        ("publisher_oa", lambda: _try_publisher_oa(c)),               # Tier 5
+        ("zenodo",       lambda: _try_zenodo(client, c)),             # Tier 6
+    ]
 
-    # Tier 3: arXiv
-    ax_url = await _try_arxiv(c)
-    if ax_url:
-        tier_sources.append(("arxiv", ax_url))
-
-    # Tier 4: Europe PMC (returns XML URL, not PDF — keep last among real PDF tiers)
-    # Skipped in current Stage 2 — we don't parse XML to PDF. Hook reserved.
-
-    # Tier 5: publisher OA template
-    pub_url = await _try_publisher_oa(c)
-    if pub_url:
-        tier_sources.append(("publisher_oa", pub_url))
-
-    # Tier 6: Zenodo
-    zn_url = await _try_zenodo(client, c)
-    if zn_url:
-        tier_sources.append(("zenodo", zn_url))
-
-    # Try downloads in order
-    for src, url in tier_sources:
+    # Resolve → download per tier, stop at first success
+    for src, resolve in tier_resolvers:
+        url = await resolve()
+        if not url:
+            continue
         res = await _download_pdf(client, url, dest)
         if not res:
             continue

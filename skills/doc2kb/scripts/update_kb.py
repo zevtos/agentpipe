@@ -65,6 +65,12 @@ def _existing_ids(docs_dir: Path) -> set[str]:
         v = read_frontmatter(p).get("id")
         if v:
             ids.add(str(v))
+    # Sharded docs live in subfolders; count their parent id as taken so
+    # _next_id never reissues a doc-NNN already used by a sharded book.
+    for idx in docs_dir.glob("*/_index.md"):
+        v = read_frontmatter(idx).get("id")
+        if v:
+            ids.add(str(v))
     return ids
 
 

@@ -11,9 +11,12 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Dict, Union
 
 Ref = Union[int, str]
+# Составной номер «1.2», «А.1» (RefNumber ядра или та же строка руками).
+_COMPOUND = re.compile(r"^(?:\d+|[А-ЯЁA-Z])(?:\.\d+)+$")
 
 
 class _XrefAPI:
@@ -25,17 +28,25 @@ class _XrefAPI:
     def set(self, label: str, number: int) -> int:
         """Связать строковую метку с номером (из r.figure/r.table/r.formula).
         Возвращает номер — удобно: n = r.ref.set('arch', r.figure(...))."""
-        self._labels[label] = int(number)
-        return int(number)
+        value = number if isinstance(number, str) else int(number)
+        self._labels[label] = value
+        return value
 
-    def _n(self, ref: Ref) -> int:
+    def _n(self, ref: Ref):
+        if isinstance(ref, str) and ref not in self._labels and (
+                type(ref).__name__ == "RefNumber" or _COMPOUND.match(ref)):
+            return ref
+        if isinstance(ref, str) and ref not in self._labels and hasattr(
+                self._core, "deferred_ref") and ":" in ref:
+            # Метка из label= / {#fig:x}: номер известен или подставится в save().
+            return self._core.deferred_ref(ref)
         if isinstance(ref, str):
             if ref not in self._labels:
                 raise KeyError(
                     f"r.ref: метка {ref!r} не зарегистрирована "
                     f"(сначала r.ref.set({ref!r}, <номер>))")
             return self._labels[ref]
-        return int(ref)
+        return ref if isinstance(ref, str) else int(ref)
 
     @staticmethod
     def _cap(word: str, cap: bool) -> str:
@@ -82,6 +93,15 @@ class _XrefAPI:
     def see_table(self, ref: Ref) -> str:
         """«(таблица N)»."""
         return f"(таблица {self._n(ref)})"
+
+    # ---- приложения (буква из r.appendix) ----
+    def in_appendix(self, letter: str, *, cap: bool = False) -> str:
+        """«в приложении А» — для рекомендуемых и справочных."""
+        return f"{self._cap('в', cap)} приложении {letter}"
+
+    def per_appendix(self, letter: str, *, cap: bool = False) -> str:
+        """«в соответствии с приложением А» — для обязательных."""
+        return f"{self._cap('в', cap)} соответствии с приложением {letter}"
 
 
 class XrefModule:
