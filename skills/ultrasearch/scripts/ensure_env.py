@@ -164,11 +164,18 @@ def write_pth() -> None:
         log(f"Failed to write {PTH_NAME}: {e}")
 
 
-def pth_exists() -> bool:
+def pth_current() -> bool:
+    """True iff the .pth exists AND points at THIS checkout's scripts/. One venv
+    is shared by every checkout of the skill (the installed copy, the repo, git
+    worktrees); checking mere existence let whichever checkout bootstrapped
+    last keep the .pth, which then dangled once that checkout was removed."""
     sp = site_packages_dir()
     if sp is None:
         return False
-    return (sp / PTH_NAME).exists()
+    try:
+        return (sp / PTH_NAME).read_text(encoding="utf-8") == str(SCRIPTS_DIR.resolve()) + "\n"
+    except OSError:
+        return False
 
 
 def install_deps() -> None:
@@ -330,10 +337,10 @@ def _migrate_legacy_state() -> None:
 
 def bootstrap() -> None:
     if not needs_update() and not _has_legacy_state():
-        if not pth_exists():
+        if not pth_current():
             lock = _acquire_lock()
             try:
-                if not pth_exists():
+                if not pth_current():
                     write_pth()
             finally:
                 _release_lock(lock)
@@ -342,7 +349,7 @@ def bootstrap() -> None:
     try:
         _migrate_legacy_state()
         if not needs_update():
-            if not pth_exists():
+            if not pth_current():
                 write_pth()
             return
         VENV_DIR.parent.mkdir(parents=True, exist_ok=True)
