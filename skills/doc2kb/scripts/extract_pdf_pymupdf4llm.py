@@ -34,12 +34,35 @@ Notes:
     - Will flag a warning if total body length looks suspiciously small for
       the page count (likely image-only PDF that slipped past scout).
     - Never crashes the agent: extraction failure → emit_failure, exit 1.
+
+OCR:
+    pymupdf4llm ≥ 0.2 OCRs on its own when Tesseract is installed: text in
+    pictures and pages without a text layer. It does not recognize a scan
+    whose text layer is drawn under the page image (FineReader) and OCRs it
+    again, inserting a second reading of every line ("FOCT" next to "ГОСТ")
+    at 3-5x the time. Such pages are skipped; elsewhere OCR runs as before, in
+    DOC2KB_OCR_LANG (default rus+eng, whichever Tesseract has; pymupdf4llm's
+    own default is eng). DOC2KB_PDF_OCR=0 turns OCR off.
+
+Speed:
+    Pages are parsed by a pool of worker processes (DOC2KB_PDF_WORKERS, default
+    from CPU count, RAM and DOC2KB_PARALLEL_JOBS, which extract_corpus.py sets
+    to the number of extractors it runs side by side; 1 = one process). The
+    output is the same as parsing in one process: heading levels are ranked
+    over the whole document and duplicate images resolve in page order.
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
+import math
+import multiprocessing
+import os
 import re
+import shutil
 import sys
+import tempfile
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 # Local-only import — _common lives next to this script (loaded via the
@@ -47,6 +70,7 @@ from pathlib import Path
 from _embedded import EmbedSession  # noqa: E402
 from _common import (  # noqa: E402
     _RESIDUAL_LIGATURE_RE,
+    PARALLEL_JOBS_ENV,
     PDF_WARN_DROPPED_PICTURES_PREFIX,
     PDF_WARN_MANGLED_PREFIX,
     PICTURE_PLACEHOLDER_RE,
@@ -98,6 +122,25 @@ MANGLED_MIN_TABLE_CELLS = 4       # tables smaller than this can't trip the flag
 # dispatcher (extract_corpus.py) re-scans produced docs with the same pattern.
 DROPPED_PICTURES_PER_PAGE_MIN = 2.0  # avg pictures/page above this → suspicious
 DROPPED_PICTURES_ABS_MIN = 5         # OR: absolute count above this on any doc
+
+# OCR (see the module docstring).
+PDF_OCR_ENV = "DOC2KB_PDF_OCR"
+OCR_OFF_VALUES = {"0", "false", "no", "off"}
+OCR_LANG_ENV = "DOC2KB_OCR_LANG"
+DEFAULT_OCR_LANGS = ("rus", "eng")   # whichever of them Tesseract has installed
+TESSDATA_HINT = "macOS: brew install tesseract-lang; Debian: apt install tesseract-ocr-rus"
+SCAN_COVERAGE = 0.9   # share of the page an image over the text layer must cover
+_CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
+_LATIN_RE = re.compile(r"[A-Za-z]")
+
+# Page-parallel parse. pymupdf4llm parses one page after another; the work is
+# CPU-bound C (MuPDF text extraction with images, the layout model, image
+# re-encoding), so separate processes scale where threads would not.
+PDF_WORKERS_ENV = "DOC2KB_PDF_WORKERS"
+MIN_PAGES_PER_WORKER = 8         # a spawned worker needs ~2 s to import and load the layout model
+MAX_PAGE_WORKERS = 8
+WORKER_RAM_BYTES = 600 * 2**20   # ~450 MB peak RSS measured per worker, plus headroom
+CHUNKS_PER_WORKER = 2            # smaller page ranges even out pages of uneven cost
 
 
 def _try_import():
@@ -198,56 +241,43 @@ def _detect_dropped_pictures(body: str, n_pages: int) -> dict | None:
     return None
 
 
-def _replace_dropped_pictures_with_assets(
-    body: str,
-    input_pdf: Path,
-    doc_id: str,
-    assets_dir: Path,
-    assets_rel_prefix: str,
-) -> tuple[str, list[str], int, int, list[str]]:
-    """Extract embedded images from the PDF and substitute pymupdf4llm's
-    `==> picture [WxH] intentionally omitted <==` placeholders with
-    Markdown image links pointing to the saved files. Images that pymupdf4llm
-    knows about but doesn't emit a placeholder for — most often table-cell
-    icons in BPMN-style reference docs — are appended to the bottom of each
-    `[page N]` section under an `### Additional page N images` heading so
-    they're not silently lost.
-
-    Numbering: images are saved as `<doc_id>-pageNN-imgN.<ext>` and
-    placeholders are matched in pymupdf4llm's emission order, which
-    mirrors pymupdf's `page.get_images(full=True)` order. When the two
-    diverge (common in table-heavy PDFs), unmatched images surface in the
-    additional-images block rather than being silently lost.
-
-    Every image goes through save_image_safe(), enforcing the 2000-px
-    max-dimension cap and the decorative-pixel filter. Identical images
-    (logos, repeated icons) deduplicate to the first saved copy.
-
-    Returns (new_body, saved_relpaths, replaced_count, total_placeholders,
-             extractor_warnings).
-    """
-    import pymupdf  # type: ignore
-
-    total = len(PICTURE_PLACEHOLDER_RE.findall(body))
-    warnings: list[str] = []
-
+def _make_assets_dir(assets_dir: Path) -> None:
     try:
         assets_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         raise RuntimeError(f"cannot create assets dir {assets_dir}: {e}") from e
+
+
+def _save_page_images(
+    input_pdf: Path | str,
+    page_numbers,
+    doc_id: str,
+    target_dir: Path,
+) -> tuple[list[dict], list[tuple[int, int, str]]]:
+    """Save the embedded images of `page_numbers` (1-based, ascending; None =
+    every page) into target_dir through save_image_safe(), which enforces the
+    2000-px cap and the decorative-pixel filter. Files are named
+    `<doc_id>-pageNN-imgN.<ext>`; identical images within this call
+    deduplicate to the first copy.
+
+    Returns (records, warnings): a record is {page, idx, name, reason, digest}
+    for every image that has a file (a duplicate names its first copy's file),
+    a warning is (page, idx, text).
+    """
+    import pymupdf  # type: ignore
 
     try:
         doc = pymupdf.open(str(input_pdf))
     except Exception as e:
         raise RuntimeError(f"failed to reopen pdf for image extraction: {e}") from e
 
-    # saved_per_page[page_no] = list[(image_idx, relpath, save_reason)]
-    saved_per_page: dict[int, list[tuple[int, str, str]]] = {}
-    saved_relpaths: list[str] = []
-    seen_relpaths: set[str] = set()
+    records: list[dict] = []
+    warnings: list[tuple[int, int, str]] = []
     dedup_cache: dict = {}
     try:
-        for page_no in range(1, doc.page_count + 1):
+        if page_numbers is None:
+            page_numbers = range(1, doc.page_count + 1)
+        for page_no in page_numbers:
             page = doc[page_no - 1]
             for idx, img_info in enumerate(page.get_images(full=True), 1):
                 xref = img_info[0]
@@ -260,7 +290,7 @@ def _replace_dropped_pictures_with_assets(
                 if not blob:
                     continue
                 filename = f"{doc_id}-page{page_no:02d}-img{idx}.{ext}"
-                target = assets_dir / filename
+                target = target_dir / filename
                 result = save_image_safe(
                     blob, target, dedup_cache=dedup_cache, source_ext=ext,
                 )
@@ -280,26 +310,87 @@ def _replace_dropped_pictures_with_assets(
                 if not result:
                     note = skipped_image_note(result, ext)
                     if note:
-                        warnings.append(f"page {page_no} image {idx}: {note}")
+                        warnings.append((page_no, idx, f"page {page_no} image {idx}: {note}"))
                     # too-small: silent (decorative pixel)
                     continue
-                rel = f"{assets_rel_prefix}/{result.path.name}"
-                saved_per_page.setdefault(page_no, []).append(
-                    (idx, rel, result.reason)
-                )
-                if rel not in seen_relpaths:
-                    seen_relpaths.add(rel)
-                    saved_relpaths.append(rel)
+                records.append({"page": page_no, "idx": idx, "name": result.path.name,
+                                "reason": result.reason, "digest": result.sha256})
     finally:
         doc.close()
+    return records, warnings
+
+
+def _store_pooled_images(results: list[dict], assets_dir: Path, first: dict[str, str]
+                         ) -> tuple[list[dict], list[tuple[int, int, str]]]:
+    """Write the images page workers returned for consecutive page ranges,
+    deduplicating across ranges the way one sequential pass does: the first
+    copy in page order keeps its own file name, every later copy points at
+    it. `first` (digest → file name) carries over between calls, so results
+    can be stored as they arrive."""
+    records: list[dict] = []
+    warnings: list[tuple[int, int, str]] = []
+    for res in results:
+        warnings.extend(res["image_warnings"])
+        for rec in res["images"]:
+            data = rec.pop("data")
+            seen = first.get(rec["digest"])
+            if seen is not None:
+                rec["name"], rec["reason"] = seen, "skipped_duplicate"
+            elif data is None:
+                continue  # duplicate of a copy that could not be written
+            else:
+                try:
+                    (assets_dir / rec["name"]).write_bytes(data)
+                except OSError as e:
+                    warnings.append((rec["page"], rec["idx"],
+                                     f"page {rec['page']} image {rec['idx']}: cannot write "
+                                     f"{rec['name']}: {e}"))
+                    continue
+                first[rec["digest"]] = rec["name"]
+            records.append(rec)
+    return records, warnings
+
+
+def _replace_dropped_pictures_with_assets(
+    body: str,
+    records: list[dict],
+    assets_rel_prefix: str,
+) -> tuple[str, list[str], int, int]:
+    """Substitute pymupdf4llm's `==> picture [WxH] intentionally omitted <==`
+    placeholders with Markdown image links to the files in `records` (from
+    _save_page_images / _store_pooled_images). Images that pymupdf4llm knows
+    about but doesn't emit a placeholder for — most often table-cell icons in
+    BPMN-style reference docs — are appended to the bottom of each `[page N]`
+    section under an `#### Additional embedded images on page N` heading so
+    they're not silently lost.
+
+    Placeholders are matched in pymupdf4llm's emission order, which mirrors
+    pymupdf's `page.get_images(full=True)` order. When the two diverge
+    (common in table-heavy PDFs), unmatched images surface in the
+    additional-images block rather than being silently lost.
+
+    Returns (new_body, saved_relpaths, replaced_count, total_placeholders).
+    """
+    total = len(PICTURE_PLACEHOLDER_RE.findall(body))
+
+    # saved_per_page[page_no] = list[(image_idx, relpath, save_reason)]
+    saved_per_page: dict[int, list[tuple[int, str, str]]] = {}
+    saved_relpaths: list[str] = []
+    seen_relpaths: set[str] = set()
+    for rec in records:
+        rel = f"{assets_rel_prefix}/{rec['name']}"
+        saved_per_page.setdefault(rec["page"], []).append((rec["idx"], rel, rec["reason"]))
+        if rel not in seen_relpaths:
+            seen_relpaths.add(rel)
+            saved_relpaths.append(rel)
 
     if not saved_per_page:
-        return body, [], 0, total, warnings
+        return body, [], 0, total
 
     page_anchor_re = re.compile(r"\[page (\d+)\]")
     anchors = list(page_anchor_re.finditer(body))
     if not anchors:
-        return body, saved_relpaths, 0, total, warnings
+        return body, saved_relpaths, 0, total
 
     replaced = 0
     out: list[str] = [body[: anchors[0].start()]]
@@ -352,7 +443,261 @@ def _replace_dropped_pictures_with_assets(
             out.append(substituted)
 
     new_body = "".join(out)
-    return new_body, saved_relpaths, replaced, total, warnings
+    return new_body, saved_relpaths, replaced, total
+
+
+def _env_value(name: str) -> str:
+    return os.environ.get(name, "").strip().lower()
+
+
+def _layout_module(pymupdf4llm):
+    """pymupdf4llm's layout-engine module when to_markdown() runs through it
+    (pymupdf4llm ≥ 0.2 with pymupdf-layout), else None: the legacy
+    pymupdf_rag path has no OCR and no page-level parser to split."""
+    if not getattr(pymupdf4llm, "_use_layout", False):
+        return None
+    try:
+        from pymupdf4llm.helpers import document_layout  # type: ignore
+    except Exception:
+        return None
+    if not all(hasattr(document_layout, name)
+               for name in ("parse_document", "update_header_tags", "ParsedDocument")):
+        return None
+    return document_layout
+
+
+def _ocr_language(pymupdf) -> tuple[str | None, list[str]]:
+    """Tesseract languages for pymupdf4llm's OCR (None = no OCR) and the
+    warnings to record. No Tesseract → no OCR, as pymupdf4llm does it."""
+    mode = _env_value(PDF_OCR_ENV)
+    if mode in OCR_OFF_VALUES:
+        return None, []
+    try:
+        tessdata = pymupdf.get_tessdata()
+    except Exception:
+        tessdata = None
+    if not tessdata or not Path(tessdata).is_dir():
+        if mode:
+            return None, [f"ocr_unavailable: {PDF_OCR_ENV}={mode} but no Tesseract language "
+                          "data was found (install tesseract or set TESSDATA_PREFIX); OCR skipped"]
+        return None, []
+    installed = {p.stem for p in Path(tessdata).glob("*.traineddata")}
+    asked = os.environ.get(OCR_LANG_ENV, "").strip()
+    wanted = [x for x in re.split(r"[+,\s]+", asked) if x] if asked else list(DEFAULT_OCR_LANGS)
+    langs = [x for x in wanted if x in installed]
+    missing = [x for x in wanted if x not in installed]
+    warnings: list[str] = []
+    if asked and missing:
+        warnings.append(f"ocr_language_missing: no Tesseract data for {'+'.join(missing)} "
+                        f"in {tessdata} ({TESSDATA_HINT}); "
+                        + (f"OCR in {'+'.join(langs)}" if langs else "OCR skipped"))
+    return ("+".join(langs) or None), warnings
+
+
+def _text_under_scan(page) -> bool:
+    """A scan whose text layer is drawn under the page image, as FineReader
+    writes it: visible text first, then an opaque image over (nearly) the
+    whole page, and no text after it. The text is already there; OCR would
+    read every line a second time (pymupdf4llm only recognizes an invisible
+    OCR layer). A slide whose background picture comes before its text, or
+    after which more text is drawn, does not qualify."""
+    import pymupdf  # type: ignore
+
+    area = abs(page.rect)
+    if not area:
+        return False
+    try:
+        drawn = page.get_bboxlog()
+    except Exception:
+        return False
+    text_seen, cover = False, None
+    for kind, rect in drawn:
+        if kind in ("fill-text", "stroke-text"):
+            if cover:
+                return False  # text drawn over the page image stays visible
+            text_seen = True
+        elif (text_seen and kind in ("fill-image", "fill-imgmask")
+              and abs(pymupdf.Rect(rect) & page.rect) >= SCAN_COVERAGE * area):
+            cover = kind
+    if cover != "fill-image":
+        return cover == "fill-imgmask"  # a stencil mask is opaque ink
+    try:  # a soft-masked image (a watermark) lets the text show through
+        return any(not info.get("has-mask")
+                   and abs(pymupdf.Rect(info["bbox"]) & page.rect) >= SCAN_COVERAGE * area
+                   for info in page.get_image_info())
+    except Exception:
+        return True
+
+
+def _scan_pages(input_pdf: Path) -> frozenset:
+    """0-based numbers of the _text_under_scan pages (~2 ms a page)."""
+    import pymupdf  # type: ignore
+
+    doc = pymupdf.open(str(input_pdf))
+    try:
+        return frozenset(page.number for page in doc if _text_under_scan(page))
+    finally:
+        doc.close()
+
+
+_OCR_ENGINE = None
+_OCR_STATS = {"pages": 0}
+
+
+def _ocr_page(page, dpi=150, language="eng", keep_ocr_text=False, **kwargs):
+    """ocr_function for pymupdf4llm: its own engine, counted."""
+    global _OCR_ENGINE
+    if _OCR_ENGINE is None:
+        try:
+            from pymupdf4llm.helpers.document_layout import select_ocr_function  # type: ignore
+            _OCR_ENGINE = select_ocr_function() or False
+        except Exception:
+            _OCR_ENGINE = False
+    if _OCR_ENGINE:
+        _OCR_STATS["pages"] += 1
+        _OCR_ENGINE(page, dpi=dpi, language=language, keep_ocr_text=keep_ocr_text, **kwargs)
+
+
+def _parse_options(ocr_language: str | None) -> dict:
+    """OCR options for to_markdown()/parse_document() on the layout path."""
+    if not ocr_language:
+        return {"use_ocr": False}
+    return {"use_ocr": True, "ocr_language": ocr_language, "ocr_function": _ocr_page}
+
+
+def _page_workers(n_pages: int) -> int:
+    """Worker processes for the page-parallel parse (1 = this process)."""
+    raw = os.environ.get(PDF_WORKERS_ENV, "").strip()
+    if raw:
+        try:
+            asked = int(raw)
+        except ValueError:
+            asked = 0
+        if asked >= 1:
+            return max(1, min(asked, n_pages))
+    try:
+        jobs = max(1, int(os.environ.get(PARALLEL_JOBS_ENV, "") or 1))
+    except ValueError:
+        jobs = 1
+    workers = min(MAX_PAGE_WORKERS, (os.cpu_count() or 1) // jobs,
+                  n_pages // MIN_PAGES_PER_WORKER)
+    try:  # the extractors running side by side share the free RAM too
+        import psutil  # type: ignore  # a pymupdf4llm dependency
+        workers = min(workers, int(psutil.virtual_memory().available
+                                   // (WORKER_RAM_BYTES * jobs)))
+    except Exception:
+        pass
+    return max(1, workers)
+
+
+def _page_ranges(n_pages: int, workers: int) -> list[range]:
+    size = math.ceil(n_pages / max(1, min(n_pages, workers * CHUNKS_PER_WORKER)))
+    return [range(start, min(start + size, n_pages)) for start in range(0, n_pages, size)]
+
+
+def _parse_range(document_layout, path: str, pages, scans: frozenset,
+                 ocr_language: str | None):
+    """Layout-parse `pages` (0-based) with the options to_markdown() uses —
+    OCR as configured, none on `scans` (pymupdf4llm would OCR them after an
+    analysis that costs ~1 s a page; with OCR off it parses them exactly as
+    it does with OCR on, since their text layer is visible text). Returns one
+    ParsedDocument with the pages in page order."""
+    groups = [([p for p in pages if p not in scans], _parse_options(ocr_language)),
+              ([p for p in pages if p in scans], _parse_options(None))]
+    parts = [document_layout.parse_document(path, pages=group, force_text=True, **options)
+             for group, options in groups if group]
+    parsed = parts[0]
+    if len(parts) > 1:
+        parsed.pages = sorted((pg for part in parts for pg in part.pages),
+                              key=lambda pg: pg.page_number)
+    return parsed
+
+
+def _merge_parsed(document_layout, parts) -> list[dict]:
+    """Page chunks of separately parsed, consecutive page ranges — the same
+    as one parse_document() call gives: heading levels are ranked over the
+    title/section-header font sizes of the whole document, not per range."""
+    doc = parts[0]
+    doc.pages = [page for part in parts for page in part.pages]
+    sizes = {box.max_fontsize for page in doc.pages for box in page.boxes
+             if box.boxclass in ("title", "section-header")}
+    document_layout.update_header_tags(doc.pages, sizes)
+    return doc.to_markdown(header=True, footer=True, write_images=False,
+                           embed_images=False, ignore_code=False, show_progress=False,
+                           page_separators=False, page_chunks=True)
+
+
+def _page_worker(task: dict) -> dict:
+    """Process-pool worker: parse one page range with the options
+    to_markdown() uses and save the range's images. Runs in a spawned
+    interpreter, so everything it needs comes in `task`; images go back as
+    bytes (the parent writes them, deduplicating across ranges)."""
+    import pymupdf  # type: ignore
+    import pymupdf4llm  # type: ignore  # noqa: F401 — the import activates the layout engine
+    from pymupdf4llm.helpers import document_layout  # type: ignore
+
+    # stdout belongs to the parent's JSON line; pymupdf4llm print()s to it.
+    sys.stdout = sys.stderr
+    pymupdf.set_messages(stream=sys.stderr)
+    _OCR_STATS.update(pages=0)
+    parsed = _parse_range(document_layout, task["path"], task["pages"], task["scans"],
+                          task["ocr_language"])
+    out = {"parsed": parsed, "ocr": dict(_OCR_STATS),
+           "images": None, "image_warnings": [], "image_error": None}
+    if task["doc_id"] is not None:
+        tmp = Path(tempfile.mkdtemp(prefix="doc2kb-pdf-images-"))
+        try:
+            records, out["image_warnings"] = _save_page_images(
+                task["path"], [p + 1 for p in task["pages"]], task["doc_id"], tmp)
+            for rec in records:
+                rec["data"] = (None if rec["reason"] == "skipped_duplicate"
+                               else (tmp / rec["name"]).read_bytes())
+            out["images"] = records
+        except RuntimeError as e:
+            out["image_error"] = str(e)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    return out
+
+
+def _parse_pooled(document_layout, input_pdf: Path, n_pages: int, workers: int,
+                  scans: frozenset, ocr_language: str | None,
+                  image_doc_id: str | None, assets_dir: Path | None):
+    """Parse the PDF in `workers` processes, one page range per task. Returns
+    (page chunks, OCR counts, image result): the image result is None when
+    images were not asked for, a RuntimeError when a worker could not reopen
+    the PDF, else (records, warnings) with the files already in assets_dir."""
+    tasks = [{"path": str(input_pdf), "pages": list(r), "scans": scans & frozenset(r),
+              "ocr_language": ocr_language, "doc_id": image_doc_id}
+             for r in _page_ranges(n_pages, workers)]
+    parts: list = []
+    ocr = {"pages": 0}
+    records: list[dict] = []
+    image_warnings: list[tuple[int, int, str]] = []
+    first: dict[str, str] = {}
+    image_error: str | None = None
+    ctx = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=min(workers, len(tasks)), mp_context=ctx) as pool:
+        # map() yields in task order, i.e. page order, so images can be
+        # stored (and their bytes dropped) as ranges come in.
+        for res in pool.map(_page_worker, tasks):
+            parts.append(res["parsed"])
+            for key in ocr:
+                ocr[key] += res["ocr"][key]
+            if image_doc_id is None or image_error is not None:
+                continue
+            if res["image_error"]:
+                image_error = res["image_error"]
+                continue
+            recs, warns = _store_pooled_images([res], assets_dir, first)
+            records.extend(recs)
+            image_warnings.extend(warns)
+    chunks = _merge_parsed(document_layout, parts)
+    if image_doc_id is None:
+        return chunks, ocr, None
+    if image_error is not None:
+        return chunks, ocr, RuntimeError(image_error)
+    return chunks, ocr, (records, image_warnings)
 
 
 def extract(
@@ -364,6 +709,9 @@ def extract(
 ) -> tuple[str, dict, list[str]]:
     """Returns (body_markdown, frontmatter_extras, warnings)."""
     pymupdf4llm, pymupdf = _try_import()
+    # pymupdf4llm reports OCR through pymupdf.message(), stdout by default;
+    # stdout carries this script's one JSON line.
+    pymupdf.set_messages(stream=sys.stderr)
 
     warnings: list[str] = []
     extras: dict = {}
@@ -378,13 +726,59 @@ def extract(
 
     extras["pages"] = n_pages
 
+    layout = _layout_module(pymupdf4llm)
+    ocr_language: str | None = None
+    scans: frozenset = frozenset()
+    if layout is not None:
+        ocr_language, ocr_warnings = _ocr_language(pymupdf)
+        warnings.extend(ocr_warnings)
+        if ocr_language:
+            scans = _scan_pages(input_pdf)
+            if scans:
+                log(f"no OCR on {len(scans)} scanned page(s) that carry a text layer")
+    want_images = extract_images and assets_dir is not None
+
     # Page-chunked extraction. Each chunk is a dict with 'text', 'metadata',
-    # 'tables', 'images', etc. We only use 'text' here.
-    try:
-        chunks = pymupdf4llm.to_markdown(str(input_pdf), page_chunks=True,
-                                         show_progress=False)
-    except Exception as e:
-        raise RuntimeError(f"to_markdown failed: {e}") from e
+    # 'tables', 'images', etc. We only use 'text' here. Large PDFs are parsed
+    # by a process pool (which also saves the page images); any failure there
+    # falls back to the one-process parse below, which gives the same output.
+    chunks = None
+    ocr = {"pages": 0}
+    pooled_images = None
+    workers = _page_workers(n_pages) if layout is not None else 1
+    if workers > 1:
+        image_doc_id = None
+        if want_images:
+            try:
+                _make_assets_dir(assets_dir)
+                image_doc_id = doc_id
+            except RuntimeError as e:
+                pooled_images = e
+        try:
+            chunks, ocr, result = _parse_pooled(layout, input_pdf, n_pages, workers, scans,
+                                                ocr_language, image_doc_id, assets_dir)
+            if image_doc_id is not None:
+                pooled_images = result
+            log(f"parsed {n_pages} pages in {workers} worker processes")
+        except Exception as e:  # noqa: BLE001 — the one-process parse is the fallback
+            log(f"page-parallel parse failed ({type(e).__name__}: {e}); "
+                "parsing in one process")
+            chunks, pooled_images = None, None
+    if chunks is None:
+        _OCR_STATS.update(pages=0)
+        try:
+            with contextlib.redirect_stdout(sys.stderr):
+                if layout is not None and scans and len(scans) < n_pages:
+                    chunks = _merge_parsed(layout, [_parse_range(
+                        layout, str(input_pdf), range(n_pages), scans, ocr_language)])
+                else:
+                    chunks = pymupdf4llm.to_markdown(
+                        str(input_pdf), page_chunks=True, show_progress=False,
+                        **(_parse_options(None if scans else ocr_language)
+                           if layout is not None else {}))
+        except Exception as e:
+            raise RuntimeError(f"to_markdown failed: {e}") from e
+        ocr = dict(_OCR_STATS)
 
     pieces: list[str] = []
     for i, chunk in enumerate(chunks, start=1):
@@ -395,6 +789,16 @@ def extract(
 
     body = "\n\n".join(pieces).strip() + "\n"
     body = clean_whitespace(body)
+
+    # Text that Tesseract read from pictures (and pages without a text layer)
+    # of a Russian document, without Russian language data, is Latin
+    # look-alike noise ("Opranusayna" for "Организация").
+    if (ocr["pages"] and "rus" not in (ocr_language or "").split("+")
+            and len(_CYRILLIC_RE.findall(body)) > len(_LATIN_RE.findall(body))):
+        warnings.append(
+            f"ocr_language_missing: {ocr['pages']} page(s) went through OCR in "
+            f"{ocr_language} only — Cyrillic in pictures came out as Latin look-alikes; "
+            f"install Russian data ({TESSDATA_HINT}) or set {PDF_OCR_ENV}=0, then re-extract")
 
     # pymupdf4llm ≤1.27.x drops one letter from fi/ff/fl ligature glyphs
     # whose PDF ToUnicode CMap maps to a single ASCII char. Raw
@@ -466,17 +870,19 @@ def extract(
     # binary content lives on disk under `<kb_dir>/assets/`. The
     # `dropped_pictures` warning is suppressed for placeholders that were
     # successfully recovered.
-    if extract_images and assets_dir is not None:
+    if want_images:
         try:
-            (body, asset_relpaths, replaced, total_drops,
-             image_warnings) = _replace_dropped_pictures_with_assets(
-                body=body,
-                input_pdf=input_pdf,
-                doc_id=doc_id,
-                assets_dir=assets_dir,
-                assets_rel_prefix=assets_rel_prefix,
-            )
-            warnings.extend(image_warnings)
+            if isinstance(pooled_images, Exception):
+                raise pooled_images
+            if pooled_images is not None:  # saved by the page workers
+                records, image_warnings = pooled_images
+            else:
+                _make_assets_dir(assets_dir)
+                records, image_warnings = _save_page_images(input_pdf, None, doc_id, assets_dir)
+            body, asset_relpaths, replaced, total_drops = _replace_dropped_pictures_with_assets(
+                body, records, assets_rel_prefix)
+            warnings.extend(text for _, _, text in
+                            sorted(image_warnings, key=lambda w: (w[0], w[1])))
             if asset_relpaths:
                 extras["assets"] = asset_relpaths
         except RuntimeError as e:

@@ -648,6 +648,15 @@ def assemble_body_from_sections(
     return "\n".join(parts).rstrip() + "\n"
 
 
+# ---------- extractor concurrency ----------
+
+# How many extractor subprocesses extract_corpus.py runs side by side. It sets
+# this in each child's environment so an extractor that parallelizes inside a
+# document (extract_pdf_pymupdf4llm.py splits pages across worker processes)
+# takes its share of the CPUs instead of all of them.
+PARALLEL_JOBS_ENV = "DOC2KB_PARALLEL_JOBS"
+
+
 # ---------- pdf extractor warning classification ----------
 
 # Canonical prefixes for the two pymupdf4llm warnings that REQUIRE agent
