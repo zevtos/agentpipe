@@ -19,8 +19,10 @@ is a subprocess: `python3 ensure_env.py <phase_script> ...`. ensure_env handles
 venv bootstrap on the first phase that touches it.
 
 Heavy-deps stay opt-in (the project invariant): MinerU/Popo are only reached via
-the explicit `--tier mineru` / `--enable-mineru` / `--always-popo` flags. Nothing
-heavy is ever installed or routed silently.
+the explicit `--tier mineru` / `--enable-mineru` / `--always-popo` flags, speech-
+to-text for audio/video via `--tier transcribe` (without it such files surface
+as needs_install, unless their subtitles carry the text). Nothing heavy is ever
+installed or routed silently.
 
 Subcommands:
     run       (default) full pipeline: scout → auto-decide → extract → manifest
@@ -70,6 +72,10 @@ def _info(msg: str) -> None:
 def _fail(msg: str) -> int:
     print(f"[dkb] ERROR: {msg}", file=sys.stderr, flush=True)
     return 2
+
+
+# Opt-in heavy tiers `--tier` accepts (ensure_env.py installs them).
+TIERS = ["mineru", "transcribe"]
 
 
 def _ensure_env_cmd(tier: Optional[str], script: str, *args: str) -> list[str]:
@@ -365,7 +371,7 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     kb_root = Path(args.output_dir).expanduser().resolve()
     if not input_dir.is_dir():
         return _fail(f"input_dir is not a directory: {input_dir}")
-    tier = "mineru" if args.tier == "mineru" else None
+    tier = args.tier if args.tier in TIERS else None
     if args.enable_mineru and not tier:
         _info("--enable-mineru routes image-only PDFs to MinerU; without "
               "`--tier mineru` they will surface as needs_install in the report.")
@@ -409,8 +415,9 @@ def _add_pipeline_flags(p: argparse.ArgumentParser) -> None:
                    help="how to auto-resolve scout decisions (default: skip)")
     p.add_argument("--enable-mineru", action="store_true",
                    help="route image-only PDFs through MinerU (needs --tier mineru)")
-    p.add_argument("--tier", choices=["mineru"], default=None,
-                   help="install the opt-in heavy tier before running")
+    p.add_argument("--tier", choices=TIERS, default=None,
+                   help="install an opt-in heavy tier before running: mineru (VLM PDF) "
+                        "or transcribe (speech-to-text for audio/video)")
     p.add_argument("--always-popo", action="store_true",
                    help="run MinerU→Popo stage 2 on every mineru doc (opt-in, heavy)")
     p.add_argument("--normalize", action="store_true",
@@ -450,12 +457,12 @@ def main() -> int:
     p_scout.add_argument("input_dir")
     p_scout.add_argument("output_dir")
     p_scout.add_argument("--enable-mineru", action="store_true")
-    p_scout.add_argument("--tier", choices=["mineru"], default=None)
+    p_scout.add_argument("--tier", choices=TIERS, default=None)
 
     p_ext = sub.add_parser("extract", help="Phase 4 only — extract from _scout.json")
     p_ext.add_argument("output_dir", help="kb directory with _scout.json")
     p_ext.add_argument("--decide", choices=["skip", "proceed"], default="skip")
-    p_ext.add_argument("--tier", choices=["mineru"], default=None)
+    p_ext.add_argument("--tier", choices=TIERS, default=None)
     p_ext.add_argument("--always-popo", action="store_true")
     p_ext.add_argument("--normalize", action="store_true")
     p_ext.add_argument("--shard", action="store_true")
@@ -467,13 +474,13 @@ def main() -> int:
 
     p_man = sub.add_parser("manifest", help="Phase 5 only — (re)assemble the index")
     p_man.add_argument("output_dir", help="kb directory")
-    p_man.add_argument("--tier", choices=["mineru"], default=None)
+    p_man.add_argument("--tier", choices=TIERS, default=None)
 
     p_idx = sub.add_parser("index", help="Phase 4.5 only — (re)build the BM25 search index")
     p_idx.add_argument("output_dir", help="kb directory with docs/")
     p_idx.add_argument("--force", action="store_true",
                        help="rebuild even if the corpus signature is unchanged")
-    p_idx.add_argument("--tier", choices=["mineru"], default=None)
+    p_idx.add_argument("--tier", choices=TIERS, default=None)
 
     p_qry = sub.add_parser("query", help="search the KB index (forwards to query_kb.py)")
     p_qry.add_argument("output_dir", help="kb directory with _index.db")
@@ -503,7 +510,7 @@ def main() -> int:
     if args.command == "install":
         return _install(args.bin_dir, args.force)
 
-    tier = "mineru" if getattr(args, "tier", None) == "mineru" else None
+    tier = args.tier if getattr(args, "tier", None) in TIERS else None
     if args.command == "scout":
         input_dir = Path(args.input_dir).expanduser().resolve()
         kb_root = Path(args.output_dir).expanduser().resolve()

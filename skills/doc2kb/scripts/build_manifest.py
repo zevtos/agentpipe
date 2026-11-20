@@ -46,7 +46,20 @@ _EXTRA_KEYS = (
     "has_outputs", "language", "kernelspec_name",
     "embedded_in", "embedded_member", "embedded_location", "embedded_depth",
     "parent_source_sha256", "embedded_objects", "embedded_docs",
+    "duration_seconds", "transcript_source", "asr_engines", "asr_review",
+    "asr_review_spots", "subtitle_track", "media_format", "resolution",
+    "chapters", "subtitle_format", "cues",
 )
+
+
+def _hms(sec: Any) -> str:
+    try:
+        s = int(sec)
+    except (TypeError, ValueError):
+        return ""
+    h, rem = divmod(s, 3600)
+    m, ss = divmod(rem, 60)
+    return f"{h}:{m:02d}:{ss:02d}" if h else f"{m}:{ss:02d}"
 
 
 def _record_from(fm: dict[str, Any], kb_path: str) -> dict[str, Any]:
@@ -282,6 +295,10 @@ def write_index_md(kb_dir: Path, manifest: dict[str, Any]) -> None:
                     bits.append(f"{d['slides']} slides")
                 if d.get("cells"):
                     bits.append(f"{d['cells']} cells")
+                if d.get("duration_seconds"):
+                    bits.append(_hms(d["duration_seconds"]))
+                if d.get("transcript_source"):
+                    bits.append(d["transcript_source"])
                 if d.get("has_outputs"):
                     bits.append("with outputs")
                 if d.get("has_notes"):
@@ -361,6 +378,9 @@ def write_llms_txt(kb_dir: Path, manifest: dict[str, Any]) -> None:
         "md": "Markdown",
         "txt": "Plain text",
         "html": "HTML pages",
+        "audio": "Audio recordings",
+        "video": "Video recordings",
+        "subtitles": "Subtitles",
     }
     for src_type, group in sorted(by_type.items()):
         label = type_labels.get(src_type, src_type)
@@ -374,6 +394,8 @@ def write_llms_txt(kb_dir: Path, manifest: dict[str, Any]) -> None:
                 bits.append(f"{d['slides']} slides")
             elif d.get("cells"):
                 bits.append(f"{d['cells']} cells")
+            elif d.get("duration_seconds"):
+                bits.append(_hms(d["duration_seconds"]))
             if d.get("tokens_estimated"):
                 bits.append(f"~{d['tokens_estimated']:,} tokens")
             desc = ", ".join(bits)

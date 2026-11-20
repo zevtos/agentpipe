@@ -45,6 +45,13 @@ from _common import (  # type: ignore
     slugify,
     tool_version_string,
 )
+from _media import (  # type: ignore
+    AUDIO_EXTS,
+    SUBTITLE_EXTS,
+    VIDEO_EXTS,
+    media_kind,
+    probe as probe_media,
+)
 
 # Top-N cells to scan inside very large notebooks during scout. Full scan
 # of a 5k-cell notebook is too slow for the scout phase; the count is
@@ -66,6 +73,15 @@ PDF_TEXT_CHAR_THRESHOLD = 100
 # Tunables for "huge file" warnings.
 HUGE_BYTES = 50 * 1024 * 1024      # 50 MB
 HUGE_PAGES = 500                    # PDF pages
+# Audio/video: byte size says nothing (a 10-min 4K clip is 2 GB), duration
+# drives the speech-to-text cost. Longer than this → ask before extracting.
+HUGE_MEDIA_SECONDS = 4 * 3600
+# Speech-to-text cost model: tokens per minute of speech (~110 words/min at
+# ~2.3 tokens/word for Russian), seconds of compute per second of audio on
+# Apple Silicon with whisper.cpp + GigaAM (CPU-only machines are slower).
+MEDIA_TOKENS_PER_MIN = 250
+SUBS_TOKENS_PER_MIN = 200
+ASR_SECONDS_PER_SECOND = 0.25
 
 # Lock-files and OS noise — silent skip, no entry in skipped_at_scout.
 SILENT_SKIP_NAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
@@ -102,7 +118,17 @@ EXT_TO_TYPE = {
     ".tiff": "image",
     ".tif": "image",
     ".webp": "image",
+    **{ext: "audio" for ext in AUDIO_EXTS},
+    **{ext: "video" for ext in VIDEO_EXTS},
+    **{ext: "subtitles" for ext in SUBTITLE_EXTS},
 }
+
+# libmagic MIME types that mean "a recording" (the audio/video split is made
+# later from the actual streams, see media_richness()).
+_MEDIA_MIMES = {"application/ogg", "application/mp4", "application/x-matroska",
+                "application/vnd.rn-realmedia", "application/vnd.rn-realmedia-vbr",
+                "application/mxf", "application/x-shockwave-flash", "application/vnd.ms-asf"}
+_SUBTITLE_MIMES = {"application/x-subrip", "text/vtt", "text/x-ssa", "text/x-ass"}
 
 # ---------- low-level helpers ----------
 
@@ -170,6 +196,12 @@ def detect_source_type(path: Path, mime: str | None) -> tuple[str, str]:
             mime_type = "odt"
         elif mime.startswith("image/"):
             mime_type = "image"
+        elif mime.startswith("audio/") and mime not in ("audio/midi", "audio/x-midi", "audio/sp-midi"):
+            mime_type = "audio"
+        elif mime.startswith("video/") or mime in _MEDIA_MIMES:
+            mime_type = "video"
+        elif mime in _SUBTITLE_MIMES:
+            mime_type = "subtitles"
         elif mime.startswith("text/"):
             # generic text — treat as txt, but only if extension agrees
             mime_type = "txt"
@@ -179,6 +211,13 @@ def detect_source_type(path: Path, mime: str | None) -> tuple[str, str]:
     if ext_type != "unknown" and mime_type == "unknown":
         return ext_type, "high"
     if ext_type == mime_type:
+        return ext_type, "high"
+    # Media family: libmagic calls an audio-only .webm/.mp4 "video/…" and a
+    # video .ogg "audio/ogg" — the streams decide later, not the label.
+    if ext_type in ("audio", "video") and mime_type in ("audio", "video"):
+        return ext_type, "high"
+    # Subtitle files are plain text to libmagic.
+    if ext_type == "subtitles" and mime_type in ("txt", "xml", "html"):
         return ext_type, "high"
     # Disagreement — prefer mime (less spoofable), flag low confidence.
     return mime_type, "low"
@@ -497,6 +536,49 @@ def epub_richness(path: Path) -> dict[str, Any]:
     return out
 
 
+def media_richness(path: Path) -> dict[str, Any]:
+    """One ffprobe call → stream summary + the audio/video verdict. The
+    extension/MIME only nominated the file; the streams decide: cover art and
+    still images are not video, a stream-less file is not media."""
+    info = probe_media(path)
+    if not info.get("ok"):
+        if info.get("needs_install"):
+            return {"media_class": "unprobed",
+                    "warnings": ["ffprobe not on PATH — install ffmpeg (`brew install ffmpeg` / "
+                                 "`apt install ffmpeg`); duration unknown, extraction will "
+                                 "surface needs_install until it is installed"]}
+        return {"media_class": "corrupt",
+                "warnings": [f"media probe failed: {str(info.get('reason'))[:200]}"]}
+    kind = media_kind(info)
+    out: dict[str, Any] = {
+        "media_duration_seconds": int(round(info["duration"])) if info.get("duration") else None,
+        "media_format": info.get("format"),
+        "audio_streams": len(info["audio"]),
+        "video_streams": len(info["video"]),
+        "subtitle_tracks": len(info["subs_text"]),
+        "bitmap_subtitles": len(info["subs_bitmap"]),
+        "chapters": len(info["chapters"]),
+    }
+    if kind is None and not info["subs_text"]:
+        out["media_class"] = "corrupt"
+        out["warnings"] = ["no audio or video stream found (not a recording?)"]
+        return out
+    out["source_type"] = kind or "video"
+    if not info["audio"] and not info["subs_text"]:
+        out["media_class"] = "no_audio"
+    else:
+        out["media_class"] = "ok"
+    return out
+
+
+def _asr_tier_ready() -> bool:
+    try:
+        import ensure_env  # type: ignore  (stdlib-only)
+        return ensure_env.isolated_ready("transcribe")
+    except Exception:  # noqa: BLE001 — scout must never fail on this
+        return False
+
+
 def text_encoding(path: Path, sample_bytes: int = 65536) -> dict[str, Any]:
     out: dict[str, Any] = {"encoding": "utf-8"}
     try:
@@ -643,6 +725,36 @@ def set_strategy_and_tokens(info: dict[str, Any], *, enable_mineru: bool = False
         info["extraction_strategy"] = "xlsx"
         xml_bytes = info.get("xlsx_xml_bytes") or 0
         info["estimated_tokens"] = max(xml_bytes // 12, 100) if xml_bytes else None
+    elif t in ("audio", "video"):
+        mclass = info.get("media_class")
+        dur = info.get("media_duration_seconds") or 0
+        has_text = bool(info.get("subtitle_tracks") or info.get("subtitle_sidecars"))
+        if mclass == "corrupt":
+            info["extraction_strategy"] = "skip"
+            info["estimated_tokens"] = None
+            info["action_required"] = "ask_user_skip_corrupt"
+        elif mclass == "no_audio" and not has_text:
+            info["extraction_strategy"] = "not_in_mvp"
+            info["estimated_tokens"] = None
+            warnings.append("video without an audio track or text subtitles — visual-only "
+                            "content is not supported")
+            info["action_required"] = "ask_user_skip_unsupported"
+        else:
+            # Subtitles (embedded text track / paired sidecar) are read by
+            # ffmpeg in seconds; otherwise the opt-in transcribe tier runs.
+            info["extraction_strategy"] = "media"
+            per_min = SUBS_TOKENS_PER_MIN if has_text else MEDIA_TOKENS_PER_MIN
+            info["estimated_tokens"] = max(int(dur / 60 * per_min), 50) if dur else None
+            if info.get("audio_streams") and not has_text and not _asr_tier_ready():
+                warnings.append(
+                    "speech-to-text tier not installed (`ensure_env.py --tier transcribe`) — "
+                    "extraction will surface needs_install until it is")
+            if dur > HUGE_MEDIA_SECONDS:
+                warnings.append(f"very long recording: {dur / 3600:.1f} h")
+                info["action_required"] = info.get("action_required") or "ask_user_proceed_huge"
+    elif t == "subtitles":
+        info["extraction_strategy"] = "subtitles"
+        info["estimated_tokens"] = max(info.get("size_bytes", 0) // 8, 50)
     elif t in {"odt", "image"}:
         info["extraction_strategy"] = "not_in_mvp"
         info["estimated_tokens"] = None
@@ -661,7 +773,7 @@ def set_strategy_and_tokens(info: dict[str, Any], *, enable_mineru: bool = False
         if info.get("extraction_strategy") in (
             "pymupdf4llm", "mammoth", "doc", "rtf", "python-pptx",
             "passthrough-md", "passthrough-txt", "trafilatura", "ipynb", "epub",
-            "xml", "xlsx",
+            "xml", "xlsx", "subtitles",
         ) and not info.get("action_required"):
             info["action_required"] = "ask_user_proceed_huge"
 
@@ -778,6 +890,10 @@ def scan_file(idx: int, path: Path, input_root: Path,
         info.update(xlsx_richness(path))
     elif src_type in ("md", "txt", "xml"):
         info.update(text_encoding(path))
+    elif src_type in ("audio", "video"):
+        media = media_richness(path)
+        info["warnings"].extend(media.pop("warnings", []))
+        info.update(media)
     if src_type in ("docx", "pptx", "xlsx", "pdf") and info.get("pdf_class") not in ("encrypted", "corrupt"):
         info["embedded_objects"] = embedded_object_count(path, src_type)
 
@@ -808,7 +924,58 @@ def scan_file(idx: int, path: Path, input_root: Path,
     info.setdefault("book_title", None)
     info.setdefault("book_authors", None)
     info.setdefault("embedded_objects", 0)
+    for key in ("media_class", "media_duration_seconds", "media_format", "audio_streams",
+                "video_streams", "subtitle_tracks", "bitmap_subtitles", "chapters"):
+        info.setdefault(key, None)
     return info
+
+
+_SIDECAR_SEP = (".", "_", "-", " ")
+
+
+def pair_sidecars(files: list[dict[str, Any]], *, enable_mineru: bool = False) -> int:
+    """Attach subtitle files to the recording they belong to: `lecture.srt`,
+    `lecture.ru.vtt`, `lecture_en.srt` next to `lecture.mp4` (same folder,
+    the subtitle stem starts with the media stem). The media doc reads them
+    — as its text when they transcribe the speech, as an extra section
+    otherwise — so the subtitle file itself is not extracted twice
+    (`extraction_strategy: skip`, `sidecar_of: <media id>`). Returns the
+    number of paired files."""
+    media: dict[tuple[str, str], dict[str, Any]] = {}
+    for f in files:
+        if f.get("source_type") in ("audio", "video") and f.get("media_class") in ("ok", "no_audio"):
+            p = Path(f["source_path"])
+            media[(str(p.parent), p.stem.lower())] = f
+    n = 0
+    for f in files:
+        if f.get("source_type") != "subtitles":
+            continue
+        p = Path(f["source_path"])
+        stem = p.stem.lower()
+        best = None
+        for (parent, mstem), m in media.items():
+            if parent != str(p.parent):
+                continue
+            if stem == mstem or (stem.startswith(mstem) and stem[len(mstem)] in _SIDECAR_SEP):
+                if best is None or len(mstem) > len(Path(best["source_path"]).stem):
+                    best = m
+        if best is None:
+            continue
+        best.setdefault("subtitle_sidecars", []).append(f["source_path"])
+        f["extraction_strategy"] = "skip"
+        f["estimated_tokens"] = None
+        f["sidecar_of"] = best["id"]
+        f["warnings"] = (f.get("warnings") or []) + [
+            f"subtitles of {best['source_path']} — extracted into {best['id']}"]
+        n += 1
+    stale = ("speech-to-text tier not installed", "video without an audio track",
+             "very long recording")
+    for m in media.values():
+        if m.get("subtitle_sidecars"):
+            m["warnings"] = [w for w in (m.get("warnings") or []) if not w.startswith(stale)]
+            m["action_required"] = None
+            set_strategy_and_tokens(m, enable_mineru=enable_mineru)
+    return n
 
 
 def aggregate_decisions(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -901,6 +1068,10 @@ def main() -> int:
                 "reason": f"scout failed: {str(e)[:200]}",
             })
 
+    paired = pair_sidecars(files, enable_mineru=args.enable_mineru)
+    if paired:
+        log(f"Paired {paired} subtitle file(s) with their recordings")
+
     total_size = sum(f["size_bytes"] for f in files)
     total_tokens = sum((f.get("estimated_tokens") or 0) for f in files)
     elapsed = time.time() - t0
@@ -916,6 +1087,10 @@ def main() -> int:
             return max(pages * 2, 30)  # ~2 s/page on Apple Silicon VLM
         if strategy == "doc":
             return 6   # soffice/textutil headless cold-start dominates
+        if strategy == "media":
+            if f.get("subtitle_tracks") or f.get("subtitle_sidecars"):
+                return 3
+            return int((f.get("media_duration_seconds") or 600) * ASR_SECONDS_PER_SECOND) + 15
         if f.get("source_type") == "pdf":
             return 2
         return 1

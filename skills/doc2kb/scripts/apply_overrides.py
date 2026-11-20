@@ -25,7 +25,11 @@ Config schema (stdlib json — no new deps):
                       "keep_raw": true },
           "popo": true,                     // per-file Popo opt-in/out (overrides env)
           "note": "scanned scans, send to VLM" },
-        { "match": "doc-012", "strategy": "skip" }
+        { "match": "doc-012", "strategy": "skip" },
+        { "match": "lectures/*.m4a",        // audio/video: spoken language,
+          "media": { "lang": "ru",           //   ASR engines, subtitles vs ASR
+                     "engines": "whisper,gigaam",
+                     "subtitles": "ignore" } }
       ]
     }
 
@@ -37,6 +41,8 @@ On a runnable strategy the file's `action_required` is nulled (the override IS
 the Phase-3 decision). A `mineru` block is stored structurally on the file
 entry (extract_corpus renders the CLI flags from it — never raw arg strings)
 and is inert unless the resolved strategy is `mineru` (a warning is emitted).
+A `media` block ({lang, engines, subtitles}) works the same way for the
+`media` strategy.
 
 Exit codes:
     0 — applied (or dry-run) cleanly.
@@ -59,15 +65,17 @@ from _common import log as _common_log
 
 # Single-source the canonical strategy / backend sets so this script can never
 # drift from the dispatcher and the mineru extractor.
-from extract_corpus import DISPATCH, NON_RUNNABLE
+from extract_corpus import DISPATCH, MEDIA_ENGINES, NON_RUNNABLE
 from extract_pdf_mineru import SUPPORTED_BACKENDS
 
 
 KNOWN_STRATEGIES = set(DISPATCH) | set(NON_RUNNABLE)
 _DOC_ID_RE = re.compile(r"doc-\d{3,}$")
 _LANG_RE = re.compile(r"^[a-z]{2,}$")
-_ALLOWED_RULE_KEYS = {"match", "strategy", "mineru", "popo", "note"}
+_ALLOWED_RULE_KEYS = {"match", "strategy", "mineru", "media", "popo", "note"}
 _ALLOWED_MINERU_KEYS = {"backend", "lang", "keep_raw"}
+_ALLOWED_MEDIA_KEYS = {"lang", "engines", "subtitles"}
+_MEDIA_LANG_RE = re.compile(r"^(auto|[a-z]{2,3})$")
 
 
 def log(msg: str) -> None:
@@ -125,6 +133,26 @@ def _validate_config(cfg: object) -> list[dict]:
             keep_raw = mineru.get("keep_raw")
             if keep_raw is not None and not isinstance(keep_raw, bool):
                 raise ConfigError(f"{loc}.mineru.keep_raw must be a boolean")
+        media = rule.get("media")
+        if media is not None:
+            if not isinstance(media, dict):
+                raise ConfigError(f"{loc}.media must be an object")
+            uk = set(media) - _ALLOWED_MEDIA_KEYS
+            if uk:
+                raise ConfigError(f"{loc}.media has unknown key(s): {sorted(uk)} "
+                                  f"(allowed: {sorted(_ALLOWED_MEDIA_KEYS)})")
+            lang = media.get("lang")
+            if lang is not None and not (isinstance(lang, str) and _MEDIA_LANG_RE.match(lang)):
+                raise ConfigError(f"{loc}.media.lang={lang!r} must be 'auto' or a 2-3 letter code")
+            engines = media.get("engines")
+            if engines is not None and not (
+                    isinstance(engines, str) and (engines == "auto" or (
+                        engines and all(e in MEDIA_ENGINES for e in engines.split(","))))):
+                raise ConfigError(f"{loc}.media.engines={engines!r} must be 'auto' or a comma list "
+                                  f"of {sorted(MEDIA_ENGINES)}")
+            subs = media.get("subtitles")
+            if subs is not None and subs not in ("prefer", "ignore"):
+                raise ConfigError(f"{loc}.media.subtitles={subs!r} must be 'prefer' or 'ignore'")
         popo = rule.get("popo")
         if popo is not None and not isinstance(popo, bool):
             raise ConfigError(f"{loc}.popo must be a boolean")
@@ -146,6 +174,7 @@ def _fingerprint(f: dict) -> tuple:
         f.get("extraction_strategy"),
         f.get("action_required"),
         json.dumps(f.get("mineru"), sort_keys=True, ensure_ascii=False),
+        json.dumps(f.get("media"), sort_keys=True, ensure_ascii=False),
         f.get("popo"),
     )
 
@@ -169,6 +198,10 @@ def _apply(scout: dict, overrides: list[dict]) -> tuple[list[int], list[dict]]:
                 block = dict(f.get("mineru") or {})
                 block.update(rule["mineru"])
                 f["mineru"] = block
+            if rule.get("media") is not None:
+                block = dict(f.get("media") or {})
+                block.update(rule["media"])
+                f["media"] = block
             if "popo" in rule:
                 f["popo"] = rule["popo"]
         if _fingerprint(f) != before:
@@ -177,6 +210,7 @@ def _apply(scout: dict, overrides: list[dict]) -> tuple[list[int], list[dict]]:
                 "source_path": f.get("source_path"),
                 "extraction_strategy": f.get("extraction_strategy"),
                 "mineru": f.get("mineru"),
+                "media": f.get("media"),
                 "popo": f.get("popo"),
             })
     return rule_hits, changed
@@ -266,6 +300,10 @@ def main() -> int:
     for item in inert:
         log(f"WARNING: {item['source_path']} has a mineru block but strategy "
             "!= mineru — block is inert until strategy is mineru")
+    for f in patched.get("files") or []:
+        if f.get("media") and f.get("extraction_strategy") != "media":
+            log(f"WARNING: {f.get('source_path')} has a media block but strategy "
+                "!= media — block is inert")
 
     blocked_by_unmatched = bool(unmatched) and not args.allow_unmatched
     if unmatched:

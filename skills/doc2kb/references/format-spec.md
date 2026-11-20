@@ -23,6 +23,8 @@ Contents: [File layout](#file-layout) · [`_scout.json`](#_scoutjson) ·
 ├── _scout.json            # scout output, kept for debugging
 ├── _logs/
 │   └── errors.json        # extraction failures, if any
+├── _media/<doc-id>/       # audio/video speech-to-text drafts: review.md (disputed spots), whisper.srt/.json,
+│                          #   gigaam.txt, mlx.txt, run.log, asr.json — only for docs that went through ASR
 ├── assets/                # extracted images: <doc-id>-pageNN-imgM.<ext>, <doc-id>-slideNN-imgM.<ext>,
 │                          #   <doc-id>-imgNNN.<ext>; vector images (EMF/WMF/SVG/PDF/EPS) as .png
 └── docs/
@@ -70,7 +72,7 @@ Emitted by `scout_corpus.py`. Schema:
       "size_bytes": int,
       "mime": "application/pdf" | null,
       "mime_confidence": "high" | "low",     // low if magic ↔ ext disagree
-      "source_type": "pdf"|"docx"|"doc"|"pptx"|"xlsx"|"md"|"txt"|"html"|"xml"|"ipynb"|"epub"|"rtf"|"odt"|"image"|"unknown",
+      "source_type": "pdf"|"docx"|"doc"|"pptx"|"xlsx"|"md"|"txt"|"html"|"xml"|"ipynb"|"epub"|"rtf"|"audio"|"video"|"subtitles"|"odt"|"image"|"unknown",
       "pdf_class": "text"|"image_only"|"mixed"|"encrypted"|"corrupt" | null,
       "pages": int | null,
       "slides": int | null,
@@ -89,7 +91,18 @@ Emitted by `scout_corpus.py`. Schema:
       "embedded_objects": int,               // docx/pptx/xlsx/pdf: objects Phase 4 will look into
                                              // (OOXML */embeddings/* members, PDF attachments)
       "encoding": "utf-8" | "cp1251" | ... | null,
-      "extraction_strategy": "pymupdf4llm"|"mineru"|"mammoth"|"doc"|"rtf"|"python-pptx"|"passthrough-md"|"passthrough-txt"|"trafilatura"|"xml"|"xlsx"|"ipynb"|"epub"|"needs_password"|"needs_ocr_or_vlm"|"not_in_mvp"|"skip",
+      "media_class": "ok"|"no_audio"|"corrupt"|"unprobed" | null,   // audio/video; unprobed = no ffprobe
+      "media_duration_seconds": int | null,  // audio/video (ffprobe)
+      "media_format": "mov,mp4,m4a,3gp,3g2,mj2" | null,  // ffprobe format_name
+      "audio_streams": int | null,           // audio/video
+      "video_streams": int | null,           // real picture streams (cover art / stills excluded)
+      "subtitle_tracks": int | null,         // text subtitle streams inside the container
+      "bitmap_subtitles": int | null,        // PGS/VobSub/DVB — not extracted (need OCR)
+      "chapters": int | null,                // container chapters (become ## sections)
+      "subtitle_sidecars": ["rel/lecture.ru.srt", ...],  // media: subtitle files paired by name (optional)
+      "sidecar_of": "doc-NNN",               // subtitles: paired into that media doc (strategy skip; optional)
+      "media": {"lang": "ru", "engines": "whisper,gigaam", "subtitles": "prefer"|"ignore"},  // optional, apply_overrides
+      "extraction_strategy": "pymupdf4llm"|"mineru"|"mammoth"|"doc"|"rtf"|"python-pptx"|"passthrough-md"|"passthrough-txt"|"trafilatura"|"xml"|"xlsx"|"ipynb"|"epub"|"media"|"subtitles"|"needs_password"|"needs_ocr_or_vlm"|"not_in_mvp"|"skip",
       "estimated_tokens": int | null,
       "warnings": [string],
       "action_required": "ask_user_password_or_skip"|"ask_user_ocr_strategy"|"ask_user_proceed_huge"|"ask_user_skip_corrupt"|"ask_user_skip_unsupported" | null
@@ -117,7 +130,7 @@ Every extracted document has a YAML frontmatter block. Required fields:
 |---------------------|-------------|------------------|
 | `id`                | string      | scout-assigned doc-NNN |
 | `source`            | string      | relative path inside input corpus |
-| `source_type`       | string      | `pdf`/`docx`/`doc`/`pptx`/`xlsx`/`ipynb`/`rtf`/`epub`/`md`/`txt`/`html`/`xml` |
+| `source_type`       | string      | `pdf`/`docx`/`doc`/`pptx`/`xlsx`/`ipynb`/`rtf`/`epub`/`md`/`txt`/`html`/`xml`/`audio`/`video`/`subtitles` |
 | `source_sha256`     | string      | sha256 of original bytes |
 | `extraction_method` | string      | `name@version` of the extractor used |
 | `extraction_date`   | string      | YYYY-MM-DD UTC |
@@ -152,6 +165,17 @@ Per-type optional fields:
 | `assets`           | pdf/docx/doc/pptx/rtf/epub | list of relative paths to images extracted into `<kb_dir>/assets/` and referenced from the body (only emitted when at least one image was recovered). Vector images (EMF/WMF/SVG/PDF/EPS) are rasterized to `.png` |
 | `embedded_objects` | docx/doc/pptx/xlsx/pdf | number of embedded objects found (OLE objects, embedded files, chart-data workbooks, PDF attachments); only when > 0 |
 | `embedded_docs`    | docx/doc/pptx/xlsx/pdf | ids of the child docs extracted from them (`[doc-001_e01, …]`) |
+| `duration_seconds` | audio/video/subtitles | length of the recording (ffprobe) or of the last cue; seconds only — an unquoted `mm:ss` reads as a base-60 int in YAML 1.1 |
+| `transcript_source`| audio/video | `subtitles` (a sidecar file or a text track transcribed the speech) or `asr` (speech-to-text tier) |
+| `subtitle_track`   | audio/video | which subtitles gave the text (`sidecar lecture.ru.srt`, `stream 2 (subrip, en)`) |
+| `subtitle_sources` | audio/video | subtitle candidates found (sidecars + text tracks) |
+| `sidecars_appended`| audio/video | paired subtitle files not used as the main text, appended as `## Subtitles: <file>` sections |
+| `asr_engines`      | audio/video | engines in merge order: base, filler (`[whisper, gigaam]`) |
+| `asr_words` / `asr_seconds` | audio/video | words in the merged transcript / wall time of the tier worker |
+| `asr_review` / `asr_review_spots` | audio/video | kb-relative `_media/<id>/review.md` and its spot count (engine disagreements, loop/gap fills) |
+| `language`         | audio/video/subtitles | spoken (detected or forced) or subtitle language, ISO 639-1 |
+| `media_format` / `audio_codec` / `video_codec` / `resolution` / `audio_streams` / `chapters` / `media_title` | audio/video | container and stream facts from ffprobe |
+| `subtitle_format` / `cues` / `source_encoding` | subtitles | parser used (`srt`/`vtt`/`ass`/`sbv`/`lrc`), cue count, detected encoding |
 | `embedded_in`      | embedded doc | id of the parent doc |
 | `embedded_member`  | embedded doc | where the object lives inside the parent (`ppt/embeddings/oleObject1.bin`, `EmbeddedFiles/x.pdf`, `page3/attachment1/x.pdf`) |
 | `embedded_name`    | embedded doc | the object's file name (an OLE Package's stored name when there is one) |
@@ -278,6 +302,35 @@ PPTX objects beyond text and pictures:
 Charts come from the values cached in the chart XML; SmartArt is its node texts
 in data-model order; an OLE object shows its preview image (unless it is shown
 as an icon) and the link to its embedded document.
+
+## Audio, video and subtitles (body)
+
+```markdown
+# lecture-03.mp4
+
+> Machine transcript of the speech — names and terms may be misheard. [mm:ss] = start of a passage; ⟨gigaam⟩ = text from the second engine.
+
+## 00:00–05:00
+
+[00:00] Добрый день, коллеги. Сегодня мы разберём …
+
+[00:41] ⟨gigaam⟩ а вот здесь whisper зациклился и текст взят у второй модели
+
+## 05:00–10:00
+
+[05:02] …
+```
+
+- Paragraph = consecutive segments/cues of one source, < 2.5 s apart, ≤ 500
+  chars, within one section; `[h:mm:ss]` for recordings of an hour or more.
+- Sections: the container's chapters when there are ≥ 2 (`## Глава 1. Введение
+  (00:00–00:09)`), else 5-minute windows (none for clips under ~6 min). The
+  heading path is what search citations show, so a hit reads
+  `lecture-03.mp4 › 10:00–15:00`.
+- Subtitle-sourced docs use the same layout; the note names the track.
+  Paired sidecar files that were not the main text follow as
+  `## Subtitles: <file> (<lang>)` sections.
+- `extract_subtitles.py` (standalone `.srt`/`.vtt`/…) renders the same way.
 
 ## Embedded documents
 
