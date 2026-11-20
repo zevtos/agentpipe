@@ -35,7 +35,7 @@ Steps (all idempotent):
      model — its real form is os.environ.get("POPO_MODEL_PATH", "popo_model"); we
      pin the default to the downloaded dir (postprocess_popo also exports the env).
   7. Record the env python at <popo_home>/.doc2kb-popo-python (the sentinel
-     postprocess_popo reads to PATH-inject the env).
+     postprocess_popo reads; it runs Popo's entry points with that python).
 
 CLI:
     bootstrap_popo.py [--popo-home <dir>] [--skip-model] [--force-model]

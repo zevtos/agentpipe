@@ -25,12 +25,15 @@ Contents: [File layout](#file-layout) · [`_scout.json`](#_scoutjson) ·
 │   └── errors.json        # extraction failures, if any
 ├── _media/<doc-id>/       # audio/video speech-to-text drafts: review.md (disputed spots), whisper.srt/.json,
 │                          #   gigaam.txt, mlx.txt, run.log, asr.json — only for docs that went through ASR
+├── _mineru/<doc-id>/      # opt-in (extract_pdf_mineru.py --keep-raw): MinerU output in vlm/ + <doc-id>.pdf
+├── _popo/                 # opt-in (postprocess_popo.py): MinerU-Popo work files, see references/mineru.md
 ├── assets/                # extracted images: <doc-id>-pageNN-imgM.<ext>, <doc-id>-slideNN-imgM.<ext>,
 │                          #   <doc-id>-imgNNN.<ext>; vector images (EMF/WMF/SVG/PDF/EPS) as .png
 └── docs/
     ├── <doc-id>-<slug>.md
     ├── <doc-id>_e01-<slug>.md         # document embedded in <doc-id> (see "Embedded documents")
     ├── <doc-id>_e01_e02-<slug>.md     # …and one embedded in that one
+    ├── <doc-id>-<slug>.tree.json      # opt-in MinerU-Popo document tree (postprocess_popo.py)
     └── ...
 ```
 

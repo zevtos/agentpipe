@@ -220,30 +220,66 @@ cd MinerU-Popo
 conda create -n popo python=3.10 && conda activate popo
 pip install -r requirements.txt
 hf download DreamEternal/MinerU-Popo --local-dir models/Mineru-Popo
-# Edit post_processing/model_utils.py to point POPO_MODEL_PATH at the
-# downloaded model. Optionally configure qwen_generate/gpt_generate.
 export DOC2KB_POPO_REPO="$PWD"
 ```
+
+`postprocess_popo.py` exports `POPO_MODEL_PATH=<repo>/models/Mineru-Popo`
+and `POPO_INFERENCE_BACKEND=transformers` itself, so `model_utils.py` needs
+no edit (an exported value of either wins). Without the bootstrap sentinel
+it runs Popo with the `python3` on PATH — activate the env first.
 
 **Usage:**
 
 ```bash
-# First, run mineru with --keep-raw so the per-doc cache is preserved
-# under <kb_dir>/_mineru/<doc_id>/vlm/ (MinerU 4 output + the Content List V1
-# as <doc_id>_content_list.json — the file Popo's MinerU reader looks up).
+# First, run mineru with --keep-raw so the per-doc cache is preserved:
+#   <kb_dir>/_mineru/<doc_id>/vlm/   MinerU 4 output + the Content List V1 as
+#                                    <doc_id>_content_list.json (what Popo's
+#                                    MinerU reader looks up)
+#   <kb_dir>/_mineru/<doc_id>/<doc_id>.pdf   copy of the source PDF — Popo
+#                                    renders its pages as the VLM's image input
 python3 <skill_dir>/scripts/ensure_env.py extract_pdf_mineru.py \
     "<input.pdf>" "<kb_dir>/docs/<id>-<slug>.md" \
     --doc-id <id> --source-rel "<rel>" --keep-raw
 
-# Then post-process. Reads <kb_dir>/_mineru/, runs Popo's 3 bash scripts
-# (normalize → inference → build_tree), writes
-# <kb_dir>/docs/<id>-<slug>.tree.json sidecars for each doc.
-python3 <skill_dir>/scripts/ensure_env.py postprocess_popo.py <kb_dir>
+# Then post-process. Writes <kb_dir>/docs/<id>-<slug>.tree.json per doc.
+python3 <skill_dir>/scripts/ensure_env.py postprocess_popo.py <kb_dir> [--doc-id <id>]
 ```
 
-Pass `--doc-id <id>` to process a single doc, `--popo-repo /abs/path`
-instead of the env var, or `--skip-normalization` / `--skip-inference`
-to iterate without redoing earlier steps.
+How the glue drives Popo. Upstream's `scripts/*.sh` wrappers are **not**
+used: `run_label_normalization.sh` passes `--pdf-dir eval_pdf_dir`, which
+crashes when that dir is absent, and `run_inference.sh` caps the run at
+`--limit 5` documents. Instead the glue calls Popo's Python entry points
+with the env's python and explicit paths:
+
+1. `post_processing/label_normalization.py --model mineru --input-dir <kb_dir>/_mineru --doc-id <ids…> --pdf-map-json …` —
+   Popo's `MineruReader` reads `<input-dir>/<doc_id>/vlm/<doc_id>_{model,middle,content_list}.json`,
+   which is the `_mineru/` cache layout as is, so nothing is copied into the
+   Popo checkout. The pdf map points each doc at its cached `<doc_id>.pdf`;
+   the PDF stem is also what Popo names every later output after.
+2. `post_processing/run_inference.py --model mineru --limit 0` — transformers
+   backend, `POPO_MAX_NEW_TOKENS=8192` (upstream's value).
+3. `post_processing/get_json_tree.py`.
+
+Inference and tree building take every `*.json` in a directory, so each
+gets a fresh selection holding only this run's docs. Intermediate files
+stay in the kb and are reused by `--skip-normalization` / `--skip-inference`:
+
+```
+<kb_dir>/_popo/
+  pdf_map.json
+  label_normalization/mineru/<doc_id>.json   # Popo's per-page block format
+  inference/<doc_id>.json                    # blocks + contd/level/image labels
+  build_tree/<doc_id>.json                   # the tree → docs/<id>-<slug>.tree.json
+  build_tree_txt/<doc_id>.txt                # indented "title|preview" outline
+```
+
+Per-doc results (and why a doc got no tree) land in the success JSON and
+`<kb_dir>/_logs/popo.json`; the run exits 1 only when no doc got a tree.
+A cache from before MinerU 4 (no `vlm/<doc_id>_content_list.json`) or
+without the PDF copy is reported per doc with "re-run
+`extract_pdf_mineru.py --keep-raw`". `--popo-repo /abs/path` overrides
+the env var. `--run-name` (it named a folder in the shared checkout) is
+accepted and ignored.
 
 ### Auto-route MinerU → Popo (env-gated, default OFF)
 
@@ -273,14 +309,14 @@ python3 <skill_dir>/scripts/ensure_env.py bootstrap_popo.py [--skip-model] [--fo
 Клонирует Popo (в `$DOC2KB_POPO_REPO` или `<state-dir>/popo/MinerU-Popo`),
 создаёт отдельный env (приоритет **uv → conda → venv**, Python 3.10),
 ставит зависимости платформо-зависимо, скачивает 4B-модель и патчит путь к
-ней. Popo'вские bash-скрипты зовут `python3` из PATH (без `conda activate`),
-поэтому `postprocess_popo.py` подкладывает bin/ этого env в PATH через
-sentinel `.doc2kb-popo-python` — uv-venv работает.
+ней. Python этого env записан в sentinel `.doc2kb-popo-python`;
+`postprocess_popo.py` запускает им точки входа Popo напрямую (без
+`conda activate`), так что uv-venv работает.
 
 > **macOS / Apple Silicon:** апстрим-`requirements.txt` у Popo — это тяжёлый
 > CUDA/vLLM **серверный** стек (`torch+cu12`, `nvidia-*`, `cupy`, `triton`) и на
 > Mac не встанет. Но doc2kb гоняет Popo через его **transformers**-бэкенд
-> (`run_inference.sh` ставит `POPO_INFERENCE_BACKEND=transformers`), которому
+> (`postprocess_popo.py` ставит `POPO_INFERENCE_BACKEND=transformers`), которому
 > ничего из этого не нужно. Реальная import-поверхность Popo — `torch`,
 > `transformers`, `PIL`, `fitz`, `bs4`, `openai`, `requests`, `tqdm` (+
 > `accelerate`/`qwen-vl-utils`), всё это ставится из `requirements-popo-mac.txt`.

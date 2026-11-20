@@ -80,7 +80,9 @@ Effect:
        looks up — so a follow-up `postprocess_popo.py` run can consume it
        without re-extracting. MinerU 4's middle JSON (schema 2.0) is kept as
        `middle_json.json`, never as `<doc_id>_middle.json`, which Popo would
-       parse with its 3.x reader.
+       parse with its 3.x reader. The source PDF is copied next to `vlm/` as
+       `<doc_id>.pdf`: Popo renders its pages for the VLM, and this copy is
+       the exact file MinerU parsed (page numbers line up).
 
 Frontmatter contract:
     Same shape as extract_pdf_pymupdf4llm.py — only `extraction_method`
@@ -519,13 +521,15 @@ def _extract_headings_from_content_list(content_list: list[dict]) -> list[str]:
     return headings
 
 
-def _cache_raw_mineru_output(located: dict, cache_dir: Path, doc_id: str) -> Path | None:
+def _cache_raw_mineru_output(located: dict, cache_dir: Path, doc_id: str,
+                             input_pdf: Path) -> Path | None:
     """Preserve MinerU's output under `<kb_dir>/_mineru/<doc_id>/vlm/` for a
     later opt-in `postprocess_popo.py` run, plus the Content List V1 shim
     `<doc_id>_content_list.json` that MinerU-Popo's MinerU reader looks for
-    (`<input>/<doc_id>/vlm/<doc_id>_{model,middle,content_list}.json`).
-    Returns the cache dir on success, None on failure (non-fatal — Popo just
-    won't be available for that doc)."""
+    (`<input>/<doc_id>/vlm/<doc_id>_{model,middle,content_list}.json`), plus
+    the source PDF as `<doc_id>/<doc_id>.pdf` — Popo renders its pages as the
+    VLM's image input. Returns the cache dir on success, None on failure
+    (non-fatal — Popo just won't be available for that doc)."""
     target = cache_dir / doc_id
     inner = target / "vlm"
     try:
@@ -534,6 +538,7 @@ def _cache_raw_mineru_output(located: dict, cache_dir: Path, doc_id: str) -> Pat
         shutil.copytree(located["root"], inner)
         if "content_list" in located:
             shutil.copyfile(located["content_list"], inner / f"{doc_id}_content_list.json")
+        shutil.copyfile(input_pdf, target / f"{doc_id}.pdf")
     except OSError as e:
         log(f"failed to cache raw mineru output to {target}: {e}", prefix="mineru")
         return None
@@ -638,7 +643,7 @@ def extract(
             extras["pages"] = pages_count
 
         if keep_raw and mineru_cache_dir is not None:
-            cached = _cache_raw_mineru_output(located, mineru_cache_dir, doc_id)
+            cached = _cache_raw_mineru_output(located, mineru_cache_dir, doc_id, input_pdf)
             if cached is not None:
                 audit["mineru_raw_cache"] = str(cached)
             else:
@@ -866,7 +871,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--keep-raw",
         action="store_true",
         help="Preserve MinerU's output under the cache dir (plus the "
-             "<doc_id>_content_list.json shim) for postprocess_popo.py.",
+             "<doc_id>_content_list.json shim and a copy of the source PDF) "
+             "for postprocess_popo.py.",
     )
     ap.add_argument(
         "--pages",
