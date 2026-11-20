@@ -89,12 +89,30 @@ GGML_MODELS = {  # name → (bytes, sha256)
 }
 VAD_REPO = "ggml-org/whisper-vad"
 VAD_REV = "9ffd54a1e1ee413ddf265af9913beaf518d1639b"
+# v6.2.0 (same repo and revision) lost speech on lecture-hall audio with the
+# flags below: whisper kept 397 / 115 of v5.1.2's 552 / 459 words on two 10-min
+# lecture excerpts (GigaAM heard 862 / 714); a clean voice note was a draw.
 VAD_FILE = "ggml-silero-v5.1.2.bin"
 VAD_SHA = "29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf"
 MLX_DEFAULT = ("mlx-community/whisper-large-v3-mlx", "49e6aa286ad60c14352c404340ded53710378a11")
 FW_DEFAULT = ("Systran/faster-whisper-large-v3", "edaa852ec7e145841d8ffdb056a99866b5f0a478")
 GIGAAM_DEFAULT = "v3_e2e_rnnt"
 GIGAAM_FALLBACK = "v2_rnnt"
+# GigaAM's own loader fetches weights by name from Sber's CDN
+# (cdn.chatwm.opensmodel.sberdevices.ru; its TLS certificate expired
+# 2026-11-04) into ~/.cache/gigaam. The official Hugging Face mirror keeps one
+# branch per model (transformers remote-code layout); setup pins its commit,
+# checks sha256 and loads the state dict into the gigaam package's own
+# GigaAMASR — no transformers, no remote code, torch.load(weights_only=True).
+GIGAAM_HF_REPO = "ai-sage/GigaAM-v3"
+GIGAAM_HF = {  # name → (commit of the model's branch, {file: (bytes, sha256)})
+    "v3_e2e_rnnt": ("7655ad717f8122257385bb4b2f373db3697e8680", {  # branch e2e_rnnt
+        "config.json": (1867, "02361ba9cafd6c3ec66fcdd73494c3b562a60eb2a2d1b13f3cb04ae440d93e52"),
+        "tokenizer.model": (255336, "828c12c991019eef952a960661f25a92d6ad279591e2ea466b4aeddf1d20a18a"),
+        "pytorch_model.bin": (448928167, "afc6dcbae8320ea56f2cddebc0f13fbf62c9d59b6ddcad899782623c8610826a"),
+    }),
+}
+GIGAAM_CACHE = Path("~/.cache/gigaam").expanduser()  # gigaam's default download_root
 
 BASE_ENGINES = ("whisper", "mlx", "faster-whisper")
 ALL_ENGINES = BASE_ENGINES + ("gigaam",)
@@ -241,11 +259,36 @@ def usable(models_dir: Path) -> dict[str, dict]:
         out[name] = {"ok": local is not None, "model": src[0], "path": str(local) if local else None}
         if local is None:
             out[name]["why"] = f"{src[0]} not downloaded — run ensure_env.py --tier transcribe"
-    out["gigaam"] = {"ok": have("gigaam") and have("silero_vad"),
-                     "model": env("DOC2KB_GIGAAM_MODEL", GIGAAM_DEFAULT)}
+    name = gigaam_name()
+    out["gigaam"] = {"ok": have("gigaam") and have("silero_vad"), "model": name,
+                     "weights": gigaam_weights(models_dir, name)}
     if not out["gigaam"]["ok"]:
         out["gigaam"]["why"] = "gigaam / silero-vad not installed"
     return out
+
+
+def gigaam_name() -> str:
+    return env("DOC2KB_GIGAAM_MODEL", GIGAAM_DEFAULT) or GIGAAM_DEFAULT
+
+
+def gigaam_hf_dir(models_dir: Path, name: str) -> Path | None:
+    """<models>/gigaam/<name> when every pinned file of the HF copy is there."""
+    src = GIGAAM_HF.get(name)
+    d = models_dir / "gigaam" / name
+    if src and all((d / f).is_file() and (d / f).stat().st_size == size
+                   for f, (size, _) in src[1].items()):
+        return d
+    return None
+
+
+def gigaam_weights(models_dir: Path, name: str) -> str | None:
+    """Where `name`'s weights would load from: 'huggingface' (the pinned copy
+    in models_dir), 'gigaam-cache' (~/.cache/gigaam: the checkpoint and, for
+    e2e models, the tokenizer — gigaam would fetch a missing one) or None."""
+    if gigaam_hf_dir(models_dir, name):
+        return "huggingface"
+    need = [f"{name}.ckpt"] + ([f"{name}_tokenizer.model"] if "e2e" in name else [])
+    return "gigaam-cache" if all((GIGAAM_CACHE / f).is_file() for f in need) else None
 
 
 def plan(spec: str, lang: str | None, avail: dict[str, dict]) -> tuple[str, str | None, str | None]:
@@ -402,16 +445,60 @@ class GigaamUnavailable(RuntimeError):
     """No GigaAM model could be loaded: not cached and not downloadable."""
 
 
-def load_gigaam(device: str):
-    """(model, name): the configured model, else GIGAAM_FALLBACK. GigaAM fetches
-    weights from Sber's CDN, not Hugging Face; when that is unreachable (its TLS
-    certificate lapsed in 2026-11) and nothing is cached, raise
-    GigaamUnavailable so callers run without the filler instead of crashing."""
+def _load_gigaam_hf(d: Path, device: str):
+    """GigaAMASR from the pinned HF copy in `d`: the HF config is GigaAM's own
+    model cfg with `_target_: modeling_gigaam.<Class>` (the repo's remote-code
+    file); point those at the gigaam package's classes, then load the state
+    dict (keys under the wrapper's `model.`) strictly. Mirrors what
+    gigaam.load_model does after its download."""
+    import gigaam
+    import torch
+    from gigaam import decoder, decoding, encoder, preprocess
+    from omegaconf import OmegaConf
+
+    def retarget(node):
+        if isinstance(node, dict):
+            t = node.get("_target_")
+            if isinstance(t, str) and t.startswith("modeling_gigaam."):
+                cls = t.split(".", 1)[1]
+                mod = next((m for m in (preprocess, encoder, decoder, decoding) if hasattr(m, cls)), None)
+                if mod is None:
+                    raise GigaamUnavailable(f"{d.name}: gigaam has no class {cls}")
+                node["_target_"] = f"{mod.__name__}.{cls}"
+            for v in node.values():
+                retarget(v)
+
+    cfg = json.loads((d / "config.json").read_text(encoding="utf-8"))["cfg"]["model"]["cfg"]
+    retarget(cfg)
+    cfg["encoder"]["flash_attn"] = False
+    cfg["decoding"]["model_path"] = str(d / "tokenizer.model")
+    sd = torch.load(str(d / "pytorch_model.bin"), map_location="cpu", weights_only=True)
+    model = gigaam.GigaAMASR(OmegaConf.create(cfg))
+    model.load_state_dict({k.removeprefix("model."): v for k, v in sd.items()})
+    model = model.eval()
+    dev = torch.device(device)
+    if dev.type != "cpu":
+        model.encoder = model.encoder.half()
+    return model.to(dev)
+
+
+def load_gigaam(device: str, models_dir: Path):
+    """(model, name): the configured model, else GIGAAM_FALLBACK. A model with a
+    pinned HF source (GIGAAM_HF) loads from its copy in models_dir (fetched by
+    `setup`), else from GigaAM's own ~/.cache/gigaam — never from Sber's CDN,
+    which is not revision-pinned and has been unreachable since 2026-11.
+    Other models go through gigaam.load_model (cache, else CDN; md5-checked).
+    Nothing loadable → GigaamUnavailable, and callers run without the filler."""
     import gigaam
     errors = []
-    for name in dict.fromkeys((env("DOC2KB_GIGAAM_MODEL", GIGAAM_DEFAULT) or GIGAAM_DEFAULT,
-                               GIGAAM_FALLBACK)):
+    for name in dict.fromkeys((gigaam_name(), GIGAAM_FALLBACK)):
+        where = gigaam_weights(models_dir, name)
+        if name in GIGAAM_HF and where is None:
+            errors.append(f"{name}: not downloaded (run `_asr.py setup`)")
+            continue
         try:
+            if where == "huggingface":
+                return _load_gigaam_hf(gigaam_hf_dir(models_dir, name), device), name
             return gigaam.load_model(name, fp16_encoder=(device != "cpu"), device=device), name
         except (ValueError, KeyError, AssertionError, OSError, RuntimeError) as e:
             say(f"gigaam {name} unavailable ({e})")
@@ -419,7 +506,21 @@ def load_gigaam(device: str):
     raise GigaamUnavailable("; ".join(errors))
 
 
-def run_gigaam(audio: Path, work: Path, deadline: float | None) -> tuple[list[Seg], str]:
+def fetch_gigaam(models_dir: Path, name: str) -> str:
+    """Download `name`'s pinned HF files (sha256-checked) unless GigaAM's own
+    cache already has the model. Returns a status for the setup report."""
+    rev, files = GIGAAM_HF[name]
+    if gigaam_weights(models_dir, name) == "gigaam-cache":
+        return f"cached in {GIGAAM_CACHE}"
+    d = models_dir / "gigaam" / name
+    d.mkdir(parents=True, exist_ok=True)
+    states = [_download(f"https://huggingface.co/{GIGAAM_HF_REPO}/resolve/{rev}/{f}", d / f, sha, size)
+              for f, (size, sha) in files.items()]
+    return f"{GIGAAM_HF_REPO}@{rev[:10]} " + ("downloaded" if "downloaded" in states else "present")
+
+
+def run_gigaam(audio: Path, work: Path, models_dir: Path,
+               deadline: float | None) -> tuple[list[Seg], str]:
     import logging
 
     import soundfile as sf
@@ -427,7 +528,7 @@ def run_gigaam(audio: Path, work: Path, deadline: float | None) -> tuple[list[Se
 
     wav = _read_wav(audio)
     chunks = vad_chunks(wav, SR)
-    model, name = load_gigaam(env("DOC2KB_GIGAAM_DEVICE", "cpu") or "cpu")
+    model, name = load_gigaam(env("DOC2KB_GIGAAM_DEVICE", "cpu") or "cpu", models_dir)
     tmp = work / "_chunk.wav"
     segs: list[Seg] = []
     for s, e in chunks:
@@ -602,7 +703,8 @@ def cmd_run(a: argparse.Namespace) -> int:
     results: dict[str, list[Seg]] = {}
     if base_name == "gigaam":
         audio = raw if a.no_eq else make_eq(raw, work, log, deadline)
-        results["gigaam"], models["gigaam"] = timed("gigaam", lambda: run_gigaam(audio, work, deadline))
+        results["gigaam"], models["gigaam"] = timed(
+            "gigaam", lambda: run_gigaam(audio, work, models_dir, deadline))
     else:
         results[base_name], lang = timed(base_name, lambda: runners[base_name](lang))
         models[base_name] = (Path(avail[base_name]["model"]).name if base_name == "whisper"
@@ -615,7 +717,7 @@ def cmd_run(a: argparse.Namespace) -> int:
             audio = raw if a.no_eq else make_eq(raw, work, log, deadline)
             try:
                 results["gigaam"], models["gigaam"] = timed(
-                    "gigaam", lambda: run_gigaam(audio, work, deadline))
+                    "gigaam", lambda: run_gigaam(audio, work, models_dir, deadline))
             except GigaamUnavailable as e:
                 notes.append(f"GigaAM filler skipped — no model could be loaded ({e})")
                 fill_name = None if fill_name == "gigaam" else fill_name
@@ -666,7 +768,8 @@ def _download(url: str, dest: Path, sha256: str, size: int | None) -> str:
     req = urllib.request.Request(url, headers={"User-Agent": "doc2kb-transcribe-setup"})
     if have_bytes:
         req.add_header("Range", f"bytes={have_bytes}-")
-    say(f"downloading {dest.name} ({(size or 0) / 1e9:.2f} GB) …")
+    shown = "" if not size else f" ({size / 1e6:,.1f} MB)" if size >= 1e6 else f" ({size / 1e3:.0f} KB)"
+    say(f"downloading {dest.name}{shown} …")
     with urllib.request.urlopen(req, timeout=60) as r:
         mode = "ab" if have_bytes and r.status == 206 else "wb"
         if mode == "wb":
@@ -728,8 +831,16 @@ def cmd_setup(a: argparse.Namespace) -> int:
                 if not a.all:
                     break
     if have("gigaam"):
+        name, fetched = gigaam_name(), ""
+        if name in GIGAAM_HF:
+            try:
+                fetched = fetch_gigaam(models_dir, name)
+            except (OSError, RuntimeError) as e:  # URLError ⊂ OSError; sha256 mismatch
+                fetched = f"download failed — {e}"
         try:
-            report["gigaam"] = f"{load_gigaam('cpu')[1]} ready"
+            got = load_gigaam("cpu", models_dir)[1]
+            note = "" if not fetched else f" ({fetched})" if got == name else f" ({name}: {fetched})"
+            report["gigaam"] = f"{got} ready{note}"
         except GigaamUnavailable as e:
             report["gigaam"] = (f"unavailable — Russian loops/gaps go unrepaired until it downloads "
                                 f"(re-run `ensure_env.py --tier transcribe` later): {e}")

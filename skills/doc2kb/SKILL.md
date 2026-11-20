@@ -513,8 +513,10 @@ generated index files.
 3. **Audio/video.** Recordings are parsed by the system `ffmpeg`/`ffprobe`
    (large C attack surface, like the `.doc` converter) — keep it updated.
    Speech-to-text runs locally in the tier's own venv; nothing leaves the
-   machine. GigaAM unpickles its checkpoints (`weights_only=False`); they are
-   guarded by GigaAM's md5 table and the pinned GigaAM commit.
+   machine. GigaAM v3 weights come from a pinned Hugging Face commit, are
+   sha256-checked and read with `torch.load(weights_only=True)`; only a
+   checkpoint GigaAM's own loader cached in `~/.cache/gigaam` (and the v2
+   fallback) is unpickled (`weights_only=False`), after GigaAM's md5 check.
 4. **Embedded objects and vector images.** Embedded documents are parsed by
    the same extractors, in child processes, under depth / count / size /
    compression-ratio / time limits (`_embedded.py`); OLE2 containers go through
@@ -567,9 +569,9 @@ python3 <skill_dir>/scripts/ensure_env.py --tier transcribe       # один р�
 DOC2KB_WHISPER_MODEL=/path/ggml-large-v3.bin python3 <skill_dir>/scripts/ensure_env.py --tier transcribe
 ```
 
-GigaAM качает веса не с Hugging Face, а с CDN Сбера; пока он недоступен (TLS-сертификат истёк 2026-11-04), установка без кэша `~/.cache/gigaam` проходит без русского филлера — `setup` и `run` пишут об этом, база (whisper) работает.
+Веса GigaAM v3 e2e `setup` берёт с официального зеркала на Hugging Face (`ai-sage/GigaAM-v3`, ветка `e2e_rnnt`; коммит и sha256 закреплены в `_asr.py`, 449 МБ в `<state>/transcribe/models/gigaam/`) и собирает из state dict модель самого пакета `gigaam` — без transformers и remote code. Собственный загрузчик GigaAM ходит на CDN Сбера, у которого 2026-11-04 истёк TLS-сертификат; уже скачанный им `~/.cache/gigaam/v3_e2e_rnnt.ckpt` используется как есть, второй раз веса не качаются. Не скачалось — `setup` и `run` пишут об этом и идут без русского филлера, база (whisper) работает.
 
-Тир живёт в **собственном venv** (`<state>/transcribe/venv`, Python 3.12): GigaAM пинит onnx/onnxruntime ниже, чем нужно PyMuPDF 2.x, а torch отстаёт от свежего CPython — общий venv поломал бы mineru. `ensure_env.py --tier transcribe` ставит `requirements-transcribe.txt` и вызывает `_asr.py setup`, который качает модели по закреплённой ревизии HF с проверкой sha256 (whisper.cpp `ggml-large-v3` 3.1 ГБ + VAD, если есть `whisper-cli`; иначе веса mlx-whisper / faster-whisper; GigaAM v3 ~430 МБ). После установки scout/extract подхватывают тир сами (`isolated_ready`), без флагов.
+Тир живёт в **собственном venv** (`<state>/transcribe/venv`, Python 3.12): GigaAM пинит onnx/onnxruntime ниже, чем нужно PyMuPDF 2.x, а torch отстаёт от свежего CPython — общий venv поломал бы mineru. `ensure_env.py --tier transcribe` ставит `requirements-transcribe.txt` и вызывает `_asr.py setup`, который качает модели по закреплённой ревизии HF с проверкой sha256 (whisper.cpp `ggml-large-v3` 3.1 ГБ + VAD, если есть `whisper-cli`; иначе веса mlx-whisper / faster-whisper; GigaAM v3 e2e 449 МБ). После установки scout/extract подхватывают тир сами (`isolated_ready`), без флагов.
 
 Пайплайн — порт локального `transcribe`, проверенного на 30-минутной записи из зала, где обычный whisper 19 минут из 30 крутил «Дай Бог.» по кругу:
 - **база** — whisper.cpp large-v3 по сырому аудио, `-mc 0` (без переноса текстового контекста между окнами — именно это убивает петли) + silero VAD → текст с пунктуацией. Без `whisper-cli`: mlx-whisper (Apple Silicon) → faster-whisper (везде), оба с `condition_on_previous_text=False`;
