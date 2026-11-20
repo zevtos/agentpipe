@@ -236,15 +236,23 @@ python3 <skill_dir>/scripts/ensure_env.py index_kb.py <kb_dir>
 anchors → по заголовкам → по абзацам, token-bounded, overlap-free) с
 **детерминированным contextual-заголовком** на каждом чанке
 (`Doc title › heading path › page N`) и строит `<kb_dir>/_index.db` —
-**SQLite FTS5/BM25**, токенайзер `porter unicode61 remove_diacritics 2`
-(латиница со стеммингом + кириллица + diacritic folding). Наличие FTS5
-проверяется на этапе сборки и пишется в `meta.fts`; если этого CPython'а
-FTS5 нет — `query_kb.py` прозрачно падает на pure-Python BM25 над той же
-таблицей `chunks`. Кладёт в `<kb_dir>` self-contained pure-stdlib копию
+**SQLite FTS5/BM25** со **стеммингом русского и английского** (Snowball
+Russian + Snowball English, pure-Python порты в `query_kb.py`): запрос
+«затратами на качество» находит «затраты на качество», «затрат на качество».
+Стемминг идёт в Python, а не в SQLite — встроенный `porter` стеммит только
+английский, а свой FTS5-токенайзер требует C API; поэтому FTS5 получает уже
+проанализированные токены (contentless-таблица, токенайзер `ascii`), а запрос
+проходит через ту же функцию `analyze()`. Наличие FTS5 проверяется на этапе
+сборки и пишется в `meta.fts`; если этого CPython'а FTS5 нет — `query_kb.py`
+прозрачно падает на pure-Python BM25 по формуле FTS5 `bm25()` над той же
+таблицей `chunks` (ранжирование совпадает с FTS5, просто медленнее). Схема —
+`references/format-spec.md` («`_index.db` search index»). Кладёт в `<kb_dir>` self-contained pure-stdlib копию
 поисковика (`_query.py`) + лаунчеры `query.sh` / `query.cmd` — KB становится
 **портативной и searchable где угодно с одним лишь `python3`** (без venv, без
 скилла). Идемпотентно по corpus-signature (sorted doc-id+sha256 + chunk
-params): повторный прогон — no-op, пока корпус не изменился.
+params + версия схемы и анализатора): повторный прогон — no-op, пока корпус не
+изменился; индекс старой схемы (до стемминга) пересобирается сам при следующем
+прогоне.
 
 > Эта фаза — детерминированная (никаких LLM, никакой суммаризации: чанки —
 > verbatim). Запускайте её **до** Phase 5 — `build_manifest.py` подхватывает
@@ -321,6 +329,7 @@ command, **citation-first**:
 ./query.sh "<question>" --type pdf --doc doc-002   # filter by source type / doc
 ./query.sh "<question>" --page 12            # filter by page anchor
 ./query.sh "<question>" --and                # require ALL terms (default: OR + BM25)
+./query.sh '"нейронные сети" AND обучени*' --raw  # FTS5 syntax; its terms are stemmed too
 ./query.sh --info                            # index stats + which backend is live
 
 # equivalent through the agent's canonical wrapper, or the dkb CLI:
@@ -349,9 +358,15 @@ Retrieval):
   match "transformer results" even when its body never repeats the title.
 - **Verbatim & deterministic.** Chunks are the source bytes — no summary, no
   rewrite — so the `source_sha256` provenance guarantee is untouched.
-- **Cyrillic + Latin.** The `porter unicode61 remove_diacritics 2` tokenizer
-  stems English, passes Cyrillic through, and folds diacritics — so a Russian
-  corpus is as searchable as an English one.
+- **Russian + English morphology.** Every passage and every query goes through
+  one pure-Python analyzer in `query_kb.py`: fold (lowercase, Latin diacritics,
+  Russian stress marks) → tokenize → Snowball Russian / Snowball English stem.
+  FTS5's own `porter` stems English only and a custom FTS5 tokenizer needs the
+  C API, so the stemmed tokens are handed to FTS5 ready-made. On a 47-doc
+  Russian course KB, 20 queries in inflected forms went from recall@5 0.33 →
+  0.78 (hit@5 0.70 → 1.00) at the same ~2 ms per query; exact-form and English
+  queries unchanged. An index built before stemming still searches (unstemmed)
+  and says to rebuild.
 
 When to skip it: `--no-index` on `dkb`, or just don't run Phase 4.5 — INDEX.md
 then degrades gracefully to heading + grep navigation. For a tiny corpus the
@@ -388,8 +403,8 @@ heading catalog alone is fine; the index earns its keep from dozens of docs up.
 | `postprocess_popo.py`        | **opt-in stage 2** — runs upstream opendatalab/MinerU-Popo over cached mineru outputs to rebuild document trees (heading hierarchy, cross-page table merging, paragraph truncation repair). Resolves the Popo repo from `--popo-repo` > `$DOC2KB_POPO_REPO` > the `bootstrap_popo.py` auto-default; runs Popo's Python entry points (not its bash wrappers) with the bootstrapped env's python (sentinel `.doc2kb-popo-python`), straight off the `_mineru/` cache, work files in `<kb_dir>/_popo/`; `--auto-setup` runs `bootstrap_popo.py` when unconfigured. |
 | `bootstrap_popo.py`          | **opt-in** auto-setup of the Popo stage-2 env — clone repo → create env (uv→conda→venv, py3.10) → install deps (upstream CUDA reqs on Linux, `requirements-popo-mac.txt` MPS set on macOS) → download the ~16 GB model (resumable, completeness-checked) → patch `POPO_MODEL_PATH` default; on macOS also pins `device_map`→MPS (verified ~22 tok/s, else accelerate disk-offloads). Never runs in the default pipeline; invoked directly or via `postprocess_popo.py --auto-setup` (gated by `DOC2KB_POPO_AUTO`). |
 | `token_count.py`             | count tokens in an extracted .md file |
-| `index_kb.py`                | Phase 4.5 — build `_index.db` (SQLite FTS5/BM25) over structure-aware, heading-path-headed, token-bounded chunks of `docs/*.md`; extracts per-doc distinctive terms; drops the portable `_query.py` + `query.sh`/`query.cmd` launchers. Idempotent by corpus signature. Importable `build_index()`. Pure stdlib + tiktoken — **never** a heavy tier. |
-| `query_kb.py`                | citation-first BM25 search over `_index.db`: `query_kb.py <kb_dir> "<question>" [-k N --doc ID --type pdf --page N --and --raw --show --json]`. FTS5 with a transparent pure-Python BM25 fallback. Pure stdlib — copied verbatim into each KB as `_query.py` so the KB searches anywhere with just `python3`. |
+| `index_kb.py`                | Phase 4.5 — build `_index.db` (SQLite FTS5/BM25, Russian + English Snowball-stemmed via `query_kb.analyze`) over structure-aware, heading-path-headed, token-bounded chunks of `docs/*.md`; extracts per-doc distinctive terms; drops the portable `_query.py` + `query.sh`/`query.cmd` launchers. Idempotent by corpus signature. Importable `build_index()`. Pure stdlib + tiktoken — **never** a heavy tier. |
+| `query_kb.py`                | citation-first BM25 search over `_index.db`: `query_kb.py <kb_dir> "<question>" [-k N --doc ID --type pdf --page N --and --raw --show --json]`. Carries the analyzer (fold → tokenize → Snowball RU/EN stem, BSD-3 ports) that `index_kb.py` imports. FTS5 with a transparent pure-Python BM25 fallback that ranks identically. Pure stdlib — copied verbatim into each KB as `_query.py` so the KB searches anywhere with just `python3`. |
 | `build_manifest.py`          | Phase 5 — assemble manifest, INDEX, llms.txt, AGENTS.md; folds in the `_index.db` Search section + per-doc keywords when present |
 | `dkb.py`                     | **standalone CLI** — one-shot orchestrator that chains Phase 2→5 with the decision step automated, for human/no-agent use (`dkb <input_dir> <output_kb_dir>`). Pure stdlib; shells out to the other scripts through `ensure_env.py` and reuses `apply_overrides.py` to resolve scout decisions. Self-installs a `dkb` launcher on PATH. See "Standalone CLI" below. |
 | `update_kb.py`               | **live KB** — incrementally stamp frontmatter on new hand-authored `docs/*.md` + regenerate index; self-installs `update_kb.sh` (see below) |

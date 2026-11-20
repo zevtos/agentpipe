@@ -46,8 +46,11 @@ unranked grep hits:
 `query.sh` is pure-stdlib and self-contained (`_query.py`) — it needs only
 `python3`, no venv, no network. Each result cites `source › heading › page N`;
 use that to open the exact `docs/*.md` section (or the original `source` file)
-for full context. Search is iterative: refine the query and re-run rather than
-loading whole documents speculatively. If `_index.db` is absent, fall back to
+for full context. Word forms don't matter: Russian and English words are
+stemmed on both sides, so «затраты на качество» also finds «затратами на
+качество» — rephrase with *different words* if a search misses, not with other
+inflections of the same ones. Search is iterative: refine the query and re-run
+rather than loading whole documents speculatively. If `_index.db` is absent, fall back to
 the INDEX.md headings + `Grep`/`Read` flow below.
 
 ## Reading discipline

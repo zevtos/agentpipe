@@ -11,11 +11,17 @@ so the agent (or a human) can run `query_kb.py <kb_dir> "<question>"` and get th
 top-k passages back *with citations*, instead of grepping blind.
 
 What it builds under `<kb_dir>`:
-  * `_index.db`  — SQLite database: `docs`, `chunks`, and (when this CPython's
-    sqlite has FTS5 compiled in) a `chunks_fts` virtual table with the
-    `porter unicode61 remove_diacritics 2` tokenizer (Latin stemming + Cyrillic
-    + diacritic folding). FTS5 presence is probed at build time and recorded in
-    `meta.fts`; `query_kb.py` falls back to a pure-Python BM25 if it is absent.
+  * `_index.db`  — SQLite database: `docs`, `chunks` (verbatim passages) and,
+    when this CPython's sqlite has FTS5 compiled in, a contentless
+    `chunks_fts` virtual table holding each passage run through
+    `query_kb.analyze` (folded, tokenized, Snowball-stemmed — Russian and
+    English), tokenized by FTS5's `ascii` tokenizer. Stemming has to happen in
+    Python — FTS5's `porter` stems English only and custom tokenizers need
+    SQLite's C API — so the analyzer lives in `query_kb.py` (the file that
+    travels with the KB) and both sides import the one function. FTS5
+    presence is probed at build time and recorded in `meta.fts`; without it
+    `query_kb.py` analyzes `chunks` on the fly and scores them with a
+    pure-Python copy of FTS5's bm25(), so rankings match either way.
   * `_query.py`  — a verbatim, pure-stdlib copy of `query_kb.py` so the KB is
     self-contained and portable: any machine with `python3` can search it.
   * `query.sh` / `query.cmd` — launchers that run `_query.py` against this KB.
@@ -33,8 +39,9 @@ Chunking (the retrieval-quality lever, all deterministic — no LLM, no summary)
     context-free chunk lacks, so a passage about "results" still matches
     "transformer results" even when the body never repeats the title.
 
-Idempotent: keyed on a corpus signature (sorted doc-id+sha256 + chunk params).
-Re-running on an unchanged corpus is a no-op unless `--force`.
+Idempotent: keyed on a corpus signature (sorted doc-id+sha256 + chunk params +
+schema version + analyzer id). Re-running on an unchanged corpus is a no-op
+unless `--force`; an index from an older schema/analyzer rebuilds.
 
 CLI:
     index_kb.py <kb_dir> [--target 400] [--cap 512] [--no-keywords] [--force] [-q]
@@ -69,10 +76,11 @@ from _common import (  # noqa: E402
     tool_version_string,
     utc_now_iso,
 )
+import query_kb as _qk  # noqa: E402  — the analyzer; shipped into every KB as _query.py
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 INDEX_DB_NAME = "_index.db"
-INDEX_SCHEMA_VERSION = "1"
+INDEX_SCHEMA_VERSION = "2"  # 2: Python-stemmed, contentless, ascii-tokenized FTS5
 DEFAULT_TARGET_TOKENS = 400
 DEFAULT_MAX_TOKENS = 512
 
@@ -216,20 +224,33 @@ def _context_header(title: str, heading: str, page: Optional[int]) -> str:
 # ---------- keyword extraction (cheap TF-IDF, optional) ----------
 
 def _keywords(per_doc_tf: list[dict[str, int]], top_n: int = 8) -> list[list[str]]:
+    """TF-IDF over STEMS, shown as each stem's most frequent surface form — so
+    "кейс, кейса, кейсы, кейсов" is one keyword, not four."""
     import math
     n = len(per_doc_tf)
+    grouped: list[dict[str, list]] = []          # stem -> [freq, best_form, best_freq]
     df: dict[str, int] = {}
     for tf in per_doc_tf:
-        for term in tf:
-            df[term] = df.get(term, 0) + 1
+        g: dict[str, list] = {}
+        for term, freq in tf.items():
+            if len(term) <= 2 or term.isdigit() or term in _STOPWORDS:
+                continue
+            key = " ".join(_qk.analyze(term)) or term
+            rec = g.get(key)
+            if rec is None:
+                g[key] = [freq, term, freq]
+            else:
+                rec[0] += freq
+                if (freq, term) > (rec[2], rec[1]):
+                    rec[1], rec[2] = term, freq
+        for key in g:
+            df[key] = df.get(key, 0) + 1
+        grouped.append(g)
     out: list[list[str]] = []
-    for tf in per_doc_tf:
-        scored = [
-            (term, freq * math.log((n + 1) / (df[term] + 0.5)))
-            for term, freq in tf.items()
-            if len(term) > 2 and not term.isdigit() and term not in _STOPWORDS
-        ]
-        scored.sort(key=lambda kv: kv[1], reverse=True)
+    for g in grouped:
+        scored = [(rec[1], rec[0] * math.log((n + 1) / (df[key] + 0.5)))
+                  for key, rec in g.items()]
+        scored.sort(key=lambda kv: (-kv[1], kv[0]))
         out.append([t for t, _ in scored[:top_n]])
     return out
 
@@ -296,7 +317,8 @@ def _collect_docs(kb_dir: Path) -> list[dict[str, Any]]:
 
 def _corpus_signature(docs: list[dict[str, Any]], target: int, cap: int) -> str:
     h = hashlib.sha256()
-    h.update(f"schema={INDEX_SCHEMA_VERSION};target={target};cap={cap}\n".encode())
+    h.update(f"schema={INDEX_SCHEMA_VERSION};analyzer={_qk.ANALYZER};"
+             f"target={target};cap={cap}\n".encode())
     for d in sorted(docs, key=lambda x: str(x["doc_id"])):
         h.update(f"{d['doc_id']}|{d['sha256']}\n".encode("utf-8"))
     return h.hexdigest()
@@ -340,10 +362,16 @@ def _write_schema(conn: sqlite3.Connection, fts: bool) -> None:
         CREATE INDEX idx_chunks_doc ON chunks(doc_id);
     """)
     if fts:
+        # Rows are " ".join(analyze(x)): lowercase tokens of [0-9a-z] +
+        # non-ASCII letters separated by single spaces. The `ascii` tokenizer
+        # splits only on ASCII non-alphanumerics and folds only ASCII case, so
+        # it yields exactly those tokens — FTS5 indexes the analyzer's output
+        # verbatim. Contentless (content=''): the stemmed text is not needed
+        # after indexing (snippets come from `chunks.body`), so the index
+        # costs no more space than the old external-content one.
         conn.execute(
             "CREATE VIRTUAL TABLE chunks_fts USING fts5("
-            "context, body, content='chunks', content_rowid='chunk_id', "
-            "tokenize='porter unicode61 remove_diacritics 2')")
+            "context, body, content='', tokenize='ascii')")
 
 
 def build_index(kb_dir: Path, *, target: int = DEFAULT_TARGET_TOKENS,
@@ -410,6 +438,11 @@ def build_index(kb_dir: Path, *, target: int = DEFAULT_TARGET_TOKENS,
                     (chunk_id, d["doc_id"], d["source_path"], d["kb_path"],
                      d["source_type"], ch["page"], ch["heading"] or None, rec["ord"],
                      ch["tokens"], ctx, ch["body"]))
+                if fts:
+                    conn.execute(
+                        "INSERT INTO chunks_fts(rowid, context, body) VALUES(?,?,?)",
+                        (chunk_id, " ".join(_qk.analyze(ctx)),
+                         " ".join(_qk.analyze(ch["body"]))))
                 rec["ord"] += 1
                 if keywords:
                     # Keywords come from the verbatim body only — never the
@@ -431,17 +464,13 @@ def build_index(kb_dir: Path, *, target: int = DEFAULT_TARGET_TOKENS,
                 (doc_id, rec["source_path"], rec["kb_path"], rec["source_type"],
                  rec["sha256"], rec["tokens"], rec["n_chunks"], ", ".join(kw)))
 
-        if fts:
-            conn.execute(
-                "INSERT INTO chunks_fts(rowid, context, body) "
-                "SELECT chunk_id, context, body FROM chunks")
-
         meta = {
             "schema_version": INDEX_SCHEMA_VERSION,
             "indexer": f"doc2kb-index@{tool_version_string()}",
             "created_at": utc_now_iso(),
             "corpus_signature": signature,
             "fts": "1" if fts else "0",
+            "analyzer": _qk.ANALYZER,
             "chunk_target_tokens": str(target),
             "chunk_max_tokens": str(cap),
             "documents": str(len(doc_rows)),
