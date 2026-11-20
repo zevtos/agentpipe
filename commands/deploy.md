@@ -24,14 +24,22 @@ Run these checks sequentially, stopping on any failure:
 4. **No debug artifacts**: Search for `console.log`, `debugger`, `binding.pry`, `import pdb`, `TODO`, `FIXME`, `HACK` in changed files since last release tag — warn if found
 5. **Environment config**: Compare `.env.example` against actual env var usage in code — flag any undocumented variables
 
-### Step 2: Security Scan (DevOps Agent)
-Run the `devops` agent:
+### Step 2: Security Scan (DevOps + Security Agents in Parallel)
+Run BOTH agents simultaneously:
+
+**DevOps agent:**
 "Run a deployment security scan:
 1. Dependency vulnerability scan (npm audit / pip-audit / cargo audit / trivy fs)
-2. Check for hardcoded secrets (search for API keys, tokens, passwords in source)
-3. Check Docker image if Dockerfile exists (base image pinned? multi-stage? non-root?)
-4. Verify security headers are configured (CSP, HSTS, X-Frame-Options)
-5. Check that production error handling doesn't leak stack traces
+2. Check Docker image if Dockerfile exists (base image pinned? multi-stage? non-root?)
+3. Verify security headers are configured (CSP, HSTS, X-Frame-Options)
+Report: [PASS / FAIL with findings]"
+
+**Security agent:**
+"Pre-deployment security review of all changes since the last release tag:
+1. Check for hardcoded secrets (API keys, tokens, passwords in source)
+2. Auth/authz changes — any weakened checks or new unprotected endpoints?
+3. Input validation gaps and injection risks in changed code
+4. Production error handling — no stack traces or internals leaked
 Report: [PASS / FAIL with findings]"
 
 ### Step 3: Reviewer Quick Check (Reviewer Agent)

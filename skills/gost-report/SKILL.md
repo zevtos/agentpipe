@@ -1,6 +1,6 @@
 ---
 name: gost-report
-description: Generate Russian academic reports (.docx) formatted to GOST 7.32 — лабораторные, отчёты по практике, курсовые, ВКР, домашние задания для любого российского вуза (ИТМО, МГУ, СПбГУ, МФТИ, Бауманка, и т.д.). Use whenever the user asks for a report по ГОСТ, лабораторную, отчёт по практике, курсовой, ВКР, или любую Russian-language student paper needing proper title page, headings, page numbers, figure/table captions. Triggers even when only "лабораторная" or "отчёт" is mentioned — Russian-language context (ИТМО / МГУ / СПбГУ / университет / ГОСТ) is enough. ITMO is the default profile; other universities via UniversityProfile.
+description: Generate Russian academic reports (.docx) formatted to GOST 7.32 — лабораторные, отчёты по практике, курсовые, ВКР, домашние задания для любого российского вуза (ИТМО, МГУ, СПбГУ, МФТИ, Бауманка, и т.д.). Use whenever the user asks for a report по ГОСТ 7.32, лабораторную, отчёт по практике, курсовой, ВКР, реферат, РГР, пояснительную записку, домашку, или любую Russian-language student paper needing proper title page, headings, page numbers, figure/table captions. Also школьный индивидуальный проект. Triggers even when only "лабораторная" or "отчёт" is mentioned — Russian-language context (ИТМО / МГУ / СПбГУ / университет / ГОСТ) is enough. ITMO is the default; МБИ and other universities via style files (.toml).
 ---
 
 # GOST report generator
@@ -14,6 +14,10 @@ description: Generate Russian academic reports (.docx) formatted to GOST 7.32 �
 **Без «ИИ-тона».** Живой русский, без канцеляризмов, лишних кавычек и шаблонов. Не пиши: «В ходе выполнения работы…», «В результате проведённого исследования…», «Данный / вышеуказанный…», «является / представляет собой…», «Стоит отметить…», «Таким образом, можно сделать вывод…». Коротко по делу: «Команда `ls -la` показывает все файлы» вместо «Для решения данной задачи была применена команда…».
 
 **Исключения** (тут тире и формулировки ставит сама библиотека — не трогай): авто-подписи «Рисунок N — …» / «Таблица N — …» (твой `caption` уже очищен), канонические заголовки («Введение», «Заключение», «Список использованных источников»), прямые цитаты.
+
+**Стиль вуза может требовать тире.** Правило №1 действует для стилей, которые убирают тире из прозы (`prose_dashes="strip"`: ИТМО и ГОСТ, по умолчанию). Если положение вуза само требует тире, его стиль ставит `prose_dashes="normalize"` (МБИ, `profile="mbi"`): формальные конструкции жанра пиши с коротким тире («Объект исследования – …», «Цель работы – …»), библиотека сама приведёт « - » и « — » к знаку профиля и сохранит диапазоны «45–60». Остальные тире в прозе всё равно убирай перестройкой фразы. Режим стиля: `python3 <skill_dir>/scripts/styles.py show <стиль>`.
+
+**Отмена правила №1 без стиля:** задание прямо требует тире (лабораторная по типографике). Тогда `Report(allow_dashes=True)`, см. раздел «Типографика и PDF». Монкипатч санитайзера не нужен.
 
 ## When to use
 
@@ -38,6 +42,35 @@ python3 <skill_dir>/scripts/ensure_env.py твой_скрипт.py
 
 (Скилл управляет своим venv в глобальном state-dir вне кода: ADR-008 — `$GOST_REPORT_HOME` или `${XDG_DATA_HOME:-~/.local/share}/agentpipe/gost-report/venv`. Не запускай `pip install` глобально. Тёплые запуски ~30 мс.)
 
+## Стиль вуза: как класс документа в LaTeX
+
+Оформление (поля, кегли, заголовки, подписи, таблицы, списки, тире, переносы, неразрывные пробелы, титул, список источников, правила проверки) задаёт **стиль**, а не код в build.py. Встроенные: `itmo` (по умолчанию), `gost` (чистый ГОСТ 7.32), `mbi` (Положение о ВКР МБИ 2022, с титулом по его прил. 11).
+
+```python
+from gost_report import Report, TitleConfig, load_profile
+
+r = Report(TitleConfig(...), profile="mbi")                 # встроенный стиль
+r = Report(TitleConfig(...), profile="vkr")                 # .gost-report/styles/vkr.toml
+r = Report(TitleConfig(...), profile=load_profile("mbi", numbering="chapter"))
+```
+
+Другой вуз или отличия от встроенного стиля — файл стиля, без правки `r.doc` и без подкласса `Report`:
+
+```toml
+# <project>/.gost-report/styles/vkr.toml
+extends = "mbi"
+numbering = "chapter"       # «Рисунок 1.1», «Таблица 2.3», «(1.2)»
+[headings]
+numbering = true            # «1 НАЗВАНИЕ», «1.1 Подраздел» автоматически
+[table]
+font_size = 12
+```
+
+- `python3 <skill_dir>/scripts/styles.py fields [секция]`: все поля с дефолтами и описанием. `show <стиль>`: итоговые значения. `check <файл>`: проверка файла. `list`: какие стили где лежат.
+- Поиск по имени: `.gost-report/styles/` проекта, `~/.config/gost-report/styles/`, встроенные `<skill_dir>/styles/`. `GOST_REPORT_PROFILE=mbi` в env или `<курс>/.gost-report.env` выбирает стиль, когда в build.py нет `profile=`.
+- Методичка вуза → стиль, все секции, титул из блоков или готового бланка .docx, проверки: `references/profiles.md`. Заготовка: `references/templates/style.toml`.
+- Нужного поля нет — добавь его в `UniversityProfile` (дефолт = прежнее поведение) и в `styles.FIELD_DOCS`, а не правь XML.
+
 ## Персональный конфиг (ФИО, группа, преподаватель, год)
 
 Не хардкодь личные данные без необходимости — скилл берёт их из `~/.config/gost-report/config` (env-формат), который `install.sh` кладёт шаблоном при первой установке:
@@ -54,6 +87,8 @@ GOST_REPORT_YEAR="2026"
 - Значение с токеном `ЗАПОЛНИ` = незаполнено → первый `r.save()` падает с `ValueError` (в тексте — путь конфига). Так юзер не отправит отчёт с плейсхолдером на титуле.
 - Под предмет — свой `.gost-report.env` рядом с проектом курса (ищется вверх от build.py): обычно только преподаватель/кафедра.
 - Приоритет (первый непустой): env-переменные → `<курс>/.gost-report.env` → глобальный конфиг → `TitleConfig(...)` в build.py. Env побеждает build.py.
+- Путь глобального конфига можно перенести: `GOST_REPORT_CONFIG=/path/to/config` (когда `~/.config` недоступен на запись).
+- Работа за другого человека: `GOST_REPORT_IGNORE_GLOBAL_CONFIG=1` в `<проект>/.gost-report.env` — глобальный конфиг (твои ФИО/группа) не применяется.
 
 ## Командная работа
 
@@ -92,7 +127,7 @@ r = Report(TitleConfig(
 Project root определяется автоматически (обход вверх до первого маркера: `.git/` → `Makefile` → `pyproject.toml` → `.gost-report/` → `.claude/`). Из этого выводятся:
 - `r.figure("name.png", ...)` — резолвится от `<project>/docs/figures/`
 - `r.save()` без аргумента — кладёт в `<project>/docs/report.docx`
-- `paths()` — `(root, docs, figures, tables, out, tex)` если нужен явный доступ
+- `p = paths()` — явный доступ к путям через атрибуты: `p.root`, `p.docs`, `p.figures`, `p.tables`, `p.out`, `p.tex` (frozen dataclass, НЕ кортеж — распаковка `root, docs, ... = paths()` упадёт). Импортируется оттуда же: `from gost_report import Report, TitleConfig, paths`
 
 Готовый скелет: `references/templates/build.py`.
 
@@ -141,36 +176,65 @@ r.save("draft.docx")
 
 То же через env (полезно для автоматизации — гасит титул, не трогая `build.py`): `GOST_REPORT_NO_TITLE_PAGE=1`. Env только **отключает** титул; чтобы включить обратно, убери переменную (параметр `title_page=True` её не перебивает). `r.toc()` работает и без титульника.
 
+## Типографика и PDF (opt-in)
+
+Для работ, где оценивают саму вёрстку, и когда нужен готовый PDF. По умолчанию выключено: обычный отчёт собирается как раньше.
+
+```python
+r = Report(title_page=False, typography=True, allow_dashes=True)
+r.h1("Название")
+r.subtitle("Подзаголовок: первая строка\nи вторая, разбитая по смыслу")
+r.h2("Раздел")
+r.text("Главное, что здесь есть, — **важная мысль** и *термин*: 400-430 л. с.")
+r.save("работа.docx")
+r.export_pdf()   # работа.pdf рядом с .docx, дефекты вёрстки печатаются в stderr
+```
+
+- `typography=True`: неразрывные пробелы, «ёлочки», разметка `**жирный**` и `*курсив*` в `r.text`, русский язык документа, автоперенос (кроме заголовков), воздух вокруг заголовков. Текст руками не размечай неразрывными пробелами.
+- `allow_dashes=True`: только если тире требует задание. Без него правило №1 действует и в режиме типографики.
+- `r.subtitle(text)`: курсив по центру под h1. Работает и без флагов.
+- `r.export_pdf(path=None, check=True)`: LibreOffice со своим профилем, русскими переносами и настоящим Times New Roman. Предупреждения `gost-report pdf warn: …` (висячие предлоги, дыры, подмена шрифта) чини до сдачи.
+
+Правила, коды предупреждений и источники: `references/typography.md`.
+
 ## API
 
 **Палитра для build.py — что можно вставлять в отчёт:**
-- **Структура:** `r.toc()`, `r.h1/h2/h3`, `r.text`, `r.task`, `r.numbered/bullet`, `r.code`, `r.page_break`
+- **Структура:** `r.toc()`, `r.h1/h2/h3`, `r.text`, `r.task`, `r.numbered/bullet/lettered`, `r.note/example`, `r.code`, `r.blank`, `r.page_break`
+- **ВКР:** `r.keywords`, `r.volume_line` (реферат), `r.appendix` («ПРИЛОЖЕНИЕ А», нумерация «А.1»)
 - **Формулы:** `r.formula(latex, where=)` (блочные, с номером) + инлайн `$...$` в любом тексте
 - **Графики** (тир `[viz]`): `r.plot.line/scatter/bar/grouped_bar/stacked_bar/area/histogram` → ГОСТ-стиль, Ч/Б-safe
 - **Диаграммы** (Graphviz): `r.diagram(dot)` → структурные схемы, блок-схемы алгоритмов, деревья, ER
-- **Картинки/таблицы:** `r.figure(path|fig, caption)`, `r.table(rows, caption)`
-- **Литература/ссылки:** `r.bib.add/cite/references` (ГОСТ Р 7.0.5), `r.ref.on_figure/in_table/by_formula`
+- **Картинки/таблицы:** `r.figure(path|fig, caption)`, `r.table(rows, caption, widths=)`
+- **Литература/ссылки:** `r.bib.add/load/cite/references` (ГОСТ 7.1 или Р 7.0.100 по стилю), `r.ref.on_figure/in_table/by_formula`, метки `label=` для ссылок вперёд
+- **Текст целиком из Markdown:** `r.include("vkr.md")` / `r.markdown(text)` — см. ниже
 
 Графики, диаграммы и картинки делят единый счётчик «Рисунок N». Детали каждого — в таблице ниже и секциях после неё.
 
 | Method | What it does |
 |---|---|
 | `r.toc()` | Поле Word TOC + флаг `updateFields=true` в settings.xml. Word/Pages при первом открытии файла спросит «Update fields?» — нажми «Yes», и оглавление с нумерацией обновится автоматически. |
-| `r.h1(text)`, `r.h2(text)`, `r.h3(text)` | Заголовки. h1 авто-капс и с новой страницы (профиль). |
-| `r.text(text, bold=False, italic=False)` | Абзац основного текста (justify, отступ 1.25 см). |
+| `r.h1(text)`, `r.h2(text)`, `r.h3(text)` | Заголовки. h1 авто-капс и с новой страницы (профиль). `numbered=False` — без автономера (`heading_numbering`), `toc=False` — вне оглавления (реферат). |
+| `r.text(text, bold=False, italic=False, markup=None, lead=None, indent=True, align=None, keep_with_next=False)` | Абзац основного текста (justify, отступ из профиля). `lead="Тема."` — жирное начало абзаца; `markup=True` — `**жирный**`/`*курсив*` внутри; `keep_with_next=True` — строка-заголовок не остаётся последней на странице, уходит со следующим блоком (таблицей). |
 | `r.task(text)` | Жирный «Задание N. ...». |
 | `r.code(code)` | Блок моноширинного кода (Courier New 11). |
-| `r.figure(image, caption, width_cm=None) → int` | Картинка + «Рисунок N — caption». Возвращает номер (для `r.ref.on_figure`). `image` — путь ИЛИ Figure из модуля (`r.plot.*`, `r.diagram`). Ширина клампится по печатной области. Относительный путь → `<project>/docs/figures/`. |
+| `r.figure(image, caption, width_cm=None, explication=None, label=None) → номер` | Картинка + «Рисунок N — caption». Возвращает номер (для `r.ref.on_figure`): `int`, а при нумерации по главам и в приложениях — строку «1.2» / «А.1». `image` — путь ИЛИ Figure из модуля (`r.plot.*`, `r.diagram`). `explication` — пояснения между рисунком и подписью. Ширина клампится по печатной области. Относительный путь → `<project>/docs/figures/`. |
 | `r.plot.line/scatter/bar/grouped_bar/stacked_bar/area/histogram(...)` | График matplotlib в ГОСТ-стиле (opt-in тир `[viz]`). С `caption=...` → встраивает и возвращает номер рисунка; без — возвращает Figure для `r.figure(fig, caption)`. Общие kw: `hlines`/`vlines` (опорные линии), `ylim`/`xlim`, `yscale='log'`, `annotations`. Bar/grouped/stacked: `value_labels`, `value_fmt`, `colors`, `horizontal`. См. ниже. |
 | `r.diagram(dot, caption=None)` | Диаграмма Graphviz (DOT) → PNG. Нужен системный `dot` (brew/apt install graphviz). С `caption` → номер рисунка; без — Figure. |
-| `r.formula(latex, where=None) → int` | LaTeX-формула как нативное Word-уравнение, авто-номер «(N)» справа. Возвращает номер для ссылок. Реализация вынесена в модуль `gost_report_math` (доступно и как `r.math.formula`); поведение идентично. |
-| `r.table(rows, caption, has_header=True) → int` | Таблица + «Таблица N — caption». Возвращает номер (для `r.ref.in_table`). В заголовках столбцов указывай единицы измерения (см. ниже). |
+| `r.formula(latex, where=None, label=None) → номер` | LaTeX-формула как нативное Word-уравнение, авто-номер «(N)» справа. `where` — строка или список пар `[("m", "масса, кг"), ("V", "объём, м³")]`: тогда каждый символ с новой строки. Реализация — модуль `gost_report_math` (`r.math.formula`). |
+| `r.table(rows, caption, has_header=True, widths=None, align=None, ...) → номер` | Таблица + «Таблица N — caption». `widths` — см по столбцам; `align="center"` или `["l","c","r"]`; `header_align`, `font_size`, `note=` (примечание в последней строке), `repeat_header`, `cant_split`, `keep_together`, `continuation` (по умолчанию из профиля `table_*`). В заголовках столбцов указывай единицы измерения. |
 | `r.bib.add(key, type=, ...)` / `r.bib.cite(key)→"[N]"` / `r.bib.references()` | Список литературы по ГОСТ Р 7.0.5: регистрация источника, ссылка `[N]` (номер по порядку цитирования), структурный элемент «Список использованных источников». |
 | `r.ref.on_figure(n)` / `r.ref.in_table(n)` / `r.ref.by_formula(n)` / `r.ref.figure(n)` … | ГОСТ-фразы для ссылок: «на рисунке 3», «в таблице 2», «по формуле (4)». `cap=True` для начала предложения. |
-| `r.numbered(items)`, `r.bullet(items)` | Списки. Каждый вызов стартует с 1 заново. |
+| `r.numbered(items)`, `r.bullet(items)`, `r.lettered(items)` | Списки. Каждый вызов стартует с 1 заново. Маркер, формат («1)», «–»), раскладка — профиль. `lettered` — «а)», «б)» без ё, з, й, о, ч, ъ, ы, ь. Пункт `("текст", ["вложенный", …])` — вложенный список (`nested="numbered"`). |
+| `r.note(text\|list)`, `r.example(...)` | «Примечание – Текст»; список → «Примечания:» и «1. Текст». Тире и метки — профиль. |
+| `r.keywords(words)`, `r.volume_line()` | Реферат: ключевые слова прописными через запятую без отступа и переносов (5–15, иначе WARN); строка объёма «… содержит N с., N рис., N табл., N источников, N прил.» — числа считает `r.save()`. |
+| `r.appendix(title, status="обязательное", label=None) → буква` | С новой страницы «ПРИЛОЖЕНИЕ А», «(обязательное)», заголовок; дальше рисунки, таблицы, формулы «А.1», кегль `appendix_font_size`. |
+| `r.blank(n=1)`, `r.subtitle(text, italic=, bold=, line_spacing=, space_after=)` | Пустые строки; строка под h1 (шапка набросков без титула). |
+| `label="tbl:x"` у `figure/table/formula/appendix` | Метка: `r.ref.in_table("tbl:x")` работает и до самой таблицы, номер подставит `r.save()`. |
 | `r.page_break()` | Принудительный разрыв (редко нужен — h1 сам ставит). |
-| `r.save(path=None)` | Сохранить .docx. Без аргумента → `<project>/docs/report.docx`. Относительный путь → от `<project>/docs/`. Возвращает абсолютный `Path`. |
-| `paths(start=None) → ProjectPaths` | `(root, docs, figures, tables, out, tex)`. По умолчанию резолвит от __file__ caller'а. |
+| `r.save(path=None, layout=None)` | Сохранить .docx. Без аргумента → `<project>/docs/report.docx`. Относительный путь → от `<project>/docs/`. Возвращает абсолютный `Path`. Если в документе есть `continuation`-таблицы или `r.volume_line()`, делает проход вёрстки LibreOffice («Продолжение таблицы N», число страниц); `layout=False` — без него. |
+| `Report(title, profile=None, *, title_page=True, typography=False, allow_dashes=False, use_env=True)` | `profile` — объект, имя стиля или путь к .toml/.json. `use_env=False` — титул только из `TitleConfig`, без env и `~/.config` (работа за другого человека). |
+| `paths(start=None) → ProjectPaths` | Frozen dataclass с полями `root/docs/figures/tables/out/tex` — атрибутный доступ (`p.figures`), не распаковка. По умолчанию резолвит от __file__ caller'а. Импорт: `from gost_report import paths`. |
 
 ### `TitleConfig` — часто переопределяемые поля
 
@@ -178,6 +242,7 @@ r.save("draft.docx")
 |---|---|---|
 | `teacher_label` | `"Проверил"` | Женщина-преподаватель: `"Проверила"`. ВКР/курсовая: `"Руководитель"` / `"Руководительница"`. |
 | `work_number` | `""` | Лабы с номерами: `"№1"`, `"№3"`. |
+| `discipline` | `""` | Название предмета: `"Системное администрирование"` → на титуле строка «по дисциплине «…»». Удобно задавать в `<курс>/.gost-report.env` через `GOST_REPORT_DISCIPLINE`. |
 | `variant` | `""` | Лабы с вариантами: `"3"`. |
 | `teacher_degree` | `""` | `"к.т.н."`, `"д.ф.-м.н."`. |
 | `teacher_position` | `""` | `"доцент"`, `"профессор"`, `"ст. преподаватель"`. |
@@ -251,9 +316,11 @@ r.diagram('''digraph { rankdir=TB
 переопределяют дефолты. Опции: `engine=` (dot/neato/fdp/circo/twopi), `font=`,
 `rankdir=`. Детерминизм — best-effort (зависит от версии dot).
 
-Новые модули штампуются скриптом `scripts/new_module.py <namespace> [--visual]`.
-Эталонный пример модуля — `gost_report_math/` (формулы вынесены из ядра без
-изменения поведения). Архитектура подробно — `research/19_gost_report_module_architecture.md`.
+Новые модули штампуются скриптом `scripts/new_module.py <namespace> [--visual] [--extra NAME]`
+(`--extra` создаёт `requirements.d/<NAME>.txt` для тира; скрипт печатает строку
+для `registry._BUILTIN`, которую нужно добавить руками). Эталонный пример модуля —
+`gost_report_math/` (формулы вынесены из ядра без изменения поведения).
+Архитектура подробно — `research/19_gost_report_module_architecture.md`.
 
 ## Список литературы и ссылки (модули bib, ref)
 
@@ -279,9 +346,18 @@ r.bib.references()   # структурный элемент в конце (за
 
 Типы: `book` / `article` / `web` / `conference` / `standard` / `thesis`. Поля:
 `authors` (список или строка), `title`, `city`, `publisher`, `year`, `pages`,
-`journal`, `volume`, `issue`, `url`, `accessed`, `doi`, `edition`. Тире « — » в
+`journal`, `volume`, `issue`, `url`, `accessed`, `doi`, `edition`, `subtitle` (сведения к заглавию, после « : »), `responsibility` («пер. с англ.», после « ; »). Запись строится по ГОСТ 7.1-2003: 1-3 автора, в заголовке первый, после « / » все; 4+, запись с заглавия, после « / » первый с «[и др.]»; `url` делает запись «[Электронный ресурс]». Тире « — » в
 описаниях — обязательный разделитель ГОСТ Р 7.0.5 (валидатор его не трогает в
 секции списка литературы).
+
+Стиль с `bib_style = "7.0.100-2018"` (МБИ) пишет записи по ГОСТ Р 7.0.100–2018,
+как в образцах положений: «Алексеев П. В. Философия : учебник / П. В. Алексеев,
+А. В. Панин. – 4-е изд. – Москва : Проспект, 2010. – 592 с. – ISBN … – Текст :
+непосредственный.», у статьи «– Текст : непосредственный // Журнал. – 2017. –
+№ 4. – С. 136–144.». Дополнительные поля: `isbn`, `series`, `notes` (список),
+`access_mode`, `content`, `heading` («Российская Федерация. Законы.»), `number`
+(обозначение стандарта), `date`, `site`/`host`, `host_subtitle`, `editors`; типы
+`law`, `disk`. `r.bib.load("sources.toml")` — источники отдельным файлом.
 
 **Ссылки в тексте — словом, не цифрой** (ГОСТ 7.32: сокращения «рис.»/«табл.»
 запрещены):
@@ -320,6 +396,51 @@ r.numbered([r"Коэффициент $k$ найден", "Второй пункт
 - Текст без `$` работает ровно как раньше (тот же результат, байт-в-байт).
 - Те же LaTeX-конструкции, что и в `r.formula` — см. `references/formulas.md`.
 
+## Текст работы в Markdown
+
+Длинную работу (ВКР, курсовую) удобнее писать текстом, а не вызовами: build.py выбирает стиль и титул, текст лежит в `.md`, оформление — из стиля.
+
+```python
+r = Report(TitleConfig(...), profile="mbi")
+r.bib.load("sources.toml")    # [ключ] type = "book" … — те же поля, что у r.bib.add
+r.include("vkr.md")           # путь от build.py, корня проекта или docs/
+r.save()
+```
+
+```markdown
+# Реферат {.notoc}
+\volume
+\keywords{учёт обращений, документооборот, BPMN, автоматизация, администрация}
+
+Объект исследования – процессы учёта, сроки в таблице @tbl:stages [@ivanov2020].
+
+\toc
+# Введение
+**Актуальность.** Абзац с жирным началом, *курсивом* и $x^2$.
+
+1) изучить процесс;
+2) построить модель:
+   а) AS-IS;
+   б) TO-BE.
+
+Таблица: Этапы и сроки {#tbl:stages widths=6,3,7 note="Сроки по закону № 59-ФЗ"}
+| Этап | Срок, дн. |
+|:-----|:---------:|
+| Регистрация | 3 |
+
+![Схема процесса](fig/scheme.png){#fig:scheme width=14}
+
+$$ \rho = \frac{m}{V} $$ {#eq:rho}
+где $m$ – масса, кг; $V$ – объём, м³
+
+> Примечание к тексту.
+
+\references
+\appendix[справочное]{Форма журнала {#app:form}}
+```
+
+`#`/`##`/`###` — h1–h3 (`{-}` без номера, `{.notoc}` вне оглавления); абзац с `{.keep}` в конце не отрывается от следующего блока (`{.noindent}`, `{align=center}` — тоже); `-`/`–`, `1.`/`1)`, `а)` — списки, вложенность отступом; `>` — примечания; ```` ``` ```` — код; `[@ключ; @ключ]` — ссылка на источник; `@fig:…`, `@tbl:…`, `@eq:…`, `@app:…` — номер по метке, в том числе вперёд; команды с новой строки: `\toc`, `\newpage`, `\blank{2}`, `\subtitle{…}`, `\keywords{…}`, `\volume`, `\appendix[статус]{Название}`, `\references`. Python и Markdown смешиваются свободно: `r.markdown(...)` можно вызывать между любыми методами.
+
 ## Правила оформления (по замечаниям нормоконтроля)
 
 - **Запятая перед «где»** после формулы ставится автоматически, если задан
@@ -329,13 +450,32 @@ r.numbered([r"Коэффициент $k$ найден", "Второй пункт
   в заголовке столбца: «Масса, г», «Время, с», «Точность, %».
 - **Ссылки — словом + номер** через `r.ref.*` (см. выше), не голой цифрой `(N)`.
 
+## Когда что-то падает
+
+**`r.save()` бросил `GostValidationError` / Stop-хук заблокировал ход** (`{"decision":"block"}`) — валидатор нашёл FAIL-нарушения. Контракт восстановления: исправь именно названную причину и снова `r.save()`; не подавляй исключение и не обходи валидатор. Коды FAIL:
+
+| Код | Причина | Починка |
+|---|---|---|
+| `dashes` | тире не по стилю: ИТМО/ГОСТ — любое тире в прозе или ячейках; МБИ (`normalize`) — «—» или « - » вместо « – » | перепиши без тире (правило №1) или поставь знак стиля |
+| `bare-latex` | LaTeX-команды голым текстом вне `$...$` | оберни в `$...$` или передай в `r.formula` |
+| `figure-no-caption` / `figure-numbering` | картинка без «Рисунок N — …» или дырка в нумерации | вставляй картинки только через `r.figure(..., caption)` |
+| `table-no-caption` / `table-numbering` | таблица без «Таблица N — …» или дырка в нумерации | только через `r.table(rows, caption)` |
+| `missing-deps` / `read-failed` | python-docx недоступен / битый .docx | прогони `gr` (бутстрапит venv); пересобери файл |
+
+WARN-коды (`placeholder-name`, `ai-tone`, `caption-short`) не блокируют, но чини и их. Стиль может включить ещё (`checks`, у МБИ все): `double-space`, `heading-period`, `paragraph-spacing`, `table-mention` (нет «таблица N» до таблицы), `figure-mention`, `keywords-count`, `bib-count`. Чужой .docx проверяется по стилю: `python3 <skill_dir>/scripts/validate.py --check file.docx --profile mbi`.
+
+- **Первый `r.save()` в свежей среде** ставит зависимости в venv — это минуты, не зависание. Тёплые запуски ~30 мс.
+- **`gr` без аргумента не нашёл build.py** — печатает короткую инструкцию; создай `<project>/.gost-report/build.py` (скелет: `references/templates/build.py`).
+- **`r.diagram` упал «dot not found»** — поставь системный Graphviz: `brew install graphviz` / `sudo apt install graphviz`.
+
 ## Подробности — see references/
 
 Загружай по необходимости (агент не должен держать это в контексте каждый раз):
 
-- **`references/profiles.md`** — другие вузы: `GOST_PROFILE`, кастомный `UniversityProfile`, переопределение полей через `TitleConfig`.
+- **`references/profiles.md`** — другие вузы и школы: стилевые файлы (`extends`, секции, поиск по имени), встроенные `itmo`/`gost`/`mbi`, все группы полей (тире, переносы, заголовки, подписи, таблицы, списки, формулы, примечания, реферат, список источников, приложения, проверки), титул из блоков или бланка .docx, методичка → стиль, работа за другого человека (`use_env=False`, `GOST_REPORT_IGNORE_GLOBAL_CONFIG`).
 - **`references/formulas.md`** — полный список поддерживаемых LaTeX-конструкций, edge cases, санитайзер vs LaTeX, отладка.
 - **`references/patterns.md`** — структура для лаб, ВКР, курсовых, отчёта по практике, ДЗ.
+- **`references/typography.md`** — режим типографики и экспорт в PDF: какие правила применяются, как устроен профиль LibreOffice, коды проверки готового PDF, источники.
 - **`references/api.md`** — TitleConfig полный, поведенческие заметки (TOC поле, рестарт списков, нет кавычек у `topic`, картинки клампятся, санитайзер семантика).
 
 ## Dependencies

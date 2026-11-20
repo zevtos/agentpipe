@@ -52,6 +52,7 @@ from pathlib import Path
 
 import extract_docx  # sibling script, importable via the venv .pth
 
+from _embedded import EmbedSession  # noqa: E402
 from _common import (  # noqa: E402
     add_assets_args,
     clean_whitespace,
@@ -179,7 +180,8 @@ def extract(input_doc: Path,
             assets_dir: Path | None = None,
             assets_rel_prefix: str = "../assets",
             extract_images: bool = True,
-            force_mammoth: bool = False) -> tuple[str, dict, list[str], str]:
+            force_mammoth: bool = False,
+            embed=None) -> tuple[str, dict, list[str], str]:
     """Returns (markdown_body, frontmatter_extras, warnings, extraction_method).
 
     Routes through a converter cascade — see the module docstring. Raises
@@ -208,6 +210,7 @@ def extract(input_doc: Path,
                 assets_rel_prefix=assets_rel_prefix,
                 extract_images=extract_images,
                 force_mammoth=force_mammoth,
+                embed=embed,  # the converted .docx carries the OLE objects
             )
             warnings.extend(w)
             method = f"{conv_label}+{inner}"
@@ -270,6 +273,8 @@ def main() -> int:
 
     assets_dir: Path | None = resolve_assets_dir(args, out_path)
 
+    embed = EmbedSession(input_path=in_path, doc_id=args.doc_id, source_rel=source_rel,
+                         out_path=out_path, assets_dir=assets_dir, assets_rel=args.assets_rel)
     try:
         body, extras, warnings, method = extract(
             in_path,
@@ -279,6 +284,7 @@ def main() -> int:
             assets_rel_prefix=args.assets_rel,
             extract_images=not args.no_extract_images,
             force_mammoth=args.force_mammoth,
+            embed=embed,
         )
     except RuntimeError as e:
         if str(e) == "no converter":
@@ -310,12 +316,16 @@ def main() -> int:
     }
     if extras.get("assets"):
         fm["assets"] = extras["assets"]
+    warnings.extend(embed.warnings)
+    fm["warnings"] = warnings
+    fm.update(embed.frontmatter())
     write_md(out_path, fm, body)
     emit_success(out_path, body, warnings, extra={
         "inline_images": extras.get("inline_images", 0),
         "has_tables": extras.get("has_tables", False),
         "extractor": method,
         "assets_extracted": len(extras.get("assets", [])),
+        **embed.stdout_extra(),
     })
     return 0
 

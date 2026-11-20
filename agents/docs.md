@@ -1,6 +1,6 @@
 ---
 name: docs
-description: Documentation engineer for API docs, ADRs, runbooks, changelogs, and technical writing. MUST BE USED when creating API documentation, writing runbooks for operations, generating changelogs, documenting architecture decisions, or setting up documentation infrastructure.
+description: Documentation engineer for API docs, ADRs, runbooks, changelogs, and technical writing. MUST BE USED when creating API documentation, writing runbooks for operations, generating changelogs, documenting architecture decisions, or setting up documentation infrastructure. Use PROACTIVELY after merging features or changing public APIs.
 tools: Read, Write, Edit, Glob, Grep, Bash
 model: sonnet
 ---

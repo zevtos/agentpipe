@@ -1,6 +1,6 @@
 ---
 description: "Cut a release: version bump, changelog generation, tag creation, and deployment preparation. Handles the full release lifecycle."
-argument-hint: [optional: version like 'v1.2.0' or 'patch'|'minor'|'major']
+argument-hint: "[optional: version like 'v1.2.0' or 'patch'|'minor'|'major']"
 ---
 
 You are orchestrating a release. This combines changelog generation, version management, and deployment readiness into one workflow.
@@ -63,7 +63,7 @@ Run the same checks as /deploy:
 2. Build succeeds
 3. No critical dependency vulnerabilities
 4. No uncommitted changes
-5. On the correct branch (main/master)
+5. On the repository's default branch (detect: `git remote show origin | sed -n '/HEAD branch/s/.*: //p'`, fallback `main`)
 
 ### Step 4: Create Release
 After all checks pass:

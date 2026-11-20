@@ -1,6 +1,6 @@
 ---
 description: "Generate or update project documentation: API docs, README, ADRs, runbooks, and architecture docs. Verifies everything against actual code."
-argument-hint: [optional: 'api'|'readme'|'adr'|'runbook'|'all']
+argument-hint: "[optional: 'api'|'readme'|'adr'|'runbook'|'all']"
 ---
 
 You are orchestrating documentation generation. Documentation must be accurate (verified against code), actionable (copy-pasteable commands), and maintainable.

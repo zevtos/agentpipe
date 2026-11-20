@@ -10,6 +10,19 @@ Read in this order:
    to the question at hand. Each has a YAML frontmatter block with `source`
    (original file path), `source_sha256`, `pages` or `slides`, `headings`,
    `tokens_estimated`, and any `warnings` from extraction.
+3. **`docs/<id>-<slug>/`** (a folder, not a file) — a large document that was
+   **sharded** into per-chapter parts. `_index.md` is its table of contents;
+   `NNN-*.md` are the verbatim parts in reading order. A search hit citing
+   `docs/<id>-<slug>/NNN-*.md` points at ONE small part — open that part, not
+   the whole folder, and never the parent book at once. Each part carries the
+   parent's `id` and `source_sha256`; concatenating the parts reproduces the
+   original verbatim.
+4. **`docs/<id>_eNN-<slug>.md`** — a document that was **embedded inside**
+   document `<id>` (a Word file or workbook placed on a slide, a PDF
+   attachment, a chart's data workbook). Its `source` is
+   `<parent file>#<path inside it>` and `embedded_in` names the parent; the
+   parent links to it where the object sat. `--doc <id>` in `query.sh` also
+   searches a document's embedded documents.
 
 `manifest.json` (machine-readable: per-doc sha256, extraction_method, token
 estimates in JSON) and `llms.txt` (an llmstxt.org catalog for external tools)
@@ -52,7 +65,10 @@ the INDEX.md headings + `Grep`/`Read` flow below.
 
 When you answer questions using facts from this knowledge base, cite the
 `source` path from the document's frontmatter — that is the original file,
-not the kb path. Example: "From `papers/transformer.pdf`, §2.1 …".
+not the kb path. Example: "From `papers/transformer.pdf`, §2.1 …". For an
+embedded document the `source` already names the container and the object
+inside it (`lecture.pptx#ppt/embeddings/Microsoft_Word_Document1.docx`) — cite
+it as is.
 
 ## Errors and warnings
 

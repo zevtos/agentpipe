@@ -53,10 +53,12 @@ Why HTML→Markdown instead of mammoth.convert_to_markdown:
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import sys
 from pathlib import Path
 
+from _embedded import EmbedSession  # noqa: E402
 from _common import (  # noqa: E402
     add_assets_args,
     clean_whitespace,
@@ -67,6 +69,7 @@ from _common import (  # noqa: E402
     resolve_assets_dir,
     sanitize_heading,
     save_image_safe,
+    skipped_image_note,
     sha256_of,
     today_iso,
     tool_version_string,
@@ -156,7 +159,10 @@ def _extract_via_mammoth(
             ct = (image.content_type or "").lower()
             # content_type looks like "image/png" or "image/jpeg".
             if "/" in ct:
-                ext = ct.split("/", 1)[1] or "png"
+                # image/x-emf → emf, image/svg+xml → svg
+                ext = ct.split("/", 1)[1].split("+", 1)[0] or "png"
+                if ext.startswith("x-"):
+                    ext = ext[2:] or "png"
             with image.open() as fh:
                 blob = fh.read()
         except Exception as e:
@@ -170,13 +176,9 @@ def _extract_via_mammoth(
             blob, target, dedup_cache=dedup_cache, source_ext=ext,
         )
         if not result:
-            if result.reason == "skipped_format":
-                warnings.append(
-                    f"image {n}: skipped non-viewable format ({ext}) — "
-                    "vector/metafile images cannot be rendered by the vision encoder"
-                )
-            elif result.reason == "skipped_corrupt":
-                warnings.append(f"image {n}: corrupt image bytes — skipped")
+            note = skipped_image_note(result, ext)
+            if note:
+                warnings.append(f"image {n}: {note}")
             label = f"image {n}: {alt}" if alt else f"image {n}"
             return {"src": "", "alt": label[:120]}
 
@@ -194,6 +196,12 @@ def _extract_via_mammoth(
         label = f"image {n}: {alt}" if alt else f"image {n}"
         return {"src": "", "alt": label[:120]}
 
+    if do_extract:
+        try:
+            import _raster  # noqa: E402
+            _raster.prefetch_zip_media(input_docx)  # one LibreOffice run for all EMF/WMF
+        except Exception:  # noqa: BLE001 — prefetch is only a speed-up
+            pass
     image_callback = _image_to_asset if do_extract else _image_placeholder
     image_handler = mammoth.images.img_element(image_callback)
     try:
@@ -211,8 +219,12 @@ def _extract_via_mammoth(
         except Exception:
             mt = "warning"
             mm = str(m)
-        # mammoth reports lots of style-mapping notices that are noise here.
-        if mt == "warning" and "style" not in str(mm).lower():
+        # mammoth reports lots of style-mapping notices that are noise here,
+        # and "image/x-emf is unlikely to display in web browsers" is moot:
+        # save_image_safe() rasterizes metafiles (and warns if it cannot).
+        low = str(mm).lower()
+        if mt == "warning" and "style" not in low and not (
+                do_extract and "unlikely to display in web browsers" in low):
             warnings.append(f"mammoth: {mm}"[:200])
 
     # HTML → Markdown. heading_style=ATX renders "# heading" instead of underline.
@@ -255,12 +267,16 @@ def extract(input_docx: Path,
             assets_dir: Path | None = None,
             assets_rel_prefix: str = "../assets",
             extract_images: bool = True,
-            force_mammoth: bool = False) -> tuple[str, dict, list[str], str]:
+            force_mammoth: bool = False,
+            embed=None) -> tuple[str, dict, list[str], str]:
     """Returns (markdown_body, frontmatter_extras, warnings, extractor_name).
 
     Routes math-bearing documents through pandoc (when available) so OOXML
     math survives as LaTeX instead of being silently dropped. See the
-    module docstring for the full routing table."""
+    module docstring for the full routing table. `embed` is an optional
+    `_embedded.EmbedSession`; when given, the package's embedded objects are
+    extracted as child docs and listed under `## Embedded objects` (DOCX
+    gives no reliable in-body position for them)."""
     extras = _scout_docx(input_docx)
     pandoc_available = shutil.which("pandoc") is not None
     use_pandoc = (
@@ -329,6 +345,12 @@ def extract(input_docx: Path,
             if len(headings) >= 10:
                 break
     extras["headings"] = headings
+    if embed is not None:
+        embed.run_ooxml(input_docx)
+        body = clean_whitespace(embed.apply(body))
+        for a in re.findall(r"\]\((" + re.escape(assets_rel_prefix) + r"/[^)]+)\)", body):
+            if a not in assets:
+                assets.append(a)
     if assets:
         extras["assets"] = assets
 
@@ -364,6 +386,8 @@ def main() -> int:
 
     assets_dir: Path | None = resolve_assets_dir(args, out_path)
 
+    embed = EmbedSession(input_path=in_path, doc_id=args.doc_id, source_rel=source_rel,
+                         out_path=out_path, assets_dir=assets_dir, assets_rel=args.assets_rel)
     try:
         body, extras, warnings, extractor_name = extract(
             in_path,
@@ -372,10 +396,12 @@ def main() -> int:
             assets_rel_prefix=args.assets_rel,
             extract_images=not args.no_extract_images,
             force_mammoth=args.force_mammoth,
+            embed=embed,
         )
     except Exception as e:
         emit_failure(f"extraction failed: {e}", extra={"input": str(in_path)})
         return 1
+    warnings.extend(embed.warnings)
 
     fm = {
         "id": args.doc_id,
@@ -395,12 +421,14 @@ def main() -> int:
     }
     if extras.get("assets"):
         fm["assets"] = extras["assets"]
+    fm.update(embed.frontmatter())
     write_md(out_path, fm, body)
     emit_success(out_path, body, warnings, extra={
         "inline_images": extras.get("inline_images", 0),
         "has_tables": extras.get("has_tables", False),
         "extractor": extractor_name,
         "assets_extracted": len(extras.get("assets", [])),
+        **embed.stdout_extra(),
     })
     return 0
 

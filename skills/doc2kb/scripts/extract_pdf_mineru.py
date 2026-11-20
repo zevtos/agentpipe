@@ -114,6 +114,7 @@ from _common import (  # noqa: E402
     read_frontmatter,
     sanitize_heading,
     save_image_safe,
+    skipped_image_note,
     sha256_of,
     split_body_by_page_anchors,
     today_iso,
@@ -427,14 +428,9 @@ def _copy_images_and_rewrite(
             blob, target, dedup_cache=dedup_cache, source_ext=ext,
         )
         if not result:
-            if result.reason == "skipped_format":
-                warnings.append(
-                    f"image {basename}: skipped non-viewable format ({ext})"
-                )
-            elif result.reason == "skipped_corrupt":
-                warnings.append(
-                    f"image {basename}: corrupt image bytes — skipped"
-                )
+            note = skipped_image_note(result, ext)
+            if note:
+                warnings.append(f"image {basename}: {note}")
             continue
         rel = f"{assets_rel_prefix}/{result.path.name}"
         rename_map[basename] = rel

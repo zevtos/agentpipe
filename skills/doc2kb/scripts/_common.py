@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import posixpath
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import unicodedata
+import urllib.parse
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -311,6 +314,53 @@ def clean_whitespace(text: str) -> str:
     return text.strip() + "\n"
 
 
+# ---------- markdown structure (shared by index_kb + shard_doc) ----------
+#
+# One definition of "a heading", "a fence", and "a block" so the search
+# chunker (index_kb) and the doc sharder (shard_doc) never drift on where a
+# verbatim split is allowed. Both split ONLY on these boundaries — blank-line
+# paragraph breaks, heading lines, and fenced-code toggles — so no split ever
+# lands inside a paragraph or a code block.
+
+HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
+FENCE_RE = re.compile(r"^\s*(```|~~~)")
+
+
+def split_markdown_blocks(text: str) -> list[str]:
+    """Split text into blocks: paragraphs on blank lines, headings as their own
+    block, fenced code kept intact. The atomic unit every structure-aware pass
+    treats as unsplittable."""
+    blocks: list[str] = []
+    buf: list[str] = []
+    in_fence = False
+
+    def flush() -> None:
+        if buf:
+            joined = "\n".join(buf).rstrip()
+            if joined.strip():
+                blocks.append(joined)
+            buf.clear()
+
+    for line in text.split("\n"):
+        if FENCE_RE.match(line):
+            buf.append(line)
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            buf.append(line)
+            continue
+        if not line.strip():
+            flush()
+            continue
+        if HEADING_RE.match(line):
+            flush()
+            blocks.append(line.rstrip())
+            continue
+        buf.append(line)
+    flush()
+    return blocks
+
+
 # ---------- ligature recovery ----------
 
 # pymupdf4llm (≤1.27.x) drops one letter from PDF ligature glyphs in its
@@ -596,6 +646,15 @@ def assemble_body_from_sections(
     for page_no in sorted(sections):
         parts.append(sections[page_no].rstrip() + "\n")
     return "\n".join(parts).rstrip() + "\n"
+
+
+# ---------- extractor concurrency ----------
+
+# How many extractor subprocesses extract_corpus.py runs side by side. It sets
+# this in each child's environment so an extractor that parallelizes inside a
+# document (extract_pdf_pymupdf4llm.py splits pages across worker processes)
+# takes its share of the CPUs instead of all of them.
+PARALLEL_JOBS_ENV = "DOC2KB_PARALLEL_JOBS"
 
 
 # ---------- pdf extractor warning classification ----------
@@ -936,9 +995,11 @@ def emit_failure(reason: str, extra: dict[str, Any] | None = None) -> None:
 
 # ---------- image validator + safe writer ----------
 
-# Vector / metafile formats the vision encoder cannot render. Emit a warning
-# and skip — re-encoding them as raster would require a rasterizer
-# (e.g. CairoSVG, Inkscape) outside the lightweight tier.
+# Vector / metafile formats the vision encoder cannot read as-is. They are
+# rasterized to PNG by `_raster.py` (LibreOffice for EMF/WMF, PyMuPDF for
+# SVG/PDF, Ghostscript for EPS); only when that fails is the image skipped,
+# and `ImageSaveResult.detail` says why (with an install hint when the
+# converter is missing).
 _NON_VIEWABLE_EXTENSIONS = {"wmf", "emf", "svg", "pdf", "eps"}
 
 
@@ -954,19 +1015,25 @@ class ImageSaveResult:
         original_width, original_height: Pre-resize dimensions, if known.
         downscaled: True iff the image was reduced to fit MAX_IMAGE_DIMENSION.
         sha256: First-16-hex of content hash, used for dedup across calls.
+        rasterized_from: 'emf'/'wmf'/'svg'/'pdf'/'eps' when the saved PNG was
+                rendered from a vector image, else None.
+        detail: Free-text note — why a vector image was skipped (incl. an
+                install hint), or a rendering remark ("rendered page 1 of 3").
     """
 
     __slots__ = (
         "path", "reason", "width", "height",
         "original_width", "original_height",
-        "downscaled", "sha256",
+        "downscaled", "sha256", "rasterized_from", "detail", "vector_format",
     )
 
     def __init__(self, path: Path | None, reason: str,
                  width: int | None = None, height: int | None = None,
                  original_width: int | None = None,
                  original_height: int | None = None,
-                 downscaled: bool = False, sha256: str | None = None):
+                 downscaled: bool = False, sha256: str | None = None,
+                 rasterized_from: str | None = None, detail: str = "",
+                 vector_format: str | None = None):
         self.path = path
         self.reason = reason
         self.width = width
@@ -975,6 +1042,9 @@ class ImageSaveResult:
         self.original_height = original_height
         self.downscaled = downscaled
         self.sha256 = sha256
+        self.rasterized_from = rasterized_from
+        self.detail = detail
+        self.vector_format = vector_format
 
     def __bool__(self) -> bool:
         return self.path is not None
@@ -993,6 +1063,7 @@ def save_image_safe(
     min_dim: int = MIN_IMAGE_DIMENSION,
     dedup_cache: dict[str, Path] | None = None,
     source_ext: str | None = None,
+    rasterize: bool = True,
 ) -> ImageSaveResult:
     """Validate, optionally downscale, and write an image extracted from a
     source document. The single chokepoint every extractor must call instead
@@ -1006,8 +1077,13 @@ def save_image_safe(
         max(width, height) == max_dim, aspect ratio preserved.
       - Animated GIFs / multi-frame TIFFs → first frame only.
       - Palette/RGBA images encoded as JPEG → converted to RGB first.
-      - Unsupported formats (WMF/EMF/SVG/PDF/EPS) → skipped (vision encoder
-        cannot render vector). Caller is expected to surface a warning.
+      - Vector formats (EMF/WMF/SVG/PDF/EPS, detected by magic bytes, not
+        just the extension) → rasterized to PNG via `_raster.rasterize()` and
+        saved under a `.png` name (`result.rasterized_from` records the
+        source format). If no rasterizer is available or it fails → skipped
+        with reason 'skipped_format' and `result.detail` explaining why;
+        callers surface it as a warning. `rasterize=False` restores the old
+        skip.
       - Corrupt / undecodable bytes → skipped.
       - Identical bytes saved already this run (per dedup_cache) → returns
         the existing path with reason='skipped_duplicate'. dedup is opt-in
@@ -1030,8 +1106,26 @@ def save_image_safe(
         )
 
     ext_lc = (source_ext or target_path.suffix.lstrip(".")).lower()
-    if ext_lc in _NON_VIEWABLE_EXTENSIONS:
-        return ImageSaveResult(None, "skipped_format", sha256=digest)
+    rasterized_from: str | None = None
+    raster_detail = ""
+    import _raster  # noqa: E402 — lazy: only image-saving callers pay for it
+    vector_fmt = _raster.sniff_vector_format(image_bytes)
+    if vector_fmt is None and ext_lc in _NON_VIEWABLE_EXTENSIONS:
+        # Declared vector but no recognizable magic: if Pillow can read it, it
+        # is a mislabelled raster; otherwise trust the extension.
+        if not _pillow_can_open(image_bytes):
+            vector_fmt = ext_lc
+    if vector_fmt is not None:
+        if not rasterize:
+            return ImageSaveResult(None, "skipped_format", sha256=digest,
+                                   detail="rasterization disabled", vector_format=vector_fmt)
+        png, raster_detail = _raster.rasterize(image_bytes, vector_fmt)
+        if png is None:
+            return ImageSaveResult(None, "skipped_format", sha256=digest,
+                                   detail=raster_detail, vector_format=vector_fmt)
+        image_bytes = png
+        rasterized_from = vector_fmt
+        target_path = target_path.with_suffix(".png")
 
     try:
         from PIL import Image, ImageFile  # type: ignore
@@ -1136,7 +1230,31 @@ def save_image_safe(
         width=w, height=h,
         original_width=original_w, original_height=original_h,
         downscaled=downscaled, sha256=digest,
+        rasterized_from=rasterized_from, detail=raster_detail,
     )
+
+
+def _pillow_can_open(image_bytes: bytes) -> bool:
+    try:
+        from PIL import Image  # type: ignore
+        from io import BytesIO
+        with Image.open(BytesIO(image_bytes)) as img:
+            img.verify()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def skipped_image_note(result: ImageSaveResult, ext: str) -> str | None:
+    """The warning tail for a skipped image, or None when the skip is silent by
+    design (too small, duplicate). Shared by every extractor so the wording —
+    and the install hint for a missing rasterizer — stays uniform."""
+    if result.reason == "skipped_format":
+        fmt = result.vector_format or ext
+        return f"vector image ({fmt}) not rasterized — {result.detail or 'unknown reason'}"
+    if result.reason == "skipped_corrupt":
+        return "corrupt or unreadable image bytes — skipped"
+    return None
 
 
 # ---------- pandoc conversion ----------
@@ -1263,6 +1381,11 @@ def _rewrite_pandoc_media(
     # path_in_body (string) → new relative path (string)
     rewrite: dict[str, str] = {}
     idx = 0
+    try:
+        import _raster  # noqa: E402
+        _raster.prefetch_dir(tmp_media)  # one LibreOffice run for all metafiles
+    except Exception:  # noqa: BLE001 — prefetch is only a speed-up
+        pass
     for match in _PANDOC_IMG_RE.finditer(body):
         link = match.group(2).strip()
         # Pandoc uses POSIX paths even on Windows; strip optional `<...>`
@@ -1299,14 +1422,9 @@ def _rewrite_pandoc_media(
             blob, target, dedup_cache=dedup_cache, source_ext=ext,
         )
         if not result:
-            if result.reason == "skipped_format":
-                warnings.append(
-                    f"pandoc image {src.name}: skipped non-viewable format ({ext})"
-                )
-            elif result.reason == "skipped_corrupt":
-                warnings.append(
-                    f"pandoc image {src.name}: corrupt image bytes — skipped"
-                )
+            note = skipped_image_note(result, ext)
+            if note:
+                warnings.append(f"pandoc image {src.name}: {note}")
             rewrite[match.group(2)] = ""
             continue
         rel = f"{assets_rel_prefix}/{result.path.name}"
@@ -1328,3 +1446,104 @@ def _rewrite_pandoc_media(
 
     new_body = _PANDOC_IMG_RE.sub(_repl, body)
     return new_body, assets, warnings
+
+
+# ---------- epub structure ----------
+#
+# An EPUB is a ZIP whose reading order lives in an OPF "spine" (a list of
+# itemref/@idref pointing into the OPF "manifest"). The pure-Python EPUB
+# extractor and the scout probe both need the same spine resolution, so it
+# lives here once. Namespaces vary across EPUB 2/3 and authoring tools, so we
+# match elements by local tag name rather than a fixed namespace map.
+
+_EPUB_CONTAINER = "META-INF/container.xml"
+
+
+def _xml_local(tag: str) -> str:
+    """Local tag name with any `{namespace}` prefix stripped."""
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else tag
+
+
+def _xml_find(elem, name: str):
+    if elem is None:
+        return None
+    for e in elem.iter():
+        if _xml_local(e.tag) == name:
+            return e
+    return None
+
+
+def _xml_findall(elem, name: str) -> list:
+    if elem is None:
+        return []
+    return [e for e in elem.iter() if _xml_local(e.tag) == name]
+
+
+def epub_opf_path(zf) -> str:
+    """Read META-INF/container.xml and return the OPF package path (the first
+    rootfile/@full-path). Raises ValueError if the container is malformed."""
+    try:
+        root = ET.fromstring(zf.read(_EPUB_CONTAINER))
+    except KeyError as e:
+        raise ValueError(f"not an EPUB: missing {_EPUB_CONTAINER}") from e
+    for rf in _xml_findall(root, "rootfile"):
+        full = rf.get("full-path")
+        if full:
+            return full
+    raise ValueError("EPUB container.xml has no rootfile/@full-path")
+
+
+def _epub_resolve(opf_dir: str, href: str) -> str:
+    """Resolve a manifest href (relative to the OPF dir, possibly %-encoded and
+    fragment-suffixed) to a normalized ZIP entry name with forward slashes."""
+    href = urllib.parse.unquote(href.split("#", 1)[0])
+    joined = posixpath.join(opf_dir, href) if opf_dir else href
+    return posixpath.normpath(joined).lstrip("/")
+
+
+def parse_epub_structure(zf) -> dict:
+    """Parse an EPUB's OPF package into reading order + metadata.
+
+    Returns a dict with:
+      - ``opf_dir``: directory of the OPF (prefix for resolving hrefs)
+      - ``items``:  {manifest_id: (resolved_zip_path, media_type_lower)}
+      - ``spine``:  [resolved_zip_path, ...] in reading order (linear and
+                    non-linear itemrefs both kept — doc2kb never drops content)
+      - ``title``:  dc:title text or None
+      - ``authors``: dc:creator text or None
+
+    Raises ValueError / ET.ParseError on a malformed container or OPF so the
+    caller can fall back or surface the failure.
+    """
+    opf_path = epub_opf_path(zf)
+    opf_dir = posixpath.dirname(opf_path)
+    opf = ET.fromstring(zf.read(opf_path))
+    manifest_el = _xml_find(opf, "manifest")
+    spine_el = _xml_find(opf, "spine")
+    metadata_el = _xml_find(opf, "metadata")
+
+    items: dict[str, tuple[str, str]] = {}
+    for it in _xml_findall(manifest_el, "item"):
+        iid = it.get("id")
+        href = it.get("href")
+        if iid and href:
+            items[iid] = (_epub_resolve(opf_dir, href),
+                          (it.get("media-type") or "").strip().lower())
+
+    spine: list[str] = []
+    for ref in _xml_findall(spine_el, "itemref"):
+        idref = ref.get("idref")
+        if idref in items:
+            spine.append(items[idref][0])
+
+    title = authors = None
+    if metadata_el is not None:
+        t = _xml_find(metadata_el, "title")
+        c = _xml_find(metadata_el, "creator")
+        if t is not None and (t.text or "").strip():
+            title = t.text.strip()
+        if c is not None and (c.text or "").strip():
+            authors = c.text.strip()
+
+    return {"opf_dir": opf_dir, "items": items, "spine": spine,
+            "title": title, "authors": authors}

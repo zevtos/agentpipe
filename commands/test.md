@@ -1,6 +1,6 @@
 ---
 description: "Comprehensive test strategy and implementation: analyzes codebase, identifies coverage gaps, writes tests, and validates quality with mutation testing."
-argument-hint: [optional: specific module, file, or feature to test]
+argument-hint: "[optional: specific module, file, or feature to test]"
 ---
 
 You are orchestrating comprehensive test coverage for the project. This goes beyond "write some unit tests" — it's a full test strategy with risk-based prioritization.

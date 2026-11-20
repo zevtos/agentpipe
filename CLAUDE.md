@@ -1,7 +1,7 @@
 # agentpipe
 
 Gated pipeline orchestration for Claude Code and Codex CLI: specialist agents, slash commands, and skills.
-9 agents, 16 commands, 3 skills (`gost-report`, `doc2kb`, `ultrasearch`), 19 research docs. Multi-target installer:
+9 agents, 17 commands, 3 skills (`gost-report`, `doc2kb`, `ultrasearch`), 19 research docs. Multi-target installer:
 default puts everything in `~/.claude/`; `--target codex` puts skills in `~/.codex/skills/`
 and skips agents/commands (Codex format differences).
 The only build step is packaging skills into release zips — no runtime, no tests, no dependencies.
@@ -69,7 +69,7 @@ model:        opus (for architect, security) or sonnet (all others)
 
 Tool scoping by role:
 - Read-only + web research: `Read, Grep, Glob, WebFetch, WebSearch` (architect, pm)
-- Read + diagnostic bash: `Read, Grep, Glob, Bash` (dba, reviewer, security)
+- Read + diagnostic bash: `Read, Grep, Glob, Bash` (dba, refactorer, reviewer, security)
 - Full write access: `Read, Write, Edit, Bash, Glob, Grep` (devops, tester, docs)
 
 Body structure:
@@ -96,7 +96,7 @@ Body structure:
 - Agent invocation: `Run the [name] agent:` followed by prompt in quotes
 
 Commands without argument-hint: next, onboard, deploy.
-Commands that run agents in parallel: review (reviewer + security), feature step 5.
+Commands that run agents in parallel: review (reviewer + security), feature step 5, deploy step 2 (devops + security), sprint phase 5 (reviewer + security).
 
 ## Skill Format (skills/<name>/)
 

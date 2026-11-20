@@ -21,6 +21,22 @@ Best for: starting a new project from scratch.
 
 ---
 
+### `/backlog` — Spec → Sprint-Ready Issues
+> Turn specs and architecture into a GitHub backlog: epics, milestones, atomic issues.
+
+**Usage**: `/backlog [optional: path to spec/architecture docs, or a scope like 'MVP']`
+
+The bridge between `/kickoff` (which ends with specs and a scaffold) and `/sprint` (which starts from existing issues):
+1. **PM agent** — decomposes specs into epics and atomic issues with Given/When/Then acceptance criteria, MoSCoW priority, and size
+2. **Architect agent** — dependency ordering, milestone grouping (walking skeleton first), spike flags
+3. Gated `gh` creation — labels, milestones, issues with self-contained bodies; unblocked issues get `ready`
+
+Hands off to `/sprint label:ready`. Dedupes against existing open issues, so re-running after a spec change is safe.
+
+Best for: right after `/kickoff`, or any project with specs but an empty issue tracker.
+
+---
+
 ### `/next` — Strategic Advisor
 > Analyzes full project state and recommends the most impactful next steps.
 
@@ -126,9 +142,11 @@ Ensures refactors don't break existing behavior. The refactorer agent detects pr
 Examples:
 - `/sprint 12 15 20` — specific issues
 - `/sprint label:ready` — by label
-- `/sprint` — list all open, then choose
+- `/sprint` — defaults to `label:ready` when the label exists (the `/backlog` handoff), else lists all open and asks
 
 For each issue: read -> architect -> implement -> review + security -> test -> PR.
+
+Hardening: requires a clean working tree; orders the queue by `Blocked by #N` dependencies; skips issues with an open blocker or an existing PR; reuses a leftover `issue/N-*` branch instead of duplicating it; after 3 failed review rounds the issue is labeled `blocked` and the loop moves on; commit/PR type follows the issue (`feat`/`fix`/`chore`/`docs`).
 
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: ultrasearch
-description: 'Thesis-level literature research (систематический обзор, ВКР, related work) on a topic: queries 6 open academic APIs (OpenAlex, Semantic Scholar, arXiv, Crossref, Europe PMC, CORE), downloads OA PDFs via a multi-tier cascade, builds a persistent SPECTER-embedded SQLite corpus with PaperQA2-style citation traversal, flags retractions, and emits a markdown report with DOI-grounded citations and optional BibTeX/Zotero export. MUST BE USED whenever the user asks for a literature review, related work, deep research, систематический обзор, ВКР, дипломная работа, "найди все статьи про X", thesis prep, or research synthesis. NOT for single-paper summarization (use the `pdf` skill), code documentation (use repomix/gitingest), or general web research without academic grounding.'
+description: 'Thesis-level literature research (систематический обзор, ВКР, related work) on a topic: queries 6 open academic APIs (OpenAlex, Semantic Scholar, arXiv, Crossref, Europe PMC, CORE), downloads OA PDFs via a multi-tier cascade, builds a persistent SPECTER-embedded SQLite corpus with PaperQA2-style citation traversal, flags retractions, and emits a markdown report with DOI-grounded citations and optional BibTeX/Zotero export. MUST BE USED whenever the user asks for a literature review, related work, deep research, систематический обзор, обзор литературы, ВКР, дипломная работа, systematic review, meta-analysis, citation analysis, "найди статьи про X", thesis prep, or research synthesis. NOT for single-paper summarization (use the `pdf` skill), code documentation (use repomix/gitingest), or general web research without academic grounding.'
 ---
 
 # ultrasearch — thesis-level literature research
@@ -30,7 +30,7 @@ export ZOTERO_USER_ID="..."       # required if ZOTERO_API_KEY set
 |---|---|---|
 | `OPENALEX_API_KEY` | YES (post 13 Feb 2026) | OpenAlex returns 401 for new users |
 | `OPENALEX_EMAIL` | Recommended | drops to anonymous quota |
-| `UNPAYWALL_EMAIL` | YES | Tier 2 (Unpaywall PDF lookup) skipped; cascade loses ~30% recall |
+| `UNPAYWALL_EMAIL` | YES | Tier 2 (Unpaywall PDF lookup) skipped — the single largest OA tier; recall drops materially |
 | `S2_API_KEY` | Optional | shares anonymous 5000/5min bucket; traversal hits it harder |
 | `CORE_API_KEY` | Optional (Stage 2) | CORE source disabled; other 5 sources cover |
 | `ZOTERO_API_KEY` | Optional (Stage 2) | `--export-zotero` writes `.bib` only, no remote push |
@@ -80,6 +80,15 @@ python3 ~/.claude/skills/ultrasearch/scripts/ensure_env.py ultrasearch.py \
     "SSVEP-based BCIs neural prosthetics" --max-papers 30 --out /tmp/ssvep-review.md
 ```
 
+Full thesis-grade invocation (ВКР / систематический обзор — the flags that belong together):
+
+```bash
+us "интерфейсы мозг-компьютер на основе ССВП" \
+    --lang auto --depth deep --retrieval-profile full \
+    --max-papers 60 --export-zotero --render-graph \
+    --out ~/vkr/litreview.md
+```
+
 ### CLI flags
 
 | Flag | Default | Purpose |
@@ -89,8 +98,10 @@ python3 ~/.claude/skills/ultrasearch/scripts/ensure_env.py ultrasearch.py \
 | `--max-per-source N` | 50 | cap per discovery source before dedup |
 | `--out PATH` | stdout | write report to file |
 | `--top-k N` | 20 | chunks for synthesis |
+| `--fetch-concurrency N` | 8 | parallel PDF downloads — the main wall-clock lever of the fetch stage (downloads spread across many hosts); lower it to be polite to a single publisher CDN |
+| `--parse-concurrency N` | 4 | parallel parse subprocesses; each loads pymupdf4llm (+docling if triggered), memory grows ~linearly |
 | `--no-fetch` | off | skip PDF download; index abstracts only |
-| `--no-synthesize` | off | emit pipeline JSON instead of markdown |
+| `--no-synthesize` | off | emit stats + top-5 hit preview as JSON instead of the markdown report |
 | `--db PATH` | global `…/agentpipe/ultrasearch/data/corpus.db` (see *Persistent corpus*) | override corpus location |
 | `--json` | off | emit pipeline statistics on stderr |
 | `--quiet` | off | suppress per-step log lines |
@@ -169,14 +180,14 @@ discover (async, 6 sources concurrent)
        ↓
    dedup by normalize_doi(doi) or 'T:' + casefold_title(title)
        ↓
-   fetch (async, sem=4, 7-tier cascade)
+   fetch (async, concurrency=8 default via --fetch-concurrency; tier URLs resolved lazily)
    ├─ Tier 1: OpenAlex primary_location.pdf_url
    ├─ Tier 2: Unpaywall best_oa_location.url_for_pdf
    ├─ Tier 3: arXiv direct PDF
-   ├─ Tier 4: Europe PMC PMC fulltext
+   ├─ Tier 4: Europe PMC PMC fulltext   ← reserved hook, NOT active (returns XML, not PDF)
    ├─ Tier 5: publisher OA templates (PLOS, Frontiers)
    ├─ Tier 6: Zenodo records
-   └─ Tier 7: arXiv HTML (ar5iv)  ← Stage 3 hook
+   └─ Tier 7: arXiv HTML (ar5iv)        ← reserved hook, NOT active
        ↓
    parse (subprocess per PDF, pymupdf4llm + docling fallback)
    ├─ default: pymupdf4llm only
@@ -213,9 +224,10 @@ discover (async, 6 sources concurrent)
 - `sentence-transformers` + transformers ~80 MB
 - `allenai-specter` model ~440 MB (downloaded on first `index.py` call, NOT during pip install)
 - `docling` model bundle ~358 MB (downloaded on first docling fallback trigger, NOT during pip install) — Stage 2
+- `bge-reranker-base` ~80 MB (downloaded on first `--retrieval-profile full` run)
 - `git clone` of Retraction Watch repo ~50 MB (Stage 2 — only if `--refresh-retractions`)
 - Cold install: 5-8 minutes
-- Warm second run: <30 ms bootstrap; 30-90 s for a fresh query depending on PDF availability and `--max-papers`
+- Warm second run: <30 ms bootstrap; 30-90 s for a fresh query depending on PDF availability and `--max-papers`. The fetch stage is the wall-clock bottleneck — `--fetch-concurrency` (default 8) is its main lever.
 
 ## Persistent corpus
 
@@ -260,7 +272,7 @@ Markdown report with:
 **Stage 2 (v0.5):** Crossref/Europe PMC/CORE added (6 sources total), 7-tier PDF cascade with publisher OA templates and Zenodo, docling fallback on math/table-heavy pages, PaperQA2 Algorithm 1 citation traversal (`--depth`), Retraction Watch CSV ingest + DOI join (`--refresh-retractions`), BibTeX/Zotero export (`--export-zotero`), Open Questions section in synthesis.
 
 **Stage 3 (v1.0):**
-- 3-stage retrieval (`--profile full`): sqlite-vec top-50 → bge-reranker top-10 → RCS-cached scoring (≥5 keeps)
+- 3-stage retrieval (`--retrieval-profile full`): sqlite-vec top-50 → bge-reranker top-10 → RCS-cached scoring (≥5 keeps)
 - Multilingual query expansion (`--lang auto`): argos-translate EN↔RU; abstract translations stored in `papers.abstract_translated`
 - Composite Q-score: `0.3·log(cit+1) + 0.2·venue + 0.2·h_index + 0.3·recency` (populated lazily by `quality.populate_q_scores`)
 - MMR diversity selection (λ=0.7) + institution≤25% / primary-author≤15% caps in `quality.apply_diversity_caps`
@@ -283,10 +295,10 @@ Markdown report with:
 
 ## References (lazy-loaded)
 
-- `references/apis.md` — endpoint specs, rate budgets, env vars (all 11 sources)
-- `references/parsing-troubleshooting.md` — pymupdf4llm AGPL, MPS device, docling fallback notes
-- `references/methodology.md` — Wohlin 2014 snowballing + PaperQA2 Algorithm 1 + SPECTER cosine gate
-- `references/ru-sources.md` — КиберЛенинка status, eLIBRARY exclusion, РГБ note, translation flow (Stage 3)
+- `references/apis.md` — endpoint specs, rate budgets, env vars for the academic discovery sources. Open when a source returns errors/empty or you need a rate budget before a big run.
+- `references/parsing-troubleshooting.md` — open when a PDF parses empty, math/tables come out garbled, or you hit AGPL/MPS questions.
+- `references/methodology.md` — Wohlin 2014 snowballing + PaperQA2 Algorithm 1 + SPECTER cosine gate. Open when the user questions the method or asks to tune traversal thresholds.
+- `references/ru-sources.md` — КиберЛенинка status, eLIBRARY exclusion, РГБ note, translation flow. Open for Russian-language corpora questions.
 - `prompts/perspective-questions.txt` — STORM-style perspective generation (Stage 2)
 - `prompts/rcs-summary.txt` — PaperQA2 RCS chunk-scorer prompt (Stage 3)
 - `prompts/section-writer.txt` — section-draft subagent prompt (Stage 3)
@@ -298,6 +310,22 @@ Markdown report with:
 `scripts/requirements.txt`: pyalex, semanticscholar, arxiv, httpx[http2], aiometer, tenacity, unpywall, pymupdf4llm, torch, sentence-transformers, sqlite-vec, numpy, tiktoken. No system deps beyond Python 3.10+.
 
 **AGPL note:** `pymupdf4llm` and its transitive `pymupdf` are AGPL v3 (Artifex). Fine for an open-source skill; commercial reuse needs a license from Artifex. See `references/parsing-troubleshooting.md`.
+
+## When things fail
+
+Exit codes (from `ultrasearch.py`) and what to do:
+
+| Code | Meaning | Action |
+|---|---|---|
+| 0 | success | deliver |
+| 1 | partial — e.g. 0 PDFs downloaded, report built on abstracts only | NOT a crash. The abstract-grounded report is still deliverable; tell the user PDF full-text was unavailable and why (paywalled topic, no OA) |
+| 2 | config error — missing env var, broken venv | fix the env var (see pre-flight) or re-run bootstrap; do not retry blindly |
+| 3 | all discovery sources returned 0 | query too narrow/misspelled or network down; broaden/translate the query before retrying |
+| 4 | pipeline crash | read stderr; report the bug, don't loop |
+
+- **First long pause on a new feature is a model download, not a hang**: SPECTER ~440 MB on first index, docling ~358 MB on first fallback, bge-reranker ~80 MB on first `--retrieval-profile full`.
+- **429 / rate limits**: sources retry with jittered backoff automatically; persistent S2 429 → set `S2_API_KEY` (dedicated pool). See `references/apis.md`.
+- **Results look stale**: the corpus is persistent — rerunning the query re-discovers and re-indexes; `--refresh-retractions` updates retraction freshness.
 
 ## License
 

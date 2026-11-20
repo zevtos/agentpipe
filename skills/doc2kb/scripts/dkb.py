@@ -186,12 +186,23 @@ def _scout(kb_root: Path, input_dir: Path, tier: Optional[str],
 
 
 def _extract(kb_root: Path, tier: Optional[str], *, timeout: Optional[int],
-             normalize: bool, always_popo: bool, quiet: bool) -> tuple[int, Optional[dict]]:
+             normalize: bool, shard: bool, patch_warnings: bool,
+             always_popo: bool, quiet: bool,
+             workers: Optional[int] = None,
+             embed_depth: Optional[int] = None) -> tuple[int, Optional[dict]]:
     args = [str(kb_root)]
     if timeout is not None:
         args += ["--timeout", str(timeout)]
+    if embed_depth is not None:
+        args += ["--embed-depth", str(embed_depth)]
+    if workers is not None:
+        args += ["--workers", str(workers)]
     if normalize:
         args.append("--normalize")
+    if patch_warnings:
+        args.append("--patch-warnings")
+    if shard:
+        args.append("--shard")
     if quiet:
         args.append("--quiet")
     env_note = ""
@@ -207,7 +218,7 @@ def _extract(kb_root: Path, tier: Optional[str], *, timeout: Optional[int],
 
 def _index(kb_root: Path, tier: Optional[str], *,
            force: bool = False) -> tuple[int, Optional[dict]]:
-    """Phase 5.5 — build the BM25 search index (_index.db + portable query.sh).
+    """Phase 4.5 — build the BM25 search index (_index.db + portable query.sh).
     Pure stdlib + tiktoken; never pulls a heavy tier."""
     args = [str(kb_root)]
     if force:
@@ -260,6 +271,9 @@ def _report(kb_root: Path, summary: Optional[dict]) -> None:
           f"skipped={counts.get('skipped_by_decision', 0)} "
           f"errors={counts.get('error', 0)} "
           f"needs_attention={counts.get('needs_attention', 0)}")
+    if summary.get("embedded_documents"):
+        print(f"    + {summary['embedded_documents']} embedded document(s) extracted "
+              "as their own docs (docs/<id>_eNN-*.md)")
     na = summary.get("needs_attention") or []
     for item in na:
         reason = item.get("reason", "?")
@@ -269,6 +283,16 @@ def _report(kb_root: Path, summary: Optional[dict]) -> None:
         if hint:
             line += f" — {hint}"
         print(line)
+    unclassified = summary.get("unclassified_warnings") or []
+    if unclassified:
+        n_warn = sum(len(u.get("warnings") or []) for u in unclassified)
+        print(f"    ⚠ {n_warn} other warning(s) in {len(unclassified)} doc(s) — listed per doc "
+              "in INDEX.md (e.g. images that could not be rendered, embedded objects not extracted)")
+        for u in unclassified[:5]:
+            first = (u.get("warnings") or [""])[0]
+            print(f"      - {u.get('source_path', u.get('id', '?'))}: {first[:160]}")
+        if len(unclassified) > 5:
+            print(f"      … and {len(unclassified) - 5} more doc(s)")
     if summary.get("errors_log"):
         print(f"    errors logged → {summary['errors_log']}")
     print(f"    index → {kb_root / 'INDEX.md'}")
@@ -355,8 +379,10 @@ def _run_pipeline(args: argparse.Namespace) -> int:
         return resolved
 
     rc, summary = _extract(kb_root, tier, timeout=args.timeout,
-                           normalize=args.normalize, always_popo=args.always_popo,
-                           quiet=args.quiet)
+                           normalize=args.normalize, shard=args.shard,
+                           patch_warnings=args.patch_warnings,
+                           always_popo=args.always_popo, quiet=args.quiet,
+                           workers=args.workers, embed_depth=args.embed_depth)
     if rc == 2:
         return _fail((summary or {}).get("reason", "extract refused to start"))
 
@@ -389,10 +415,20 @@ def _add_pipeline_flags(p: argparse.ArgumentParser) -> None:
                    help="run MinerU→Popo stage 2 on every mineru doc (opt-in, heavy)")
     p.add_argument("--normalize", action="store_true",
                    help="run normalize_md after each extraction")
+    p.add_argument("--shard", action="store_true",
+                   help="split oversized docs (>24k tok) into per-chapter folders")
+    p.add_argument("--patch-warnings", action="store_true",
+                   help="mineru page-patch dropped_pictures PDFs (needs --tier mineru)")
     p.add_argument("--no-index", action="store_true",
-                   help="skip the Phase 5.5 BM25 search index (default: build it)")
+                   help="skip the Phase 4.5 BM25 search index (default: build it)")
     p.add_argument("--timeout", type=int, default=None,
                    help="per-file extractor timeout in seconds")
+    p.add_argument("--workers", type=int, default=None,
+                   help="parallel lightweight extractions (default: 4; 1 = serial; "
+                        "mineru always runs serially)")
+    p.add_argument("--embed-depth", type=int, default=None,
+                   help="follow documents embedded in documents this deep "
+                        "(default 4; 0 = off)")
     p.add_argument("-q", "--quiet", action="store_true",
                    help="suppress per-file extract progress")
 
@@ -422,14 +458,18 @@ def main() -> int:
     p_ext.add_argument("--tier", choices=["mineru"], default=None)
     p_ext.add_argument("--always-popo", action="store_true")
     p_ext.add_argument("--normalize", action="store_true")
+    p_ext.add_argument("--shard", action="store_true")
+    p_ext.add_argument("--patch-warnings", action="store_true")
     p_ext.add_argument("--timeout", type=int, default=None)
+    p_ext.add_argument("--workers", type=int, default=None)
+    p_ext.add_argument("--embed-depth", type=int, default=None)
     p_ext.add_argument("-q", "--quiet", action="store_true")
 
     p_man = sub.add_parser("manifest", help="Phase 5 only — (re)assemble the index")
     p_man.add_argument("output_dir", help="kb directory")
     p_man.add_argument("--tier", choices=["mineru"], default=None)
 
-    p_idx = sub.add_parser("index", help="Phase 5.5 only — (re)build the BM25 search index")
+    p_idx = sub.add_parser("index", help="Phase 4.5 only — (re)build the BM25 search index")
     p_idx.add_argument("output_dir", help="kb directory with docs/")
     p_idx.add_argument("--force", action="store_true",
                        help="rebuild even if the corpus signature is unchanged")
@@ -476,8 +516,10 @@ def main() -> int:
         if resolved is not None:
             return resolved
         rc, summary = _extract(kb_root, tier, timeout=args.timeout,
-                               normalize=args.normalize,
-                               always_popo=args.always_popo, quiet=args.quiet)
+                               normalize=args.normalize, shard=args.shard,
+                               patch_warnings=args.patch_warnings,
+                               always_popo=args.always_popo, quiet=args.quiet,
+                               workers=args.workers, embed_depth=args.embed_depth)
         return _finish_extract(kb_root, rc, summary)
     if args.command == "manifest":
         kb_root = Path(args.output_dir).expanduser().resolve()

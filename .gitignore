@@ -13,3 +13,6 @@ tests/*/*/last_verdict.json
 # gost-report skill output — generated .docx + validation sentinels, never part of the repo
 *.docx
 *.gost-meta.json
+# local tool artifacts — BMAD plugin config + template placeholder dirs, never part of the repo
+_bmad/
+{output_folder}/

@@ -1,0 +1,188 @@
+# МБИ — АНО ВО «Международный банковский институт имени Анатолия Собчака».
+# Положение о ВКР (ред. с 01.09.2022): разд. 10 «Правила оформления ВКР»,
+# прил. 9 (реферат), 11 (титульный лист), 12 (список источников).
+# В комментариях — пункты положения. Использование:
+#     Report(TitleConfig(...), profile="mbi")
+# Свои отличия — файл с extends = "mbi" (references/profiles.md).
+
+description = "МБИ: положение о ВКР 2022, бакалавриат"
+extends = "gost"
+
+ministry = ""
+university_full = "Автономная некоммерческая организация высшего образования"
+university_short = "«Международный банковский институт имени Анатолия Собчака»"
+city = "Санкт-Петербург"
+
+# Все дополнительные проверки валидатора (WARN): двойные пробелы, точка в
+# заголовке, интервалы между абзацами, ссылки на таблицы и рисунки, число
+# ключевых слов и источников.
+checks = ["all"]
+
+[page]                      # 10.1.5, 10.3.1
+margin_left = 30
+margin_right = 15
+margin_top = 20
+margin_bottom = 20
+number_position = "bottom-center"
+
+[body]                      # 10.1.5
+font_size = 14
+line_spacing = 1.5
+indent_cm = 1.25
+block_space_pt = 0          # межабзацных интервалов нет
+hyphenation = true          # автоматическая расстановка переносов
+widow_control = true        # 10.2.4: запрет висячих строк
+dash = "–"                  # «Таблица 1 – …», «Рисунок 1.1 – …», «Примечание – …»
+prose_dashes = "normalize"  # « - » и « — » между словами → « – », «45–60» сохраняется
+nbsp = "required"           # 10.1.6 инициалы, 10.8.7 число и единица, 10.11.2 «г.»
+
+[headings]                  # 10.2
+toc_title = "СОДЕРЖАНИЕ"
+glue = true                 # союзы и предлоги переносятся на следующую строку
+numbering = false           # номера «1», «1.1» пишутся в тексте; true — автоматически
+
+[h1]                        # 10.2.3–10.2.4: прописные, жирный, по центру, с новой страницы
+size = 14
+align = "center"
+uppercase = true
+new_page = true
+space_before = 0
+space_after = "1line"       # после названия раздела пропускается одна строка
+
+[h2]                        # с абзаца, строчные жирные, по ширине, строка до и после
+size = 14
+align = "justify"
+indent_cm = 1.25
+space_before = "1line"
+space_after = "1line"
+
+[h3]
+size = 14
+align = "justify"
+indent_cm = 1.25
+space_before = "1line"
+space_after = "1line"
+
+[caption]                   # 10.9.4, 10.9.6, 10.10.3
+figure_align = "center"
+table_align = "left"
+line_spacing = 1.0          # многострочное наименование — через один интервал
+hyphenation = false         # перенос слов в наименовании не допускается
+glue = true                 # предлоги и союзы не в конце строки
+keep_with_next = true       # подпись не отрывается от таблицы, рисунок от подписи
+numbering = "global"        # сквозная; "chapter" — «Рисунок 1.1», одинаково с таблицами
+
+[table]                     # 10.1.5, 10.10
+font_size = 12
+line_spacing = 1.0
+repeat_header = true        # 10.10.4: головка в каждой части
+cant_split = true
+continuation = true         # 10.10.3: «Продолжение таблицы N» над второй частью
+
+[list]                      # 10.2.6: «–», «а)», «1)», запись с абзацного отступа
+layout = "paragraph"
+bullet = "–"
+numbered = "%1)"
+lettered = "{letter})"
+letters = "абвгдежиклмнпрстуфхцшщэюя"
+
+[formula]                   # 10.8.1, 10.8.4
+space_pt = 12               # 12 пт сверху и снизу
+where_indent = true         # «где» с абзацного отступа, без двоеточия
+
+[note]                      # 10.6.3: «Примечание – Текст»; «Примечания:» и «1. Текст»
+label = "Примечание"
+plural_label = "Примечания"
+
+[keywords]                  # прил. 9
+min = 5
+max = 15
+volume_template = "Выпускная квалификационная работа содержит {pages} с., {figures} рис., {tables} табл., {sources} {sources_word}, {appendices} прил."
+
+[subtitle]                  # шапка без титула: «НАБРОСКИ …» + строка под ней
+italic = false
+line_spacing = 1.5
+attach = true
+
+[bib]                       # 10.13, прил. 12
+style = "7.0.100-2018"
+title = "Список использованных источников"
+align = "justify"
+indent_cm = 1.25
+min_sources = 25            # бакалавриат: не менее 25
+
+[appendix]                  # 10.1.5, 10.12
+label = "ПРИЛОЖЕНИЕ"
+font_size = 12
+
+# --- Титульный лист по прил. 11 -------------------------------------------
+# Поля: department (кафедра), head_label / head_degree / head_name (гриф
+# «Допущена к защите»), direction, program, course, study_form, student_name
+# (ФИО полностью), teacher_name / teacher_degree / teacher_position (научный
+# руководитель) — в TitleConfig; protocol, protocol_date, work_kind,
+# student_role — в TitleConfig(extra={...}). Пустое поле — линия для руки.
+[title]
+margin_left = 30
+margin_right = 15
+margin_top = 20
+margin_bottom = 20
+required = ["topic", "student_name", "year"]
+block_defaults = { line_spacing = 1.0 }
+
+[[title.blocks]]
+lines = ["{university_full}", "{university_short}"]
+
+[[title.blocks]]
+text = "Кафедра {department|____________________________________________}"
+blank_before = 1
+
+[[title.blocks]]
+lines = [
+    "«Допущена к защите»",
+    "Протокол № {protocol|____} от {protocol_date|____________ 20__} г.",
+    "{head_label|И. о. заведующего кафедрой}",
+    "{head_degree|____________________________}",
+    "{head_name|____________________________}",
+    "______________ (подпись)",
+]
+align = "right"
+blank_before = 3
+
+[[title.blocks]]
+lines = ["ВЫПУСКНАЯ КВАЛИФИКАЦИОННАЯ РАБОТА", "{work_kind|БАКАЛАВРСКАЯ РАБОТА}"]
+bold = true
+blank_before = 3
+
+[[title.blocks]]
+lines = [
+    "направление подготовки {direction|____________________________}",
+    "профиль «{program|____________________________}»",
+]
+blank_before = 1
+
+[[title.blocks]]
+text = "{topic}"
+bold = true
+size = 16
+blank_before = 3
+
+[[title.blocks]]
+lines = [
+    "{student_label} {student_role|обучающийся}",
+    "{course|____} курса группы {student_group|________}",
+    "{study_form|____________} формы обучения",
+    "{student_name}",
+    "______________ (подпись)",
+]
+align = "right"
+blank_before = 4
+
+[[title.blocks]]
+lines = ["Научный руководитель", "{teacher_name|____________________________}",
+         "{teacher_regalia}", "______________ (подпись)"]
+align = "right"
+blank_before = 2
+
+[[title.blocks]]
+text = "{city}, {year}"
+anchor = "bottom"
