@@ -30,7 +30,7 @@ Why a converter cascade:
       3. `antiword`                                             → plain text
          only (loses images/tables). Classic lightweight Linux fallback.
 
-    None of these are pip-installable, so — like the opt-in mineru CLI — when
+    None of these are pip-installable, so — like the opt-in mineru tier — when
     no converter is found the script exits 2 with an install hint. The parent
     loop must treat exit 2 as "needs a converter installed", NOT as a corrupt
     file, and log it to `_logs/errors.json` rather than silently skipping.

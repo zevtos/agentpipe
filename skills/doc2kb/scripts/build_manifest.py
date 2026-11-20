@@ -224,6 +224,7 @@ def load_index_summary(kb_dir: Path) -> dict[str, Any] | None:
             else "BM25 (pure-Python fallback)",
             "chunks": n_chunks,
             "keywords": keywords,
+            "stemmed": bool(meta.get("analyzer")),
         }
     except sqlite3.Error:
         return None
@@ -273,6 +274,9 @@ def write_index_md(kb_dir: Path, manifest: dict[str, Any]) -> None:
             "only `python3`, no venv. Each hit cites `source › heading › page N` so "
             "you can open the right `docs/*.md` (or original `source`) for full context.",
             "",
+            *(["Russian and English word forms are stemmed: «затраты» also finds "
+               "«затратами», «затрат» — don't retry other inflections of a query.", ""]
+              if index.get("stemmed") else []),
         ]
 
     # By source type.

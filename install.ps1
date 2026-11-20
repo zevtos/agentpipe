@@ -1029,7 +1029,7 @@ function Do-MineruPrewarm {
         return
     }
     Write-Host ""
-    Write-Warn "MinerU tier is a HEAVY download: ~3 GB+, several minutes (MLX/CUDA wheels)."
+    Write-Warn "MinerU tier is a HEAVY download: ~3 GB+, several minutes (torch + llama.cpp + ~2 GB models)."
     $reply = Read-Host "  Pre-warm doc2kb MinerU tier now? [y/N]"
     if ($reply -match '^(y|yes)$') {
         Write-Info "Installing MinerU tier - this will take a while..."

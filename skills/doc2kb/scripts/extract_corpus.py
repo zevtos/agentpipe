@@ -60,9 +60,10 @@ Audio / video (`media`) and subtitle files (`subtitles`):
     `needs_install` (the tier is never installed from here).
 
 Per-file MinerU settings + env-gated Popo (both default-off):
-    - `_scout.files[].mineru` (a structured `{backend,lang,keep_raw}` block,
-      stamped by apply_overrides.py) is rendered into whitelisted CLI flags for
-      the mineru extractor — never raw arg strings (scout is agent-mutable).
+    - `_scout.files[].mineru` (a structured `{tier,keep_raw}` block, stamped
+      by apply_overrides.py; legacy 3.x `backend`/`lang` keys still pass) is
+      rendered into whitelisted CLI flags for the mineru extractor — never
+      raw arg strings (scout is agent-mutable).
     - DOC2KB_ALWAYS_POPO (env) routes every mineru-extracted doc through Popo as
       a non-fatal stage-2 pass; a per-file `popo` bool overrides it. Routed docs
       get `--keep-raw` forced so Popo finds the `<kb>/_mineru/<id>/` cache. With
@@ -112,7 +113,7 @@ from _common import (  # noqa: E402
     tool_version_string,
     validate_source_rel,
 )
-from extract_pdf_mineru import SUPPORTED_BACKENDS  # noqa: E402  (constant only)
+from extract_pdf_mineru import SUPPORTED_BACKENDS, SUPPORTED_TIERS  # noqa: E402  (constants only)
 from _embedded import (  # noqa: E402  (constants only)
     ENV_DEADLINE as EMBED_ENV_DEADLINE,
     ENV_DEPTH as EMBED_ENV_DEPTH,
@@ -194,6 +195,11 @@ def _mineru_flags(file_entry: dict, force_keep_raw: bool) -> tuple[list[str], li
     warns: list[str] = []
     block = file_entry.get("mineru")
     if isinstance(block, dict):
+        tier = block.get("tier")
+        if tier in SUPPORTED_TIERS:
+            flags += ["--tier", tier]
+        elif tier is not None:
+            warns.append(f"ignored invalid mineru.tier {tier!r}")
         backend = block.get("backend")
         if backend in SUPPORTED_BACKENDS:
             flags += ["--backend", backend]
@@ -551,7 +557,7 @@ def _patch_warnings(kb_root: Path, input_root: Path, needs_attention: list[dict]
             sys.executable, str(ENSURE_ENV), "extract_pdf_mineru.py",
             str(in_pdf), str(scratch),
             "--doc-id", doc_id, "--source-rel", source_rel,
-            "--pages", pages, "--patch-into", str(target), "--lang", "cyrillic",
+            "--pages", pages, "--patch-into", str(target),
         ]
         try:
             proc = subprocess.run(argv, capture_output=True, text=True, timeout=patch_timeout)

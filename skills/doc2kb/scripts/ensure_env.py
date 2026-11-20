@@ -25,18 +25,24 @@ ensure_env.py — изолированное окружение для скил�
 Использование:
     python3 ensure_env.py                          # lightweight bootstrap + путь к venv-питону
     python3 ensure_env.py <script> [args]          # lightweight bootstrap + запустить script
-    python3 ensure_env.py --tier mineru            # additive: ставит mineru tier поверх lightweight
+    python3 ensure_env.py --tier mineru            # MinerU 4 для PDF (свой venv + модели)
     python3 ensure_env.py --tier mineru <script>   # ensure mineru tier перед запуском script
     python3 ensure_env.py --tier transcribe        # speech-to-text для аудио/видео (свой venv)
 
 Тиры (opt-in):
-    lightweight (default) — requirements.txt, всегда поставлен.
-    mineru                — requirements-mineru.txt, отдельный хэш-файл
-                            (.installed_hash_mineru), additive, ставится только
-                            при явном --tier mineru. ~3 GB + MLX wheels на Mac.
+    lightweight (default) — requirements.txt, всегда поставлен; Python 3.11–3.14
+                            (у onnxruntime и mineru нет колёс для более новых).
+    mineru                — requirements-mineru.txt в СОБСТВЕННОМ venv
+                            (<state>/mineru/venv, Python 3.13), ставится только
+                            при явном --tier mineru. После pip-установки
+                            `_mineru_driver.py setup` качает модели тира
+                            standard (~2 GB) в <state>/mineru/models.
+                            Раньше жил в общем venv, где его форк python-pptx
+                            перезаписывал файлы пакета `pptx`; такой venv один
+                            раз пересобирается без MinerU.
     transcribe            — requirements-transcribe.txt в СОБСТВЕННОМ venv
                             (<state>/transcribe/venv, Python 3.12): GigaAM пинит
-                            onnx/onnxruntime ниже, чем нужно mineru, а torch
+                            onnx/onnxruntime ниже, чем нужно PyMuPDF 2.x, а torch
                             отстаёт от свежего CPython. После pip-установки
                             `_asr.py setup` качает закреплённые модели (whisper.cpp
                             ggml + VAD, либо mlx/faster-whisper; GigaAM) в
@@ -97,25 +103,38 @@ LOCK_FILE = STATE_DIR / ".venv.lock"
 # Legacy in-skill locations (pre-ADR-008) — migrated away on next bootstrap.
 _LEGACY_VENV = SKILL_DIR / ".venv"
 _LEGACY_LOCK = SKILL_DIR / ".venv.lock"
+# The mineru tier used to be installed into the shared venv; this hash file
+# marks such a venv (its python-pptx files were overwritten by MinerU's fork).
+_LEGACY_SHARED_MINERU = VENV_DIR / ".installed_hash_mineru"
 
 # Opt-in tiers layered on top of the lightweight base. Adding a tier never
 # touches the lightweight install — they live in the same venv but get their
 # own hash file so re-running `--tier mineru` is idempotent and switching
 # back to default invocation doesn't trigger a reinstall.
-TIERS: dict[str, str] = {
-    "mineru": "requirements-mineru.txt",
-}
+TIERS: dict[str, str] = {}
 
 # Opt-in tiers that get their OWN venv under <state>/<tier>/venv because their
 # pins clash with the shared one (GigaAM: onnx 1.19 / onnxruntime 1.23 vs the
-# mineru tier's newer onnxruntime; torch wheels trail the newest CPython the
+# newer onnxruntime PyMuPDF 2.x needs; torch wheels trail the newest CPython the
 # shared venv may run on). Value: (requirements file, Python version for the
 # venv, post-install setup script run as `<venv-python> <script> setup
 # --models-dir <state>/<tier>/models`, or None). Scripts in the shared venv
 # reach the tier as a subprocess (see isolated_python()).
 ISOLATED_TIERS: dict[str, tuple[str, str, str | None]] = {
     "transcribe": ("requirements-transcribe.txt", "3.12", "_asr.py"),
+    # MinerU pulls torch/transformers and (3.x) `pypptx-with-oxml`, a
+    # python-pptx fork that installs into the same `pptx` package: in the
+    # shared venv it overwrote python-pptx's files under extract_pptx.py.
+    # extract_pdf_mineru.py runs `_mineru_driver.py` with this venv's python;
+    # its `setup` fetches the standard-tier models into <state>/mineru/models.
+    "mineru": ("requirements-mineru.txt", "3.13", "_mineru_driver.py"),
 }
+
+# Python of the shared venv. onnxruntime (a PyMuPDF 2.x dependency) and mineru
+# publish wheels for CPython 3.11–3.14 only: a venv on a newer interpreter (the
+# Homebrew `python3` is 3.15) cannot install the lightweight tier. Highest first.
+SHARED_PYTHONS = ("3.14", "3.13", "3.12", "3.11")
+SHARED_PYTHON_SPEC = ">=3.11,<3.15"
 
 
 def log(msg: str) -> None:
@@ -236,8 +255,8 @@ def bootstrap_isolated_tier(tier: str) -> None:
                             f"(https://docs.astral.sh/uv/) or python{py_version}")
                     log(f"Creating tier {tier!r} venv via {exe} -m venv at {venv}")
                     subprocess.run([exe, "-m", "venv", str(venv)], check=True)
-            log(f"Installing opt-in tier {tier!r} from {req.name} (several minutes — torch + "
-                "speech models' runtimes)")
+            log(f"Installing opt-in tier {tier!r} from {req.name} (several minutes — torch "
+                "and the tier's ML runtimes)")
             if have("uv"):
                 subprocess.run(["uv", "pip", "install", "--python", str(py), "-r", str(req),
                                 "--upgrade"], check=True)
@@ -259,8 +278,9 @@ def bootstrap_isolated_tier(tier: str) -> None:
 
 
 def tier_hash_file(tier: str) -> Path:
-    """Per-tier hash file. Lives next to the lightweight HASH_FILE so we can
-    check `--tier mineru` idempotency without re-touching the base install."""
+    """Per-tier hash file for a shared-venv tier (TIERS). Lives next to the
+    lightweight HASH_FILE so `--tier <name>` is idempotent without re-touching
+    the base install."""
     return VENV_DIR / f".installed_hash_{tier}"
 
 
@@ -275,21 +295,40 @@ def tier_needs_update(tier: str) -> bool:
     return hash_file.read_text().strip() != current
 
 
+def _venv_python_version() -> str | None:
+    """'3.14' from <venv>/pyvenv.cfg, without starting the interpreter."""
+    try:
+        for line in (VENV_DIR / "pyvenv.cfg").read_text(encoding="utf-8").splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() in ("version", "version_info"):
+                return ".".join(value.strip().split(".")[:2])
+    except OSError:
+        pass
+    return None
+
+
 def create_venv() -> None:
     if have("uv"):
-        log(f"Creating venv via uv at {VENV_DIR}")
-        subprocess.run(["uv", "venv", str(VENV_DIR)], check=True)
+        log(f"Creating venv via uv (Python {SHARED_PYTHON_SPEC}) at {VENV_DIR}")
+        subprocess.run(["uv", "venv", "--python", SHARED_PYTHON_SPEC, str(VENV_DIR)], check=True)
         return
     if have("conda"):
         log(f"Creating venv via conda --prefix at {VENV_DIR} (this may take a minute)")
         subprocess.run(
             ["conda", "create", "--prefix", str(VENV_DIR),
-             "python", "pip", "-y", "-q"],
+             f"python{SHARED_PYTHON_SPEC}", "pip", "-y", "-q"],
             check=True,
         )
         return
-    log(f"Creating venv via python -m venv at {VENV_DIR}")
-    subprocess.run([sys.executable, "-m", "venv", str(VENV_DIR)], check=True)
+    exe = (sys.executable if "%d.%d" % sys.version_info[:2] in SHARED_PYTHONS
+           else next((p for v in SHARED_PYTHONS if (p := _find_python(v))), None))
+    if exe is None:
+        raise FileNotFoundError(
+            f"doc2kb needs Python {SHARED_PYTHON_SPEC} for its venv (onnxruntime and mineru "
+            f"have no wheels for {sys.version_info[0]}.{sys.version_info[1]}): install uv "
+            f"(https://docs.astral.sh/uv/) or python{SHARED_PYTHONS[0]}")
+    log(f"Creating venv via {exe} -m venv at {VENV_DIR}")
+    subprocess.run([exe, "-m", "venv", str(VENV_DIR)], check=True)
 
 
 def site_packages_dir() -> Path | None:
@@ -424,8 +463,9 @@ def _release_lock(fh) -> None:
 
 
 def _has_legacy_state() -> bool:
-    """True while pre-ADR-008 in-skill state still exists and needs migrating."""
-    return _LEGACY_VENV.exists() or _LEGACY_LOCK.exists()
+    """True while pre-ADR-008 in-skill state, or a shared venv that still holds
+    the mineru tier, exists and needs migrating."""
+    return _LEGACY_VENV.exists() or _LEGACY_LOCK.exists() or _LEGACY_SHARED_MINERU.exists()
 
 
 def _migrate_legacy_state() -> None:
@@ -447,6 +487,13 @@ def _migrate_legacy_state() -> None:
     if had_venv and not _LEGACY_VENV.exists():
         log(f"Migrated to global state layout (ADR-008): legacy in-skill venv "
             f"removed; a fresh venv will be built at {VENV_DIR}")
+    if _LEGACY_SHARED_MINERU.exists():
+        # Uninstalling MinerU's stack would not restore the overwritten
+        # python-pptx files, so rebuild the venv (wheels come from the uv cache).
+        log(f"The mineru tier now has its own venv ({isolated_venv_dir('mineru')}); "
+            f"rebuilding {VENV_DIR} without it. Re-run `ensure_env.py --tier mineru` "
+            "if you use MinerU (its models stay cached).")
+        shutil.rmtree(VENV_DIR, ignore_errors=True)
 
 
 def bootstrap() -> None:
@@ -467,6 +514,13 @@ def bootstrap() -> None:
                 write_pth()
             return
         VENV_DIR.parent.mkdir(parents=True, exist_ok=True)
+        version = _venv_python_version() if venv_python().exists() else None
+        if version and version not in SHARED_PYTHONS:
+            # The lightweight tier has no wheels there, so this venv never
+            # installs; rebuild it on a supported interpreter.
+            log(f"venv runs Python {version}, outside {SHARED_PYTHON_SPEC} — rebuilding it "
+                "(re-run `--tier mineru` afterwards if you used it)")
+            shutil.rmtree(VENV_DIR)
         if not venv_python().exists():
             create_venv()
         install_deps()

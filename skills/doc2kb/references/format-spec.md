@@ -9,6 +9,7 @@ Contents: [File layout](#file-layout) · [`_scout.json`](#_scoutjson) ·
 [Embedded documents](#embedded-documents) ·
 [Sharded documents](#sharded-documents-folder-form) · [`manifest.json`](#manifestjson) ·
 [`INDEX.md`](#indexmd) · [`llms.txt`](#llmstxt) · [`AGENTS.md`](#agentsmd) ·
+[`_index.db` search index](#_indexdb-search-index) ·
 [extractor stdout JSON](#stdout-json-from-each-extract_py) ·
 [dispatcher stdout JSON](#stdout-json-from-extract_corpuspy-phase-4-dispatcher)
 
@@ -21,16 +22,22 @@ Contents: [File layout](#file-layout) · [`_scout.json`](#_scoutjson) ·
 ├── llms.txt
 ├── AGENTS.md
 ├── _scout.json            # scout output, kept for debugging
+├── _index.db              # BM25 search index (Phase 4.5, optional; see "_index.db search index")
+├── _query.py              # verbatim copy of scripts/query_kb.py — the portable searcher
+├── query.sh / query.cmd   # launchers: ./query.sh "<question>"
 ├── _logs/
 │   └── errors.json        # extraction failures, if any
 ├── _media/<doc-id>/       # audio/video speech-to-text drafts: review.md (disputed spots), whisper.srt/.json,
 │                          #   gigaam.txt, mlx.txt, run.log, asr.json — only for docs that went through ASR
+├── _mineru/<doc-id>/      # opt-in (extract_pdf_mineru.py --keep-raw): MinerU output in vlm/ + <doc-id>.pdf
+├── _popo/                 # opt-in (postprocess_popo.py): MinerU-Popo work files, see references/mineru.md
 ├── assets/                # extracted images: <doc-id>-pageNN-imgM.<ext>, <doc-id>-slideNN-imgM.<ext>,
 │                          #   <doc-id>-imgNNN.<ext>; vector images (EMF/WMF/SVG/PDF/EPS) as .png
 └── docs/
     ├── <doc-id>-<slug>.md
     ├── <doc-id>_e01-<slug>.md         # document embedded in <doc-id> (see "Embedded documents")
     ├── <doc-id>_e01_e02-<slug>.md     # …and one embedded in that one
+    ├── <doc-id>-<slug>.tree.json      # opt-in MinerU-Popo document tree (postprocess_popo.py)
     └── ...
 ```
 
@@ -185,11 +192,13 @@ Per-type optional fields:
 | `headings`         | all        | first up to 10 top-level headings, for fast index |
 | `mineru_subset_pages` | pdf     | sorted list of original page numbers that mineru extracted, when the file was produced by `extract_pdf_mineru.py --pages` in standalone (non-splice) mode |
 | `mineru_patched_pages` | pdf    | sorted union of every page that has been replaced via `extract_pdf_mineru.py --patch-into`; accumulates across runs against the same target md |
-| `extraction_method_supplementary` | pdf | `mineru-<backend>@<version>` of the most recent mineru patch; set alongside `mineru_patched_pages`, never replaces the primary `extraction_method` |
+| `extraction_method_supplementary` | pdf | `mineru-<tier>@<version>` of the most recent mineru patch (3.x runs wrote `mineru-<backend>@<version>`); set alongside `mineru_patched_pages`, never replaces the primary `extraction_method` |
 
 `extraction_method` values that callers should recognise:
 
 - `pymupdf4llm@<ver>` — default PDF extractor.
+- `mineru-<tier>@<ver>` — opt-in MinerU 4 extractor (`mineru-standard@4.2.3`);
+  MinerU 3.x runs wrote `mineru-<backend>@<ver>` (`mineru-vlm@3.2.3`).
 - `mammoth+markdownify@<ver>` — default DOCX extractor (no math).
 - `pandoc@<ver>` — DOCX extractor used when source has OOXML math and pandoc
   is available; math is preserved as `$...$` / `$$...$$` LaTeX. Also the
@@ -567,6 +576,53 @@ Static template at `skills/doc2kb/assets/agents_template.md` is copied to
 `<kb_dir>/AGENTS.md` verbatim. It instructs the second-session agent on
 reading order (INDEX → manifest → docs as needed), citation policy, and
 warning interpretation.
+
+## `_index.db` search index
+
+Built by `index_kb.py` (Phase 4.5), queried by `query_kb.py` / `<kb_dir>/_query.py`.
+SQLite, read-only for the searcher. Schema version 2:
+
+| table | content |
+|---|---|
+| `meta(key, value)` | `schema_version` (`2`), `analyzer` (`snowball-ru-en-1`), `fts` (`1`/`0`), `corpus_signature`, `indexer`, `created_at`, `chunk_target_tokens`, `chunk_max_tokens`, `documents`, `chunks` |
+| `docs` | one row per logical document: `doc_id`, `source_path`, `kb_path` (shard folder → its `_index.md`), `source_type`, `sha256`, `tokens_estimated`, `n_chunks`, `keywords` (top TF-IDF stems, shown as their most frequent surface form) |
+| `chunks` | one row per passage, **verbatim** source text: `chunk_id`, `doc_id`, `source_path`, `kb_path`, `source_type`, `page`, `heading` (path `A › B`), `ord`, `tokens`, `context` (`Doc title › heading path › page N`), `body` |
+| `chunks_fts` | only when the building CPython's SQLite has FTS5: `fts5(context, body, content='', tokenize='ascii')`, `rowid = chunk_id` |
+
+**Analysis happens in Python, not in SQLite.** FTS5's `porter` tokenizer stems
+English only and custom tokenizers need SQLite's C API, which stdlib `sqlite3`
+cannot reach. So `query_kb.analyze()` — the one function both scripts import —
+turns text into terms, and `chunks_fts` stores `" ".join(analyze(context))` /
+`" ".join(analyze(body))`:
+
+1. **fold** — NFC, lowercase, strip diacritics from Latin letters only
+   (`café`→`cafe`, `ﬁ`→`fi`, `№`→`no`); Cyrillic is never decomposed (`й`, `ё`
+   stay); standalone combining marks are dropped (Russian stress accents:
+   `зна́ние`→`знание`).
+2. **tokenize** — runs of `[0-9A-Za-z]`, Latin-1/Extended letters and Cyrillic
+   letters.
+3. **stem** — `[а-яё]+` → Snowball Russian (`ё`→`е`), `[a-z]+` → Snowball English
+   (Porter2); digits, mixed and other tokens verbatim. Pure-Python ports of the
+   Snowball 3.1.1 algorithms (BSD-3-Clause, notice in `query_kb.py`).
+
+The `ascii` tokenizer splits only on ASCII non-alphanumerics and folds only ASCII
+case, so FTS5's terms are exactly the analyzer's tokens. `chunks_fts` is
+contentless: snippets are cut from `chunks.body` in Python, with the words whose
+analysis matches a query term wrapped in `«»`. The query goes through the same
+`analyze()` (stopwords dropped on surface forms first); `--raw` MATCH
+expressions keep their syntax and have only their terms analyzed (a prefix
+`управлени*` is stemmed to `"управлен"*`).
+
+Ranking is FTS5 `bm25(chunks_fts, 2.0, 1.0)` (contextual header 2× body), ties
+by `chunk_id`. Without FTS5 the searcher analyzes `chunks` on the fly and
+applies the same formula (k1 = 1.2, b = 0.75, IDF `ln((N−n+0.5)/(n+0.5))`
+floored at 1e-6, statistics over the whole table) — identical ranking, slower.
+
+`analyzer` is part of `corpus_signature`: any change to fold/tokenize/stem bumps
+`query_kb.ANALYZER`, and the next `index_kb.py` run rebuilds. A searcher refuses
+an index whose `analyzer` differs from its own; an index without `analyzer`
+(schema 1, built before stemming) is searched unstemmed with a rebuild hint on
+stderr.
 
 ## Stdout JSON from each extract_*.py
 

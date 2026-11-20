@@ -60,6 +60,7 @@ from pathlib import Path
 
 from _embedded import EmbedSession  # noqa: E402
 from _common import (  # noqa: E402
+    MARKDOWNIFY_OPTIONS,
     add_assets_args,
     clean_whitespace,
     count_tokens,
@@ -228,8 +229,7 @@ def _extract_via_mammoth(
             warnings.append(f"mammoth: {mm}"[:200])
 
     # HTML → Markdown. heading_style=ATX renders "# heading" instead of underline.
-    md = md_from_html(html, heading_style="ATX", bullets="-",
-                      strip=["style", "script"])
+    md = md_from_html(html, bullets="-", strip=["style", "script"], **MARKDOWNIFY_OPTIONS)
     body = clean_whitespace(md)
     return body, warnings, assets
 

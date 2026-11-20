@@ -13,7 +13,7 @@ invocation = this file does nothing.
 
 Steps (all idempotent):
   1. popo_home = $DOC2KB_POPO_REPO, else <skill-state-dir>/popo/MinerU-Popo.
-  2. git clone opendatalab/MinerU-Popo (shallow, branch master) if absent.
+  2. fetch opendatalab/MinerU-Popo at the pinned POPO_COMMIT if absent.
   3. Create a dedicated env at <popo_home>/.venv — priority uv → conda → venv,
      targeting Python 3.10 (Popo's pin). Popo's bash scripts call `python3` from
      PATH (no `conda activate`), so postprocess_popo prepends this env's bin/ to
@@ -35,7 +35,7 @@ Steps (all idempotent):
      model — its real form is os.environ.get("POPO_MODEL_PATH", "popo_model"); we
      pin the default to the downloaded dir (postprocess_popo also exports the env).
   7. Record the env python at <popo_home>/.doc2kb-popo-python (the sentinel
-     postprocess_popo reads to PATH-inject the env).
+     postprocess_popo reads; it runs Popo's entry points with that python).
 
 CLI:
     bootstrap_popo.py [--popo-home <dir>] [--skip-model] [--force-model]
@@ -57,8 +57,11 @@ from ensure_env import _skill_state_dir, have
 
 
 POPO_GIT_URL = "https://github.com/opendatalab/MinerU-Popo.git"
-POPO_BRANCH = "master"
+# Pinned commit (never a branch): the tree the macOS patches below and the
+# ~22 tok/s measurement were verified on. Bump deliberately after re-testing.
+POPO_COMMIT = "0484604e2801d9a48d6245758d584608bc09ba39"
 HF_MODEL_REPO = "DreamEternal/MinerU-Popo"
+HF_MODEL_REV = "af75342abdc5cbd461264521c9ef46719ff74190"
 MODEL_SUBDIR = "models/Mineru-Popo"
 PY_SENTINEL = ".doc2kb-popo-python"
 
@@ -85,17 +88,20 @@ def _venv_python(env_dir: Path) -> Path:
 
 def _clone(popo_home: Path) -> None:
     if (popo_home / ".git").is_dir():
-        log(f"Popo repo already present at {popo_home}")
+        head = subprocess.run(["git", "-C", str(popo_home), "rev-parse", "HEAD"],
+                              capture_output=True, text=True).stdout.strip()
+        note = "" if head == POPO_COMMIT else f" at {head[:12] or '?'}, not the pinned {POPO_COMMIT[:12]}"
+        log(f"Popo repo already present at {popo_home}{note}")
         return
     if not have("git"):
         raise RuntimeError("git not found on PATH — install git, then re-run")
-    popo_home.parent.mkdir(parents=True, exist_ok=True)
-    log(f"Cloning {POPO_GIT_URL} (branch {POPO_BRANCH}) → {popo_home}")
-    subprocess.run(
-        ["git", "clone", "--depth", "1", "--branch", POPO_BRANCH,
-         POPO_GIT_URL, str(popo_home)],
-        check=True,
-    )
+    popo_home.mkdir(parents=True, exist_ok=True)
+    log(f"Fetching {POPO_GIT_URL} @ {POPO_COMMIT[:12]} → {popo_home}")
+    git = ["git", "-C", str(popo_home)]
+    subprocess.run(["git", "init", "-q", str(popo_home)], check=True)
+    subprocess.run([*git, "remote", "add", "origin", POPO_GIT_URL], check=True)
+    subprocess.run([*git, "fetch", "-q", "--depth", "1", "origin", POPO_COMMIT], check=True)
+    subprocess.run([*git, "checkout", "-q", "FETCH_HEAD"], check=True)
 
 
 def _create_env(env_dir: Path) -> Path:
@@ -193,7 +199,7 @@ def _download_model(py: Path, popo_home: Path, force: bool) -> Path:
     # completes the download rather than restarting it.
     snippet = (
         "from huggingface_hub import snapshot_download; "
-        f"snapshot_download(repo_id={HF_MODEL_REPO!r}, "
+        f"snapshot_download(repo_id={HF_MODEL_REPO!r}, revision={HF_MODEL_REV!r}, "
         f"local_dir={str(model_dir)!r})"
     )
     subprocess.run([str(py), "-c", snippet], check=True)

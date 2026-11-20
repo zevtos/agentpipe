@@ -1,28 +1,29 @@
-# Opt-in heavy tier — VLM-grade PDF parsing via opendatalab/MinerU.
+# Opt-in heavy tier — VLM-grade PDF parsing via opendatalab/MinerU 4.
 #
 # Install with:
 #     python3 <skill_dir>/scripts/ensure_env.py --tier mineru
 #
-# Default doc2kb bootstrap does NOT read this file. Adding `mineru[all]` to
-# the lightweight tier would pull torch + transformers + ~3 GB of CV models
-# into every `ensure_env.py` run, which we explicitly do not want.
+# Installed into its OWN venv (<state>/mineru/venv, Python 3.13), never the
+# shared lightweight one (torch + transformers + llama.cpp, and the 3.x line
+# shipped a python-pptx fork that overwrote extract_pptx.py's `pptx`).
+# After the pip step ensure_env runs `_mineru_driver.py setup`, which fetches
+# the `standard` tier models (~2 GB: MinerU-4_models_torch +
+# MinerU2.5-Pro-2605-1.2B-GGUF) into <state>/mineru/models.
 #
-# Apple Silicon notes:
-#   - `mlx-vlm` is the package mineru's auto-engine selector probes for to
-#     decide between mlx-engine and the much slower transformers fallback
-#     (see mineru/utils/engine_utils.py::_select_mac_engine). Pin it
-#     explicitly so we don't silently regress when mineru drops it from
-#     its transitive deps.
-#   - `mlx` + `mlx-lm` are needed by mineru_vl_utils.mlx_compat for actual
-#     inference and by the LLM-aided title hierarchy feature (when used).
-#   - `sys_platform == "darwin"` markers keep Linux/Windows installs from
-#     trying to pull MLX wheels that aren't published for them; mineru on
-#     those platforms uses CUDA or pure-CPU pipeline backends instead.
-mineru[all]>=2.5,<4.0
-mlx-vlm; sys_platform == "darwin"
-# Pin mlx below 0.32 — version 0.31.2 introduced a regression where the
-# mlx-engine throws "RuntimeError: There is no Stream(gpu, N) in current
-# thread" inside multi-threaded inference; confirmed safe range is the
-# 0.31.x line up to but not including 0.32. See MinerU discussion #4842.
-mlx>=0.31,<0.32; sys_platform == "darwin"
-mlx-lm; sys_platform == "darwin"
+# MinerU 4 (not 3.x): measured on 30 Russian pages (scanned ГОСТ, LaTeX lab
+# report, two slide decks; Apple M5 Pro) the `standard` tier read Cyrillic at
+# 0.20 % CER vs 0.27 % for 3.2.3 vlm-auto-engine, got 9/11 display formulas vs
+# 7/11, and ran 3.5 s/page vs 16.2 s/page. 4.x also fixes the 3.4 pipeline
+# subscript-digit loss (MinerU #5540). The `basic` tier reads no Cyrillic at
+# all — extract_pdf_mineru.py defaults to `standard` and warns on `basic`.
+#
+# The base package carries everything the standard tier needs on every
+# platform: ONNX + llama.cpp (mineru-llama-cpp) for the VLM, and on Apple
+# Silicon torch for the small models (MPS). No mlx / mlx-vlm / mlx-lm any more —
+# 4.x runs its VLM through llama.cpp on Metal. CUDA hosts that want
+# vLLM/lmdeploy can install `mineru[full]` into this venv themselves.
+#
+# Held on 4.2.x: extract_pdf_mineru.py / _mineru_driver.py use the 4.2
+# `mineru.parser.parse` SDK, ParseResult.save's markdown.md / middle_json.json
+# / images/ layout and mineru.render.render_content_list (Content List V1).
+mineru>=4.2.3,<4.3

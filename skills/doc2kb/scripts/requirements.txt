@@ -1,48 +1,71 @@
 # Lightweight tier. Upper bounds keep us off bleeding-edge majors that may
 # break parsers; pikepdf and lxml are explicitly capped because their C
 # dependencies (qpdf, libxml2) have a history of CVEs that warrant a
-# deliberate upgrade rather than a pip-pulled patch.
-pymupdf4llm>=0.0.17,<2.0
-pdfplumber>=0.11.0,<1.0
-pypdf>=4.0.0,<7.0
-pikepdf>=8.15,<11.0
+# deliberate upgrade rather than a pip-pulled patch. Floors are the oldest
+# release with the fixes we rely on (2026-11 audit): pdfplumber 0.11.10 pins a
+# pdfminer.six without the CMap-pickle code execution (CVE-2025-64512 /
+# CVE-2025-70559); mammoth 1.13 is past the external-image local-file read
+# (CVE-2025-11849, fixed in 1.11) and a regex DoS; Pillow 13 fixes ~45 CVEs
+# (JPEG decoder overflow, WMF/EMF out-of-bounds read); markdownify 1.2.4 and
+# striprtf 0.0.35 drop quadratic-time scans; pikepdf 10.16 bundles qpdf 12.4.
+# pypdf is not used by any extractor and is no longer installed (the mineru
+# tier brings its own).
+#
+# PyMuPDF 2.x ships the pymupdf4llm and layout code inside the `pymupdf` wheel
+# (the `pymupdf4llm` / `pymupdf-layout` packages it pins are empty shims), so
+# `import pymupdf4llm` and `pymupdf4llm.helpers.document_layout` keep working.
+# An existing 1.x venv upgrades in one resolver transaction and keeps the
+# module files.
+pymupdf>=2.1,<3.0
+pdfplumber>=0.11.10,<1.0
+pikepdf>=10.16,<11.0
 python-magic>=0.4.27,<1.0
-python-docx>=1.1.0,<2.0
-mammoth>=1.6.0,<2.0
-python-pptx>=0.6.23,<2.0
-openpyxl>=3.1.0,<4.0
+python-docx>=1.2.0,<2.0
+mammoth>=1.13.0,<2.0
+python-pptx>=1.0.2,<2.0
+# Minor-capped: extract_xlsx.py drives openpyxl's private WorkSheetParser and
+# its oxml DEFUSEDXML/LXML switches, which a 3.2 could change.
+openpyxl>=3.1.5,<3.2
 # defusedxml is what openpyxl parses untrusted workbooks through: with it
 # installed (and OPENPYXL_LXML=False, which extract_xlsx.py sets) every
 # fromstring/iterparse is defusedxml's, so entity declarations and external
 # references raise instead of expanding. extract_xlsx.py refuses to run when
 # openpyxl did not pick it up.
 defusedxml>=0.7.1,<1.0
-trafilatura>=1.12.0,<3.0
+# trafilatura held on 2.1.x, the newest line that keeps text verbatim: 2.2
+# dedups repeated segments with no option to keep them (a second card titled
+# "Теория при λ = 2" vanished from a page), and 2.3 CommonMark-escapes prose
+# (`u_exp = u[:N]` → `u\_exp = u\[:N\]`), also without a switch. 2.1 needs
+# lxml ≥ 6.1.1 and extracts the same words as 2.0.
+trafilatura>=2.1.0,<2.2
 # markdownify powers the HTML extractor's fallback AND the pure-Python EPUB
 # route (extract_epub.py walks the OPF spine via stdlib zipfile/ElementTree and
 # markdownifies each XHTML chapter). pandoc remains the preferred EPUB route
 # when on PATH; no new dependency is needed for the lightweight EPUB path.
-markdownify>=0.13.0,<2.0
-charset-normalizer>=3.3.0,<4.0
+markdownify>=1.2.4,<2.0
+charset-normalizer>=3.5.2,<4.0
 # striprtf powers the pure-Python RTF fallback (extract_rtf.py) when pandoc is
 # absent. Tiny, dependency-free, plain-text only — pandoc remains the
 # preferred RTF route when on PATH. Legacy .doc has no pure-Python reader and
 # relies on a system converter (soffice/textutil/antiword), so nothing is
 # pinned here for it.
-striprtf>=0.0.26,<1.0
+striprtf>=0.0.35,<1.0
 # Pillow powers save_image_safe() — every extractor funnels image bytes
 # through it to enforce the 2000-px max-dimension cap (Claude's vision
 # encoder breaks above ~2 k px) and to re-encode palette/RGBA images that
 # would otherwise be unviewable. Pillow is a transitive dep of pymupdf and
 # pymupdf-layout but we pin it explicitly so the lightweight tier stays
 # resilient if a future pymupdf release drops the dependency.
-Pillow>=10.0,<14.0
+Pillow>=13.0,<14.0
 tiktoken>=0.7.0,<1.0
 # olefile reads OLE2 compound files: the `oleObject*.bin` wrappers Office uses
 # for embedded objects (OLE Package, Acrobat CONTENTS, a whole .doc). Pure
 # Python, no C extension, ~100 KB. _embedded.py needs it to recurse into
 # embedded documents; without it those objects are listed as unread.
-olefile>=0.46,<1.0
-# Pin lxml — transitive dep of trafilatura, historically XXE-vulnerable
-# before 4.9. Capping below 6 keeps us on tested majors.
-lxml>=4.9,<6.0
+olefile>=0.47,<1.0
+# Pin lxml — transitive dep of trafilatura, historically XXE-vulnerable.
+# 6.1.0 closes an XXE default in iterparse (CVE-2026-41066) and 6.1.3 blocks
+# external parameter entities; its wheels bundle libxml2 2.14 (5.4 had no
+# cp314 wheel and built against macOS's libxml2 2.9.13). trafilatura ≥ 2.1 and
+# htmldate need lxml ≥ 6.1, so the old `<6` cap also held trafilatura at 2.0.0.
+lxml>=6.1.3,<7.0

@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 from _common import (  # noqa: E402
+    MARKDOWNIFY_OPTIONS,
     clean_whitespace,
     count_tokens,
     detect_text_encoding,
@@ -70,8 +71,7 @@ def _fallback_markdownify(html_text: str) -> str:
     except Exception:
         return ""
     try:
-        return md_from_html(html_text, heading_style="ATX",
-                            strip=["script", "style"])
+        return md_from_html(html_text, strip=["script", "style"], **MARKDOWNIFY_OPTIONS)
     except Exception:
         return ""
 

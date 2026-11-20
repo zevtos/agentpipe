@@ -2,18 +2,19 @@
 """
 extract_pdf_mineru.py — opt-in VLM-grade PDF extractor for doc2kb.
 
-Wraps the `mineru` CLI (opendatalab/MinerU 2.5+) and reshapes its output to
-the same single-file Markdown contract every other extract_*.py honours:
-one `<kb_dir>/docs/<doc_id>-<slug>.md` with YAML frontmatter + body, images
+Drives MinerU 4 (opendatalab/MinerU, `standard` tier: small layout models +
+the MinerU2.5-Pro VLM) through `_mineru_driver.py`, which runs inside the
+tier's own venv, and reshapes its output to the same single-file Markdown
+contract every other extract_*.py honours: one
+`<kb_dir>/docs/<doc_id>-<slug>.md` with YAML frontmatter + body, images
 copied into `<kb_dir>/assets/` through `save_image_safe`, and a single JSON
 line on stdout — `{ok, out, tokens_estimated, warnings, ...}`.
 
 When to use:
     Image-only PDFs (scanned documents, photo-of-page exports), or text-layer
     PDFs whose pymupdf4llm run flagged `mangled_visual_layout` /
-    `dropped_pictures` warnings — the VLM backend reads positioned math as
-    LaTeX and renders complex layouts more faithfully than text-layer
-    extraction can.
+    `dropped_pictures` warnings — the VLM reads positioned math as LaTeX and
+    renders complex layouts more faithfully than text-layer extraction can.
 
     For documents where most pages came out clean from pymupdf4llm but a
     handful of pages dropped vector math/diagrams, use `--pages 2,18-19,35`
@@ -31,68 +32,68 @@ CLI:
     extract_pdf_mineru.py <input_pdf> <output_md>
                           [--doc-id doc-NNN]
                           [--source-rel relative/path/in/corpus.pdf]
-                          [--backend auto|pipeline|vlm-auto-engine]
-                          [--lang cyrillic|en|ch|...]
+                          [--tier standard|advanced|basic]
+                          [--ocr-mode ocr|auto|txt]
                           [--assets-dir <abs_path>]
                           [--assets-rel <rel_prefix_from_md>]
                           [--mineru-cache-dir <abs_path>]
-                          [--mineru-bin <path>]
+                          [--mineru-python <path>]
                           [--keep-raw]
                           [--pages 2,18-19,35]
                           [--patch-into TARGET_MD] [--force-patch]
                           [--no-mineru-asset-suffix]
+    Legacy 3.x flags still accepted: `--backend` (vlm-auto-engine,
+    hybrid-auto-engine, auto, pipeline → all run `standard`), `--lang`
+    (MinerU 4 has no OCR language setting; ignored with a warning) and
+    `--mineru-bin` (its sibling `python` is used).
 
 Prerequisites:
-    The `mineru` CLI must be installed in the same venv as this script.
-    Install via:
+    The tier venv (<state>/mineru/venv) with MinerU 4 and its models:
         python3 <skill_dir>/scripts/ensure_env.py --tier mineru
-    If the CLI is missing the script exits 2 with that exact hint —
-    the parent loop should mark the file as `skip` and surface the warning
-    rather than crashing the corpus extraction.
+    If it is missing the script exits 2 with that exact hint — the parent
+    loop should mark the file as `skip` and surface the warning rather than
+    crashing the corpus extraction.
 
 Effect:
-    1. (Optional, when --pages is set) Slices the input PDF down to the
-       requested pages via pymupdf and feeds the subset to mineru. Page
-       anchors and asset filenames are remapped back to the original
-       page numbers automatically, so the caller never sees subset
-       indices.
-    2. Runs `mineru -p <input> -o <tmpdir> -b <backend> -l <lang>`.
-    3. Locates `<tmpdir>/<stem>/<backend>/<stem>.md` and
-       `_content_list.json` (MinerU's stable structured artefact).
-    4. Splits the markdown by page_idx → injects `[page N]` anchors
-       (remapped to original page numbers when --pages was used).
-    5. Copies images from `<tmpdir>/<stem>/<backend>/images/` into
-       `<kb_dir>/assets/<doc_id>-pageNN-img<n>.<ext>` via save_image_safe
-       and rewrites every Markdown image link in the body to point at
-       the renamed asset. When called via --pages, the filenames carry
-       an extra `-mineru-` infix
-       (`<doc_id>-page<orig:03d>-mineru-img<n>.<ext>`) so the mineru
-       assets never collide with pymupdf4llm's existing `<doc_id>-page<NN>-img<n>`
-       output for the same original document.
-    6. With `--patch-into <target.md>`, splices the extracted page
-       sections into the target md in place: each `[page N]` block in
-       the target is replaced with the new one, the frontmatter records
-       `mineru_patched_pages` and `extraction_method_supplementary`,
-       and no extra file is created. Without `--patch-into`, behaves
-       like the rest of the extractors and writes a standalone
+    1. Runs `<tier-venv>/python -I _mineru_driver.py parse <input> --out <tmp>
+       --tier <tier> --ocr-mode <mode> [--pages …]`. `--pages` goes to MinerU's
+       native page_range; MinerU keeps ORIGINAL page indices in its output, so
+       nothing is sliced or remapped.
+    2. Reads `<tmp>/markdown.md` and `<tmp>/content_list.json` (Content List
+       V1, rendered by the driver from the saved middle JSON).
+    3. Splits the markdown by page_idx → injects `[page N]` anchors.
+    4. Copies the images the markdown links (`images/page_<i>_<kind>_<n>.<ext>`)
+       into `<kb_dir>/assets/<doc_id>-pageNN-img<n>.<ext>` via save_image_safe
+       and rewrites the links. Equation/table crops that the body renders as
+       LaTeX/HTML are not copied. When called via --pages, the filenames
+       carry a `-mineru-` infix (`<doc_id>-page<orig:03d>-mineru-img<n>.<ext>`)
+       so they never collide with pymupdf4llm's `<doc_id>-page<NN>-img<n>`.
+    5. With `--patch-into <target.md>`, splices the extracted page sections
+       into the target md in place: each `[page N]` block in the target is
+       replaced with the new one, the frontmatter records
+       `mineru_patched_pages` and `extraction_method_supplementary`, and no
+       extra file is created. Without `--patch-into`, writes a standalone
        `<output_md>` (still page-targeted when `--pages` is set).
-    7. Optionally preserves the raw mineru output under
-       `<kb_dir>/_mineru/<doc_id>/` so a follow-up `postprocess_popo.py`
-       run can consume it (Popo's `post-process/mineru/<run>/` input
-       format expects exactly what MinerU emitted, so we avoid having to
-       re-extract).
+    6. With `--keep-raw`, preserves MinerU's output under
+       `<kb_dir>/_mineru/<doc_id>/vlm/` and adds the Content List V1 as
+       `<doc_id>_content_list.json` — the name MinerU-Popo's MinerU reader
+       looks up — so a follow-up `postprocess_popo.py` run can consume it
+       without re-extracting. MinerU 4's middle JSON (schema 2.0) is kept as
+       `middle_json.json`, never as `<doc_id>_middle.json`, which Popo would
+       parse with its 3.x reader. The source PDF is copied next to `vlm/` as
+       `<doc_id>.pdf`: Popo renders its pages for the VLM, and this copy is
+       the exact file MinerU parsed (page numbers line up).
 
 Frontmatter contract:
     Same shape as extract_pdf_pymupdf4llm.py — only `extraction_method`
-    distinguishes the backend (`mineru-<backend>@<mineru_version>`).
+    distinguishes the backend (`mineru-<tier>@<mineru_version>`).
     Patch mode additionally writes:
       - `mineru_patched_pages: [N, …]` — sorted list of patched pages
-      - `extraction_method_supplementary: mineru-<backend>@<version>`
+      - `extraction_method_supplementary: mineru-<tier>@<version>`
 """
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -124,196 +125,171 @@ from _common import (  # noqa: E402
 
 
 EXTRACTOR_NAME = "mineru"
-# Supported backends. MinerU 3.1.x exposes:
-#   pipeline           — CPU/GPU CV stack, no VLM, most permissive
-#   vlm-auto-engine    — local VLM (vLLM/LMDeploy on Linux, MLX on darwin
-#                        when mlx-lm is installed)
-#   hybrid-auto-engine — pipeline layout + VLM crops, MinerU's CLI default
-#   vlm-http-client    — talks to a remote vlm server
-#   hybrid-http-client — talks to a remote hybrid server
-# We default to `vlm-auto-engine`, which on Apple Silicon picks the MLX
-# backend (`mlx-engine`) via mineru/utils/engine_utils.py. Measured
-# back-to-back on M5 Pro / 24 GB, lab2_advanced.pdf (10 pages, math-heavy):
-#   vlm-auto-engine    206 s real, clean `$X_{sp}$` LaTeX
-#   hybrid-auto-engine 243 s real, `$X _ { s p } ,$` (extra spaces and
-#                                    occasional trailing-punct adhesion)
-# Both backends sit in the same 3-4 min ballpark on this hardware class
-# — VLM inference is the bottleneck regardless of which path mineru
-# takes. vlm-auto-engine wins by ~18% wall time AND produces noticeably
-# cleaner LaTeX (no spurious spaces in subscripts, no trailing-punct
-# adhesion). On CUDA Linux servers without MLX, hybrid is reportedly
-# 2-3× faster than VLM — flip the default there if you fork this skill.
-# `auto` is accepted as a friendly alias.
-SUPPORTED_BACKENDS = (
-    "auto",
-    "pipeline",
-    "vlm-auto-engine",
-    "hybrid-auto-engine",
-)
-_BACKEND_ALIASES = {"auto": "vlm-auto-engine"}
-DEFAULT_BACKEND = "vlm-auto-engine"
-DEFAULT_LANG = "cyrillic"  # doc2kb users primarily work with RU/EN material
-# Time budget for the mineru subprocess. VLM runs at ~0.5–2 s/page on Apple
-# Silicon and the pipeline backend at ~1–3 s/page on CPU — even a 500-page
-# document fits inside 60 minutes with a generous safety margin.
+DRIVER = Path(__file__).resolve().with_name("_mineru_driver.py")
+# MinerU 4 quality tiers (the `flash` tier is text-layer only and not offered).
+# Measured on 30 Russian pages (scanned ГОСТ, LaTeX lab report, two slide
+# decks), Apple M5 Pro / 24 GB, see references/mineru.md:
+#   standard  0.20 % Cyrillic CER, 9/11 formulas, 3.5 s/page (llama.cpp VLM)
+#   basic     no Cyrillic at all — its OCR model has no Cyrillic recognizer,
+#             Russian text comes out as bare digits and punctuation
+# `advanced` uses the standard models with more inference compute.
+SUPPORTED_TIERS = ("standard", "advanced", "basic")
+DEFAULT_TIER = "standard"
+# 3.x backend names, still accepted from old `_overrides.json` files and CLIs.
+# `pipeline` maps to standard as well: its 4.x successor (`basic`) would
+# silently drop every Cyrillic word.
+_LEGACY_BACKEND_TIERS = {
+    "auto": "standard",
+    "vlm-auto-engine": "standard",
+    "hybrid-auto-engine": "standard",
+    "pipeline": "standard",
+}
+SUPPORTED_BACKENDS = tuple(_LEGACY_BACKEND_TIERS)
+# "ocr": the VLM reads every block. "auto" would take text from the PDF text
+# layer, which keeps line-break hyphenation and flattened a 6-column table to
+# 2 columns on a LaTeX report — the very pages page-patching exists to repair.
+OCR_MODES = ("ocr", "auto", "txt")
+DEFAULT_OCR_MODE = "ocr"
+# Time budget for the driver subprocess. standard runs ~2.5–3.5 s/page on
+# Apple Silicon plus ~10 s of model setup — a 500-page document fits inside
+# 60 minutes with a wide margin.
 MINERU_TIMEOUT_SECONDS = 3600
 
 INSTALL_HINT = (
-    "MinerU CLI not found. Install the opt-in tier:\n"
+    "MinerU tier not installed. Install the opt-in tier (its own venv, "
+    "<state>/mineru/venv, MinerU 4 + ~2 GB of models):\n"
     "    python3 <skill_dir>/scripts/ensure_env.py --tier mineru\n"
-    "Or install manually into the active venv:\n"
-    "    uv pip install -U 'mineru[all]'\n"
-    "    # macOS Apple Silicon: also `uv pip install -U mlx mlx-lm`"
+    "Or point --mineru-python at a Python that has mineru>=4.2 installed."
 )
 
 
-def _slice_pdf(
-    src: Path,
-    pages: list[int],
-    tmp_dir: Path,
-) -> tuple[Path, dict[int, int]]:
-    """Carve `pages` (1-indexed, original PDF) into a new tiny PDF inside
-    `tmp_dir`. Returns (subset_path, subset_to_original) where
-    `subset_to_original[k]` (k 1-indexed in the subset) gives the original
-    page number.
+def _resolve_tier(tier: str | None, backend: str | None,
+                  warnings: list[str]) -> str:
+    """--tier wins; a legacy --backend maps onto a tier with a note."""
+    if tier:
+        resolved = tier
+    elif backend:
+        resolved = _LEGACY_BACKEND_TIERS[backend]
+        warnings.append(
+            f"--backend {backend} is a MinerU 3.x name; ran MinerU 4 tier "
+            f"'{resolved}'")
+    else:
+        resolved = DEFAULT_TIER
+    if resolved == "basic":
+        warnings.append(
+            "MinerU 4 'basic' tier has no Cyrillic OCR: Russian text comes out "
+            "empty. Use --tier standard for anything non-Latin.")
+    return resolved
 
-    Page numbers above the document's page count or below 1 raise
-    ValueError so the caller can surface a clear error to the user.
-    """
+
+def _check_pages(src: Path, pages: list[int]) -> None:
+    """Fail early with a clear message when --pages names pages the PDF
+    does not have (MinerU's own page_range error is less specific)."""
     import pymupdf  # type: ignore — provided by the lightweight tier
 
-    src_doc = pymupdf.open(str(src))
-    try:
-        page_count = src_doc.page_count
-        invalid = [p for p in pages if p < 1 or p > page_count]
-        if invalid:
-            raise ValueError(
-                f"requested pages out of range for {src.name} "
-                f"(1..{page_count}): {invalid}"
-            )
-        # Stable name keyed on the original stem + selected pages so the
-        # `mineru` output filenames stay identifiable in logs.
-        digest = hashlib.sha1(
-            (src.stem + "|" + ",".join(str(p) for p in pages)).encode()
-        ).hexdigest()[:8]
-        subset_path = tmp_dir / f"{src.stem}-pages-{digest}.pdf"
-        subset_doc = pymupdf.open()
-        subset_to_original: dict[int, int] = {}
-        for new_index, original_page in enumerate(pages, start=1):
-            subset_doc.insert_pdf(
-                src_doc,
-                from_page=original_page - 1,
-                to_page=original_page - 1,
-            )
-            subset_to_original[new_index] = original_page
-        subset_doc.save(str(subset_path))
-        subset_doc.close()
-    finally:
-        src_doc.close()
-    return subset_path, subset_to_original
+    with pymupdf.open(str(src)) as doc:
+        page_count = doc.page_count
+    invalid = [p for p in pages if p < 1 or p > page_count]
+    if invalid:
+        raise ValueError(
+            f"requested pages out of range for {src.name} "
+            f"(1..{page_count}): {invalid}"
+        )
 
 
-def _mineru_executable(override: str | None = None) -> str | None:
-    """Resolve the mineru binary. Prefer an explicit `--mineru-bin` arg,
-    then look on PATH (which inside ensure_env.py points at the venv's
-    `bin/`). Returns None if mineru isn't available.
+def _mineru_python(override: str | None = None,
+                   legacy_bin: str | None = None) -> tuple[str, str | None] | None:
+    """Resolve (python, models_dir) for the driver: an explicit
+    `--mineru-python`, else the sibling `python` of a legacy `--mineru-bin`,
+    else the `--tier mineru` venv (<state>/mineru/venv) with its models dir
+    (<state>/mineru/models). Returns None when none is usable.
+
+    A user-supplied interpreter keeps MinerU's own model location (~/.mineru)
+    — models_dir is only pinned for the tier venv this skill manages.
     """
+    if legacy_bin and not override:
+        b = Path(legacy_bin).expanduser()
+        override = str(b.with_name("python.exe" if os.name == "nt" else "python"))
     if override:
         candidate = Path(override).expanduser()
         if candidate.is_file() and os.access(candidate, os.X_OK):
-            return str(candidate)
+            return str(candidate), None
         return None
-    return shutil.which("mineru")
-
-
-def _mineru_version(binary: str) -> str:
-    """Best-effort version string. MinerU's CLI exposes `--version`. We
-    fail soft because the rest of the pipeline only needs this for the
-    frontmatter audit trail; an unknown version doesn't block extraction.
-    """
     try:
-        out = subprocess.run(
-            [binary, "--version"], capture_output=True, text=True,
-            timeout=15, check=False,
-        )
-    except (subprocess.SubprocessError, OSError):
-        return "unknown"
-    text = (out.stdout or out.stderr or "").strip()
-    if not text:
-        return "unknown"
-    # `mineru, version 3.1.0` → "3.1.0"
-    match = re.search(r"\b(\d+\.\d+(?:\.\d+)?)", text)
-    return match.group(1) if match else text.splitlines()[0][:32]
+        import ensure_env  # noqa: E402 — stdlib-only, next to this script
+        if ensure_env.isolated_ready("mineru"):
+            return (str(ensure_env.isolated_python("mineru")),
+                    str(ensure_env.isolated_models_dir("mineru")))
+    except Exception:  # noqa: BLE001 — treat as "not installed"
+        pass
+    return None
 
 
-def _run_mineru(
-    binary: str,
-    input_pdf: Path,
-    out_dir: Path,
-    backend: str,
-    lang: str | None,
-) -> tuple[int, str, str]:
-    """Invoke mineru and return (exit_code, stdout, stderr).
+def _run_driver(python: str, input_pdf: Path, out_dir: Path, tier: str,
+                ocr_mode: str, pages: list[int] | None,
+                models_dir: str | None) -> dict:
+    """Run `_mineru_driver.py parse` and return its JSON line. Raises
+    RuntimeError on a non-zero exit, a timeout, or an unreadable reply.
 
-    mineru handles its own progress output on stderr, so we capture it for
-    the caller to surface in warnings on failure. Timeout is enforced —
-    a stuck VLM job shouldn't block the parent corpus run forever.
+    MinerU logs progress on stderr; it is captured and its tail surfaced on
+    failure. `-I` keeps this scripts dir off the tier venv's sys.path.
     """
-    resolved_backend = _BACKEND_ALIASES.get(backend, backend)
-    cmd = [binary, "-p", str(input_pdf), "-o", str(out_dir), "-b", resolved_backend]
-    if lang:
-        cmd.extend(["-l", lang])
+    cmd = [python, "-I", str(DRIVER), "parse", str(input_pdf),
+           "--out", str(out_dir), "--tier", tier, "--ocr-mode", ocr_mode]
+    if pages:
+        cmd += ["--pages", format_page_list(pages).replace(" ", "")]
+    if models_dir:
+        cmd += ["--models-dir", models_dir]
     log(f"$ {' '.join(cmd)}", prefix="mineru")
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True,
-            timeout=MINERU_TIMEOUT_SECONDS, check=False,
+            cmd, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=MINERU_TIMEOUT_SECONDS, check=False,
         )
-    except subprocess.TimeoutExpired:
-        return 124, "", (
-            f"mineru exceeded the {MINERU_TIMEOUT_SECONDS}-second timeout"
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            f"mineru exceeded the {MINERU_TIMEOUT_SECONDS}-second timeout") from e
+    reply: dict = {}
+    for line in reversed((proc.stdout or "").splitlines()):
+        if line.startswith("{"):
+            try:
+                reply = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            break
+    if proc.returncode != 0 or not reply.get("ok"):
+        tail = "\n".join((proc.stderr or "").splitlines()[-12:])
+        reason = reply.get("error") or tail or "no output captured"
+        raise RuntimeError(f"mineru driver exited with code {proc.returncode}: {reason}")
+    return reply
+
+
+def _locate_outputs(out_dir: Path) -> dict[str, Path]:
+    """MinerU 4's saved result: `markdown.md`, `middle_json.json`,
+    `structured_content.json`, `images/`, plus the driver's
+    `content_list.json`. Raises RuntimeError when the markdown is missing."""
+    md = out_dir / "markdown.md"
+    if not md.is_file():
+        raise RuntimeError(
+            f"mineru produced no markdown; output tree was "
+            f"{sorted(p.name for p in out_dir.iterdir()) if out_dir.exists() else 'missing'}"
         )
-    return proc.returncode, proc.stdout or "", proc.stderr or ""
-
-
-def _locate_outputs(out_dir: Path, stem: str, backend: str) -> dict[str, Path]:
-    """Find MinerU's per-document outputs.
-
-    MinerU writes `<out_dir>/<stem>/<resolved_backend>/<stem>.md` plus
-    `_content_list.json`, `_middle.json`, and an `images/` sibling. The
-    backend folder name reflects MinerU's *resolved* backend (e.g. `auto`
-    becomes `vlm` or `pipeline` after device detection), so we glob for
-    any subdir under `<out_dir>/<stem>/` that contains the markdown rather
-    than hard-coding the requested backend name.
-    """
-    doc_root = out_dir / stem
-    found: dict[str, Path] = {}
-    if not doc_root.is_dir():
-        return found
-    for backend_dir in sorted(doc_root.iterdir()):
-        if not backend_dir.is_dir():
-            continue
-        md = backend_dir / f"{stem}.md"
-        content_list = backend_dir / f"{stem}_content_list.json"
-        if md.is_file() and content_list.is_file():
-            found["resolved_backend"] = backend_dir  # type: ignore[assignment]
-            found["markdown"] = md
-            found["content_list"] = content_list
-            middle = backend_dir / f"{stem}_middle.json"
-            if middle.is_file():
-                found["middle"] = middle
-            images = backend_dir / "images"
-            if images.is_dir():
-                found["images"] = images
-            return found
+    found: dict[str, Path] = {"root": out_dir, "markdown": md}
+    for key, name in (("content_list", "content_list.json"),
+                      ("middle", "middle_json.json"), ("images", "images")):
+        p = out_dir / name
+        if p.exists():
+            found[key] = p
     return found
 
 
-# MinerU's markdown renders embedded images as Markdown links (`![](images/<hash>.jpg)`)
-# or as captioned HTML <img> tags. We catch both so the asset-rewrite pass
-# captures every reference even when the source PDF had hand-typed captions.
+# MinerU renders embedded images as Markdown links (`![](images/<name>.jpg)`)
+# or, inside tables, as HTML <img> tags. We catch both so the asset-rewrite
+# pass captures every reference.
 _MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(images/([^)\s]+)\)")
 _HTML_IMG_RE = re.compile(r'<img\s+[^>]*src=["\']images/([^"\']+)["\']', re.IGNORECASE)
+# MinerU 4 names materialized assets `page_<page_idx>_<kind>_<n>.<ext>`.
+_ASSET_PAGE_RE = re.compile(r"^page_(\d+)_")
 
 
 def _copy_images_and_rewrite(
@@ -323,28 +299,28 @@ def _copy_images_and_rewrite(
     assets_dir: Path,
     assets_rel_prefix: str,
     content_list: list[dict],
-    subset_to_original: dict[int, int] | None = None,
+    page_patch: bool = False,
     asset_suffix: str = "",
 ) -> tuple[str, list[str], list[str]]:
-    """Copy every image MinerU referenced into the kb assets dir and
-    rewrite the body so links point at the new filenames.
+    """Copy every image the markdown body links into the kb assets dir and
+    rewrite the links to the new filenames.
 
     Numbering follows page order (`<doc_id>-pageNN-imgM.<ext>`) so the
     asset names sort alongside the page anchors and match the scheme used
     by extract_pdf_pymupdf4llm.py — second-session agents see one
-    consistent naming convention regardless of which backend ran.
+    consistent naming convention regardless of which backend ran. Page
+    numbers come from content_list `page_idx` (original numbering, also
+    under --pages), falling back to MinerU's `page_<idx>_` filename prefix.
 
-    When `subset_to_original` is provided, MinerU's per-subset page indices
-    (1..K) are remapped to the original PDF page numbers so callers using
-    `--pages 2,34,221` get filenames keyed on the real page (`page002`,
-    `page034`, `page221`) rather than the subset index. Pages padded to
-    three digits in that mode to leave room for thousand-page books and
-    to visually distinguish from pymupdf4llm's two-digit padding.
+    Only images the body links are copied: MinerU 4's images/ also holds
+    crops of every equation and table, which the body already carries as
+    LaTeX / HTML — copying them would leak ghost assets into the kb.
 
-    `asset_suffix` (e.g. `"-mineru"`) is inserted between the page token
-    and `-img<n>` so mineru assets never overwrite an existing pymupdf4llm
-    asset with the same (doc_id, page, ordinal) tuple. Default empty
-    preserves backward-compatible naming.
+    `page_patch` pads page numbers to 3 digits so successive patch runs on
+    the same document keep stable filenames (patching [28] today and
+    [28, 142] tomorrow both write `doc-017-page028-mineru-imgM.ext`).
+    Full-document mode keeps the legacy 2-digit padding. `asset_suffix`
+    (e.g. `"-mineru"`) is inserted between the page token and `-img<n>`.
 
     Returns (rewritten_body, asset_relpaths, warnings).
     """
@@ -352,27 +328,29 @@ def _copy_images_and_rewrite(
     if images_src is None or not images_src.is_dir():
         return body, [], warnings
 
-    # Build mapping image_basename → (page_idx, ordinal_on_page) from the
-    # content list so renamed files keep their page provenance.
-    page_seq: dict[str, tuple[int, int]] = {}
-    per_page_counter: dict[int, int] = {}
+    linked = {Path(m).name for m in _MD_IMAGE_RE.findall(body)}
+    linked |= {Path(m).name for m in _HTML_IMG_RE.findall(body)}
+    if not linked:
+        return body, [], warnings
+
+    page_of: dict[str, int] = {}
+    order: list[str] = []
     for entry in content_list:
         if not isinstance(entry, dict):
             continue
         img_path = entry.get("img_path")
         if not isinstance(img_path, str) or not img_path:
             continue
-        # MinerU stores paths as `images/<hash>.<ext>` — keep just the base.
         basename = Path(img_path).name
-        if basename in page_seq:
+        if basename in page_of or basename not in linked:
             continue
-        page_idx_raw = entry.get("page_idx")
-        page_no = int(page_idx_raw) + 1 if isinstance(page_idx_raw, int) else 0
-        if subset_to_original and page_no in subset_to_original:
-            page_no = subset_to_original[page_no]
-        ordinal = per_page_counter.get(page_no, 0) + 1
-        per_page_counter[page_no] = ordinal
-        page_seq[basename] = (page_no, ordinal)
+        page_idx = entry.get("page_idx")
+        page_of[basename] = int(page_idx) + 1 if isinstance(page_idx, int) else 0
+        order.append(basename)
+    for basename in sorted(linked - set(page_of)):
+        m = _ASSET_PAGE_RE.match(basename)
+        page_of[basename] = int(m.group(1)) + 1 if m else 0
+        order.append(basename)
 
     try:
         assets_dir.mkdir(parents=True, exist_ok=True)
@@ -380,53 +358,28 @@ def _copy_images_and_rewrite(
         warnings.append(f"cannot create assets dir {assets_dir}: {e}")
         return body, [], warnings
 
+    page_pad = 3 if page_patch else 2
+    per_page_counter: dict[int, int] = {}
     rename_map: dict[str, str] = {}
     saved_relpaths: list[str] = []
-    seen_relpaths: set[str] = set()
     dedup_cache: dict[str, Path] = {}
-
-    # Padding width for page numbers in asset filenames.
-    #
-    # In page-patch mode (subset_to_original is set) we always pad to 3
-    # digits so successive runs against the same document produce
-    # consistent filenames regardless of the subset size — patching pages
-    # [28] today and pages [28, 142] tomorrow both write
-    # `doc-017-page028-mineru-imgM.ext`. Without this rule the same image
-    # would land under `page28` one day and `page028` the next, leaving
-    # broken references in the target md.
-    #
-    # In full-document mode (no subset) we keep the legacy 2-digit
-    # behaviour so existing kbs don't see their asset filenames change.
-    page_pad = 3 if subset_to_original else 2
-
-    # Copy only images referenced by content_list — MinerU's images/ dir
-    # also contains crops used internally by the VLM (formula glyphs,
-    # decorative elements) that aren't part of the document content.
-    # Without this filter a 10-page lab can leak 30+ ghost assets into
-    # the kb (observed on lab2_advanced.pdf: 7 real images vs 32 internal
-    # crops). Falling back to all-images would defeat the kb's purpose.
-    skipped_unreferenced = 0
-    for src in sorted(images_src.iterdir()):
+    for basename in sorted(order, key=lambda b: page_of[b]):
+        src = images_src / basename
         if not src.is_file():
-            continue
-        basename = src.name
-        if basename not in page_seq:
-            skipped_unreferenced += 1
+            warnings.append(f"image {basename} is linked but missing from mineru output")
             continue
         try:
             blob = src.read_bytes()
         except OSError as e:
             warnings.append(f"failed to read {basename}: {e}")
             continue
-        page_no, ordinal = page_seq[basename]
+        page_no = page_of[basename]
+        ordinal = per_page_counter.get(page_no, 0) + 1
+        per_page_counter[page_no] = ordinal
         ext = src.suffix.lower().lstrip(".") or "jpg"
-        target_name = (
-            f"{doc_id}-page{page_no:0{page_pad}d}{asset_suffix}-img{ordinal}.{ext}"
-        )
-        target = assets_dir / target_name
-        result = save_image_safe(
-            blob, target, dedup_cache=dedup_cache, source_ext=ext,
-        )
+        target = assets_dir / (
+            f"{doc_id}-page{page_no:0{page_pad}d}{asset_suffix}-img{ordinal}.{ext}")
+        result = save_image_safe(blob, target, dedup_cache=dedup_cache, source_ext=ext)
         if not result:
             note = skipped_image_note(result, ext)
             if note:
@@ -434,121 +387,114 @@ def _copy_images_and_rewrite(
             continue
         rel = f"{assets_rel_prefix}/{result.path.name}"
         rename_map[basename] = rel
-        if rel not in seen_relpaths:
-            seen_relpaths.add(rel)
+        if rel not in saved_relpaths:
             saved_relpaths.append(rel)
 
     if not rename_map:
         return body, saved_relpaths, warnings
 
     def _rewrite_md(match: re.Match[str]) -> str:
-        original_basename = Path(match.group(1)).name
-        new_rel = rename_map.get(original_basename)
+        new_rel = rename_map.get(Path(match.group(1)).name)
         if new_rel is None:
             return match.group(0)
         alt = match.group(0).split("![", 1)[1].split("]", 1)[0]
         return f"![{alt}]({new_rel})"
 
     def _rewrite_html(match: re.Match[str]) -> str:
-        original_basename = Path(match.group(1)).name
-        new_rel = rename_map.get(original_basename)
+        new_rel = rename_map.get(Path(match.group(1)).name)
         if new_rel is None:
             return match.group(0)
-        return match.group(0).replace(
-            f"images/{match.group(1)}", new_rel,
-        )
+        return match.group(0).replace(f"images/{match.group(1)}", new_rel)
 
     new_body = _MD_IMAGE_RE.sub(_rewrite_md, body)
     new_body = _HTML_IMG_RE.sub(_rewrite_html, new_body)
     return new_body, saved_relpaths, warnings
 
 
-def _inject_page_anchors(
-    body: str,
-    content_list: list[dict],
-    subset_to_original: dict[int, int] | None = None,
-) -> str:
+_ANCHOR_SKIP_TYPES = {"header", "footer", "page_number", "aside_text", "page_footnote"}
+# Markdown block prefixes an anchor may sit behind: "## ", "- ", "> ", "1. ".
+_LINE_PREFIX_RE = re.compile(r"[#>*+\-\s]*|\s*\d+[.)]\s*")
+
+
+def _find_anchor(body: str, entry: dict, cursor: int) -> int:
+    """Body offset where `entry` starts (searching from `cursor`), or -1.
+
+    Text, titles and equations match on their own text; images, charts and
+    tables on the line that links their `images/<name>` or, failing that,
+    on their caption. Snippets shorter than 6 characters are too ambiguous
+    to anchor on."""
+    snippets: list[str] = []
+    text = entry.get("text")
+    if entry.get("type") in ("text", "title", "equation") and isinstance(text, str):
+        snippets.append(text.strip())
+    img_path = entry.get("img_path")
+    if isinstance(img_path, str) and img_path.startswith("images/"):
+        for needle in (f"]({img_path})", f'src="{img_path}"'):
+            pos = body.find(needle, cursor)
+            if pos >= 0:
+                return body.rfind("\n", 0, pos) + 1
+    for key in ("image_caption", "table_caption"):
+        captions = entry.get(key)
+        if isinstance(captions, list):
+            snippets += [c.strip() for c in captions if isinstance(c, str)]
+    for snippet in snippets:
+        if len(snippet) < 6:
+            continue
+        snippet = snippet[:120]
+        idx = body.find(snippet, cursor)
+        if idx < 0:
+            idx = body.find(re.sub(r"\s+", " ", snippet), cursor)
+        if idx >= 0:
+            # Start the page at the line, not after its "## " / "- " / "$$"
+            # prefix, or the previous page would end with a dangling marker.
+            line_start = body.rfind("\n", 0, idx) + 1
+            if line_start >= cursor and _LINE_PREFIX_RE.fullmatch(body[line_start:idx]):
+                idx = line_start
+            if (entry.get("type") == "equation" and idx - 3 >= cursor
+                    and body.startswith("$$", idx - 3)):
+                idx = body.rfind("\n", 0, idx - 3) + 1
+            return idx
+    return -1
+
+
+def _inject_page_anchors(body: str, content_list: list[dict]) -> str:
     """Insert `[page N]` markers into the body using the content_list as
     the authoritative page ordering. MinerU's markdown is already laid out
     in reading order but lacks per-page separators; we splice them in by
-    matching consecutive text/heading entries against the body and tagging
-    page transitions.
+    matching each page's first locatable entry (text, heading, equation,
+    linked image, caption) against the body.
 
     The implementation is conservative: when alignment fails we leave the
     body unchanged rather than fabricating page boundaries — losing the
     anchors is preferable to mis-locating them, since second-session
-    agents cite page numbers from these markers.
-
-    When `subset_to_original` is provided, the inserted `[page N]`
-    markers use the original PDF page number rather than mineru's
-    subset index, so the body reads as if it had been extracted from
-    the full document.
+    agents cite page numbers from these markers. `page_idx` is MinerU's
+    original 0-based page index (also under --pages), so N is always the
+    page number in the source PDF.
     """
     if not content_list:
         return body
-
-    def _orig_page(subset_page: int) -> int:
-        if subset_to_original and subset_page in subset_to_original:
-            return subset_to_original[subset_page]
-        return subset_page
-
-    # Group entries by page in document order.
-    transitions: list[int] = []  # 1-based page numbers in encounter order
-    last_page: int | None = None
-    for entry in content_list:
-        if not isinstance(entry, dict):
-            continue
-        page_idx = entry.get("page_idx")
-        if not isinstance(page_idx, int):
-            continue
-        page_no = page_idx + 1
-        if page_no != last_page:
-            transitions.append(page_no)
-            last_page = page_no
-
-    if not transitions:
-        return body
-
-    # Find candidate anchor texts for each transition: prefer the first
-    # text-like entry on the page (title or text). We then split body on
-    # the first occurrence of that text and insert the page marker.
     pieces: list[str] = []
     cursor = 0
     rendered_pages: set[int] = set()
     for entry in content_list:
-        if not isinstance(entry, dict):
+        if not isinstance(entry, dict) or entry.get("type") in _ANCHOR_SKIP_TYPES:
             continue
-        entry_type = entry.get("type")
         page_idx = entry.get("page_idx")
         if not isinstance(page_idx, int):
             continue
         page_no = page_idx + 1
         if page_no in rendered_pages:
             continue
-        anchor_text: str | None = None
-        if entry_type in ("text", "title") and isinstance(entry.get("text"), str):
-            anchor_text = entry["text"].strip()
-        if not anchor_text or len(anchor_text) < 6:
-            continue  # too short to anchor reliably
-        # Search forward from cursor for this anchor.
-        snippet = anchor_text[:120]
-        idx = body.find(snippet, cursor)
-        if idx < 0:
-            # Try a sanitized version (collapse whitespace) — MinerU
-            # sometimes inserts hyphens or newlines mid-sentence.
-            compact = re.sub(r"\s+", " ", snippet)
-            idx = body.find(compact, cursor)
+        idx = _find_anchor(body, entry, cursor)
         if idx < 0:
             continue
         pieces.append(body[cursor:idx])
-        pieces.append(f"\n\n[page {_orig_page(page_no)}]\n\n")
+        pieces.append(f"\n\n[page {page_no}]\n\n")
         cursor = idx
         rendered_pages.add(page_no)
     pieces.append(body[cursor:])
     rebuilt = "".join(pieces).strip() + "\n"
-    # Cleanup: collapse runs of >2 blank lines introduced by the splicing.
-    rebuilt = re.sub(r"\n{3,}", "\n\n", rebuilt)
-    return rebuilt
+    return re.sub(r"\n{3,}", "\n\n", rebuilt)
 
 
 def _extract_headings_from_content_list(content_list: list[dict]) -> list[str]:
@@ -575,70 +521,39 @@ def _extract_headings_from_content_list(content_list: list[dict]) -> list[str]:
     return headings
 
 
-def _cache_raw_mineru_output(
-    backend_dir: Path,
-    cache_dir: Path,
-    doc_id: str,
-) -> Path | None:
-    """Preserve MinerU's raw per-document output under
-    `<kb_dir>/_mineru/<doc_id>/` so a later opt-in `postprocess_popo.py`
-    run can consume it without re-running MinerU. Returns the cache dir
-    on success, None on failure (which is non-fatal — Popo just won't be
-    available for that doc).
-    """
+def _cache_raw_mineru_output(located: dict, cache_dir: Path, doc_id: str,
+                             input_pdf: Path) -> Path | None:
+    """Preserve MinerU's output under `<kb_dir>/_mineru/<doc_id>/vlm/` for a
+    later opt-in `postprocess_popo.py` run, plus the Content List V1 shim
+    `<doc_id>_content_list.json` that MinerU-Popo's MinerU reader looks for
+    (`<input>/<doc_id>/vlm/<doc_id>_{model,middle,content_list}.json`), plus
+    the source PDF as `<doc_id>/<doc_id>.pdf` — Popo renders its pages as the
+    VLM's image input. Returns the cache dir on success, None on failure
+    (non-fatal — Popo just won't be available for that doc)."""
     target = cache_dir / doc_id
+    inner = target / "vlm"
     try:
         if target.exists():
             shutil.rmtree(target)
-        shutil.copytree(backend_dir, target)
+        shutil.copytree(located["root"], inner)
+        if "content_list" in located:
+            shutil.copyfile(located["content_list"], inner / f"{doc_id}_content_list.json")
+        shutil.copyfile(input_pdf, target / f"{doc_id}.pdf")
     except OSError as e:
-        log(f"failed to cache raw mineru output to {target}: {e}",
-            prefix="mineru")
+        log(f"failed to cache raw mineru output to {target}: {e}", prefix="mineru")
         return None
     return target
 
 
-def _prepare_input(input_pdf: Path, pages: list[int] | None, out_dir: Path,
-                   audit: dict) -> tuple[Path, dict | None]:
-    """When `pages` is supplied, slice the PDF down to that subset (inside
-    `out_dir` so it's cleaned up with the tempdir). Returns
-    (target_pdf, subset_to_original_or_None). Updates `audit` in place."""
-    if not pages:
-        return input_pdf, None
-    try:
-        target_pdf, subset_to_original = _slice_pdf(input_pdf, pages, out_dir)
-    except ValueError as e:
-        raise RuntimeError(f"--pages: {e}") from e
-    audit["page_subset_requested"] = list(pages)
-    audit["page_subset_size"] = len(pages)
-    return target_pdf, subset_to_original
-
-
-def _run_and_locate(binary: str, target_pdf: Path, out_dir: Path,
-                    backend: str, lang: str | None) -> dict:
-    """Invoke mineru subprocess and locate its produced files. Raises
-    RuntimeError on non-zero exit or missing markdown."""
-    rc, _stdout, stderr = _run_mineru(binary, target_pdf, out_dir, backend, lang)
-    if rc != 0:
-        tail = "\n".join((stderr or "").splitlines()[-12:])
-        raise RuntimeError(
-            f"mineru exited with code {rc}: {tail or 'no stderr captured'}"
-        )
-    stem = target_pdf.stem
-    located = _locate_outputs(out_dir, stem, backend)
-    if "markdown" not in located:
-        raise RuntimeError(
-            f"mineru produced no markdown for {stem}; output tree was "
-            f"{[p.name for p in out_dir.iterdir()] if out_dir.exists() else 'missing'}"
-        )
-    return located
-
-
 def _read_content_list(located: dict, warnings: list[str]) -> list:
     """Parse content_list.json. Returns an empty list (with warning) on any
-    decode/IO failure — callers proceed without anchor remap."""
+    decode/IO failure — callers proceed without page anchors."""
+    path = located.get("content_list")
+    if path is None:
+        warnings.append("content_list.json missing — page anchors skipped")
+        return []
     try:
-        content_list = json.loads(located["content_list"].read_text(encoding="utf-8"))
+        content_list = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
         warnings.append(f"content_list.json unreadable: {e}")
         return []
@@ -648,12 +563,11 @@ def _read_content_list(located: dict, warnings: list[str]) -> list:
     return content_list
 
 
-def _compute_page_count(content_list: list,
-                        subset_to_original: dict | None) -> int | None:
+def _compute_page_count(content_list: list, pages: list[int] | None) -> int | None:
     """With --pages, "pages" is the size of the patched subset; otherwise
     fall back to the max page_idx+1 from content_list."""
-    if subset_to_original:
-        return len(subset_to_original)
+    if pages:
+        return len(pages)
     max_page = 0
     for entry in content_list:
         if isinstance(entry, dict) and isinstance(entry.get("page_idx"), int):
@@ -661,71 +575,53 @@ def _compute_page_count(content_list: list,
     return max_page or None
 
 
-def _maybe_cache_raw(keep_raw: bool, backend_dir: Path,
-                     mineru_cache_dir: Path | None, doc_id: str,
-                     audit: dict, warnings: list[str]) -> None:
-    """Optionally preserve mineru's raw per-document output so
-    postprocess_popo.py can revisit it later. No-op when keep_raw is off
-    or no cache dir was supplied."""
-    if not (keep_raw and mineru_cache_dir is not None):
-        return
-    cached = _cache_raw_mineru_output(backend_dir, mineru_cache_dir, doc_id)
-    if cached is not None:
-        audit["mineru_raw_cache"] = str(cached)
-    else:
-        warnings.append(
-            f"could not preserve raw mineru output for postprocess "
-            f"(--keep-raw requested but copy to {mineru_cache_dir} failed)"
-        )
-
-
 def extract(
     input_pdf: Path,
     output_md: Path,
     doc_id: str,
-    backend: str,
-    lang: str | None,
+    tier: str,
+    ocr_mode: str,
     assets_dir: Path,
     assets_rel_prefix: str,
     mineru_cache_dir: Path | None,
-    mineru_bin: str | None,
+    mineru_python: str | None,
     keep_raw: bool,
     pages: list[int] | None = None,
     asset_suffix: str = "",
+    mineru_bin: str | None = None,
+    warnings: list[str] | None = None,
 ) -> tuple[str, dict, list[str], dict]:
     """Returns (body, frontmatter_extras, warnings, audit_extras).
 
-    When `pages` is non-empty, the input PDF is sliced down to those
-    page numbers before mineru sees it. Page anchors and asset filenames
-    in the returned body are remapped back to the original numbering so
-    callers and downstream agents never observe subset indices.
+    When `pages` is non-empty only those pages are parsed (MinerU's native
+    page_range); anchors and asset filenames carry the original page numbers.
     """
-    warnings: list[str] = []
+    warnings = list(warnings or [])
     extras: dict = {}
-    audit: dict = {}
+    audit: dict = {"mineru_tier": tier, "mineru_ocr_mode": ocr_mode}
 
-    binary = _mineru_executable(mineru_bin)
-    if binary is None:
+    resolved = _mineru_python(mineru_python, mineru_bin)
+    if resolved is None:
         raise FileNotFoundError(INSTALL_HINT)
+    python, models_dir = resolved
 
-    audit["mineru_version"] = _mineru_version(binary)
-    audit["mineru_backend_requested"] = backend
+    if pages:
+        try:
+            _check_pages(input_pdf, pages)
+        except ValueError as e:
+            raise RuntimeError(f"--pages: {e}") from e
+        audit["page_subset_requested"] = list(pages)
+        audit["page_subset_size"] = len(pages)
 
     with tempfile.TemporaryDirectory(prefix="mineru-") as tmp:
-        out_dir = Path(tmp)
-
-        target_pdf, subset_to_original = _prepare_input(
-            input_pdf, pages, out_dir, audit,
-        )
-
-        located = _run_and_locate(binary, target_pdf, out_dir, backend, lang)
-        backend_dir = located["resolved_backend"]
-        audit["mineru_backend_resolved"] = backend_dir.name
+        out_dir = Path(tmp) / "out"
+        reply = _run_driver(python, input_pdf, out_dir, tier, ocr_mode, pages, models_dir)
+        audit["mineru_version"] = reply.get("mineru_version") or "unknown"
+        located = _locate_outputs(out_dir)
 
         body = located["markdown"].read_text(encoding="utf-8")
         content_list = _read_content_list(located, warnings)
-
-        body = _inject_page_anchors(body, content_list, subset_to_original)
+        body = _inject_page_anchors(body, content_list)
 
         body, asset_relpaths, image_warnings = _copy_images_and_rewrite(
             body=body,
@@ -734,7 +630,7 @@ def extract(
             assets_dir=assets_dir,
             assets_rel_prefix=assets_rel_prefix,
             content_list=content_list,
-            subset_to_original=subset_to_original,
+            page_patch=bool(pages),
             asset_suffix=asset_suffix,
         )
         warnings.extend(image_warnings)
@@ -742,12 +638,18 @@ def extract(
             extras["assets"] = asset_relpaths
 
         extras["headings"] = _extract_headings_from_content_list(content_list)
-        pages_count = _compute_page_count(content_list, subset_to_original)
+        pages_count = _compute_page_count(content_list, pages)
         if pages_count:
             extras["pages"] = pages_count
 
-        _maybe_cache_raw(keep_raw, backend_dir, mineru_cache_dir, doc_id,
-                         audit, warnings)
+        if keep_raw and mineru_cache_dir is not None:
+            cached = _cache_raw_mineru_output(located, mineru_cache_dir, doc_id, input_pdf)
+            if cached is not None:
+                audit["mineru_raw_cache"] = str(cached)
+            else:
+                warnings.append(
+                    f"could not preserve raw mineru output for postprocess "
+                    f"(--keep-raw requested but copy to {mineru_cache_dir} failed)")
 
     return body, extras, warnings, audit
 
@@ -903,23 +805,37 @@ def _splice_into_target(
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
-        description="Extract PDF → Markdown via the opt-in MinerU VLM backend.",
+        description="Extract PDF → Markdown via the opt-in MinerU 4 tier.",
     )
     ap.add_argument("input_pdf")
     ap.add_argument("output_md")
     ap.add_argument("--doc-id", default="doc-000")
     ap.add_argument("--source-rel", default=None)
     ap.add_argument(
+        "--tier",
+        default=None,
+        choices=SUPPORTED_TIERS,
+        help=f"MinerU 4 quality tier (default: {DEFAULT_TIER}). 'basic' has "
+             "no Cyrillic OCR — Russian text comes out empty.",
+    )
+    ap.add_argument(
+        "--ocr-mode",
+        default=DEFAULT_OCR_MODE,
+        choices=OCR_MODES,
+        help=f"MinerU OCR mode (default: {DEFAULT_OCR_MODE}: the VLM reads every "
+             "block; 'auto' trusts the PDF text layer where present).",
+    )
+    ap.add_argument(
         "--backend",
-        default=DEFAULT_BACKEND,
+        default=None,
         choices=SUPPORTED_BACKENDS,
-        help=f"MinerU parsing backend (default: {DEFAULT_BACKEND}).",
+        help="Legacy MinerU 3.x backend name; every value runs the standard tier.",
     )
     ap.add_argument(
         "--lang",
-        default=DEFAULT_LANG,
-        help=f"Language hint passed to mineru -l (default: {DEFAULT_LANG}; "
-             "use 'en' for English-only PDFs, 'ch' for Chinese, etc.).",
+        default=None,
+        help="Legacy MinerU 3.x OCR language; MinerU 4 has no such setting, "
+             "the value is ignored with a warning.",
     )
     ap.add_argument(
         "--assets-dir",
@@ -940,27 +856,34 @@ def _build_arg_parser() -> argparse.ArgumentParser:
              "when --keep-raw is set (default: <output_md>.parent.parent/_mineru).",
     )
     ap.add_argument(
+        "--mineru-python",
+        default=None,
+        help="Python interpreter that has mineru>=4.2 installed (default: the "
+             "<state>/mineru/venv built by ensure_env.py --tier mineru).",
+    )
+    ap.add_argument(
         "--mineru-bin",
         default=None,
-        help="Explicit path to the mineru executable (default: resolved via "
-             "PATH). Useful when invoking from outside ensure_env.py.",
+        help="Legacy: path to a `mineru` executable; the `python` next to it "
+             "is used as --mineru-python.",
     )
     ap.add_argument(
         "--keep-raw",
         action="store_true",
-        help="Preserve MinerU's raw per-document output under the cache "
-             "dir for follow-up postprocess_popo.py runs.",
+        help="Preserve MinerU's output under the cache dir (plus the "
+             "<doc_id>_content_list.json shim and a copy of the source PDF) "
+             "for postprocess_popo.py.",
     )
     ap.add_argument(
         "--pages",
         default=None,
         help="Page-range patching: comma-separated list of 1-based page "
              "numbers with optional ranges, e.g. '2,18-19,35,221'. Only "
-             "those pages are sent to mineru (via an internal subset PDF) "
-             "and the returned `[page N]` anchors and asset filenames are "
-             "remapped to the original page numbers. Use this to recover "
-             "vector math/diagrams that pymupdf4llm dropped on specific "
-             "pages without re-extracting the whole document.",
+             "those pages are parsed (MinerU's native page_range); the "
+             "`[page N]` anchors and asset filenames keep the original page "
+             "numbers. Use this to recover vector math/diagrams that "
+             "pymupdf4llm dropped on specific pages without re-extracting "
+             "the whole document.",
     )
     ap.add_argument(
         "--patch-into",
@@ -1002,9 +925,8 @@ class _ArgsError(Exception):
 
 
 def _resolve_args(args) -> dict:
-    """Resolve CLI args to absolute paths + parsed --pages list. Raises
-    _ArgsError when the CLI is in a bad shape (returns (reason, code) for
-    main to surface)."""
+    """Resolve CLI args to absolute paths + parsed --pages list + tier.
+    Raises _ArgsError when the CLI is in a bad shape."""
     in_path = Path(args.input_pdf).expanduser().resolve()
     out_path = Path(args.output_md).expanduser().resolve()
     source_rel = args.source_rel or in_path.name
@@ -1044,6 +966,13 @@ def _resolve_args(args) -> dict:
 
     asset_suffix = "" if (args.no_mineru_asset_suffix or not pages) else "-mineru"
 
+    warnings: list[str] = []
+    tier = _resolve_tier(args.tier, args.backend, warnings)
+    if args.lang:
+        warnings.append(
+            f"--lang {args.lang} ignored: MinerU 4 has no OCR language setting "
+            "(the standard tier's VLM reads Cyrillic as is)")
+
     return {
         "in_path": in_path,
         "out_path": out_path,
@@ -1052,6 +981,8 @@ def _resolve_args(args) -> dict:
         "assets_dir": assets_dir,
         "cache_dir": cache_dir,
         "asset_suffix": asset_suffix,
+        "tier": tier,
+        "warnings": warnings,
     }
 
 
@@ -1066,18 +997,20 @@ def _call_extract(args, resolved: dict
             input_pdf=in_path,
             output_md=resolved["out_path"],
             doc_id=args.doc_id,
-            backend=args.backend,
-            lang=args.lang,
+            tier=resolved["tier"],
+            ocr_mode=args.ocr_mode,
             assets_dir=resolved["assets_dir"],
             assets_rel_prefix=args.assets_rel,
             mineru_cache_dir=resolved["cache_dir"],
-            mineru_bin=args.mineru_bin,
+            mineru_python=args.mineru_python,
             keep_raw=args.keep_raw,
             pages=resolved["pages"],
             asset_suffix=resolved["asset_suffix"],
+            mineru_bin=args.mineru_bin,
+            warnings=resolved["warnings"],
         )
     except FileNotFoundError as e:
-        # mineru binary missing — exit 2 so the parent loop can mark the
+        # mineru tier missing — exit 2 so the parent loop can mark the
         # file as "needs install" and skip without treating this as a
         # corrupt-PDF failure.
         emit_failure(str(e), extra={"input": str(in_path)})
@@ -1178,9 +1111,8 @@ def main() -> int:
         return extract_result
     body, extras, warnings, audit = extract_result
 
-    backend_tag = audit.get("mineru_backend_resolved") or args.backend
     extraction_method = (
-        f"{EXTRACTOR_NAME}-{backend_tag}@{audit.get('mineru_version', 'unknown')}"
+        f"{EXTRACTOR_NAME}-{resolved['tier']}@{audit.get('mineru_version', 'unknown')}"
     )
     input_sha256 = sha256_of(resolved["in_path"])
 

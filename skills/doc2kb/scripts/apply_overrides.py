@@ -20,9 +20,9 @@ Config schema (stdlib json — no new deps):
       "overrides": [
         { "match": "papers/*.pdf",          // glob on source_path, OR exact
           "strategy": "mineru",             //   doc-id, OR exact source_path
-          "mineru": { "backend": "vlm-auto-engine",
-                      "lang": "cyrillic",
-                      "keep_raw": true },
+          "mineru": { "tier": "standard",   // MinerU 4 tier
+                      "keep_raw": true },  // (legacy 3.x "backend"/"lang"
+                                           //  still accepted, run standard)
           "popo": true,                     // per-file Popo opt-in/out (overrides env)
           "note": "scanned scans, send to VLM" },
         { "match": "doc-012", "strategy": "skip" },
@@ -66,14 +66,14 @@ from _common import log as _common_log
 # Single-source the canonical strategy / backend sets so this script can never
 # drift from the dispatcher and the mineru extractor.
 from extract_corpus import DISPATCH, MEDIA_ENGINES, NON_RUNNABLE
-from extract_pdf_mineru import SUPPORTED_BACKENDS
+from extract_pdf_mineru import SUPPORTED_BACKENDS, SUPPORTED_TIERS
 
 
 KNOWN_STRATEGIES = set(DISPATCH) | set(NON_RUNNABLE)
 _DOC_ID_RE = re.compile(r"doc-\d{3,}$")
 _LANG_RE = re.compile(r"^[a-z]{2,}$")
 _ALLOWED_RULE_KEYS = {"match", "strategy", "mineru", "media", "popo", "note"}
-_ALLOWED_MINERU_KEYS = {"backend", "lang", "keep_raw"}
+_ALLOWED_MINERU_KEYS = {"tier", "backend", "lang", "keep_raw"}
 _ALLOWED_MEDIA_KEYS = {"lang", "engines", "subtitles"}
 _MEDIA_LANG_RE = re.compile(r"^(auto|[a-z]{2,3})$")
 
@@ -122,6 +122,10 @@ def _validate_config(cfg: object) -> list[dict]:
             if uk:
                 raise ConfigError(f"{loc}.mineru has unknown key(s): {sorted(uk)} "
                                   f"(allowed: {sorted(_ALLOWED_MINERU_KEYS)})")
+            tier = mineru.get("tier")
+            if tier is not None and tier not in SUPPORTED_TIERS:
+                raise ConfigError(f"{loc}.mineru.tier={tier!r} not in "
+                                  f"{list(SUPPORTED_TIERS)}")
             backend = mineru.get("backend")
             if backend is not None and backend not in SUPPORTED_BACKENDS:
                 raise ConfigError(f"{loc}.mineru.backend={backend!r} not in "

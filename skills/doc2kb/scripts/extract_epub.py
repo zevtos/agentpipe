@@ -42,6 +42,7 @@ import zipfile
 from pathlib import Path
 
 from _common import (  # noqa: E402
+    MARKDOWNIFY_OPTIONS,
     add_assets_args,
     clean_whitespace,
     count_tokens,
@@ -149,8 +150,7 @@ def _extract_via_zip(input_epub: Path) -> tuple[str, list[str]]:
             html = _chapter_html(html)
             html = _placeholder_images(html, img_counter)
             try:
-                chunk = md_from_html(html, heading_style="ATX",
-                                     strip=["script", "style"])
+                chunk = md_from_html(html, strip=["script", "style"], **MARKDOWNIFY_OPTIONS)
             except Exception as e:
                 warnings.append(f"markdownify failed on {href}: {e}")
                 continue

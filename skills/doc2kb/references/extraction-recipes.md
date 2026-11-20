@@ -88,9 +88,9 @@ assert payload["ok"]
 | extraction_strategy | script                          | invocation |
 |---------------------|---------------------------------|------------|
 | `pymupdf4llm`       | `extract_pdf_pymupdf4llm.py`    | `<input> <output> --doc-id <id> --source-rel <rel>` (auto image extraction to `<kb_dir>/assets/`; override with `--assets-dir`/`--assets-rel`, disable with `--no-extract-images`) |
-| `mineru`            | `extract_pdf_mineru.py`         | **Opt-in tier** — requires `ensure_env.py --tier mineru` once. `<input> <output> --doc-id <id> --source-rel <rel>` (default backend `auto`, language `cyrillic`; pass `--backend pipeline` for CPU-only, `--lang en` for English-only; `--keep-raw` preserves MinerU output under `<kb_dir>/_mineru/<doc_id>/` for follow-up `postprocess_popo.py`). Exits 2 with install hint when mineru CLI is missing — parent loop should mark the file as needing install rather than skipping silently. |
+| `mineru`            | `extract_pdf_mineru.py`         | **Opt-in tier** — requires `ensure_env.py --tier mineru` once. `<input> <output> --doc-id <id> --source-rel <rel>` (MinerU 4 tier `standard`, `--ocr-mode ocr`; never `--tier basic` for Cyrillic — it reads none; legacy `--backend`/`--lang` are accepted and run `standard`; `--keep-raw` preserves MinerU output under `<kb_dir>/_mineru/<doc_id>/vlm/` for follow-up `postprocess_popo.py`). Exits 2 with install hint when the mineru tier is missing — parent loop should mark the file as needing install rather than skipping silently. |
 | `mammoth`           | `extract_docx.py`               | `<input> <output> --doc-id <id> --source-rel <rel>` (auto-routes to `pandoc` when `has_equations: true` and pandoc is on PATH; force mammoth with `--force-mammoth`) |
-| `doc`               | `extract_doc.py`                | `<input> <output> --doc-id <id> --source-rel <rel>` (legacy binary `.doc`; converter cascade `soffice`/`libreoffice` → `.docx` → DOCX pipeline, macOS `textutil` same path, else `antiword` → text. Force one with `--converter soffice\|textutil\|antiword`. **Exits 2 with an install hint when no converter is on PATH** — treat as "needs install", not corrupt, same as the mineru CLI) |
+| `doc`               | `extract_doc.py`                | `<input> <output> --doc-id <id> --source-rel <rel>` (legacy binary `.doc`; converter cascade `soffice`/`libreoffice` → `.docx` → DOCX pipeline, macOS `textutil` same path, else `antiword` → text. Force one with `--converter soffice\|textutil\|antiword`. **Exits 2 with an install hint when no converter is on PATH** — treat as "needs install", not corrupt, same as the mineru tier) |
 | `rtf`               | `extract_rtf.py`                | `<input> <output> --doc-id <id> --source-rel <rel>` (pandoc when on PATH — preserves tables/images/structure; else pure-Python `striprtf` → plain text. Force the fallback with `--force-striprtf`) |
 | `python-pptx`       | `extract_pptx.py`               | `<input> <output> --doc-id <id> --source-rel <rel>` |
 | `passthrough-md`    | `extract_md_txt.py --mode md`   | `<input> <output> --doc-id <id> --source-rel <rel> --mode md` |
@@ -109,11 +109,12 @@ assert payload["ok"]
 
 ## Opt-in MinerU tier
 
-The `mineru` strategy is opt-in by design: heavy ML deps and a ~3 GB model
-download never enter the lightweight default tier. To enable:
+The `mineru` strategy is opt-in by design: heavy ML deps and ~2 GB of
+models never enter the lightweight default tier. To enable:
 
 ```bash
-# One-time, installs mineru[all] + MLX wheels on Apple Silicon
+# One-time: MinerU 4 in its own venv (<state>/mineru/venv — never the shared
+# lightweight one) + standard-tier models in <state>/mineru/models
 python3 <skill_dir>/scripts/ensure_env.py --tier mineru
 
 # Auto-route image_only PDFs through mineru when scanning a corpus
@@ -139,7 +140,7 @@ Engines (`--engines auto`): base = whisper.cpp (`whisper-cli` + `ggml-large-v3`)
 → mlx-whisper (Apple Silicon) → faster-whisper; filler = GigaAM v3 when the
 detected language is Russian. Explicit lists: `whisper,gigaam`, `whisper`,
 `mlx`, `whisper,gigaam,mlx` (third engine only adds its rendering to
-review.md), `gigaam` (Russian only, unpunctuated — needs `--lang ru`).
+review.md), `gigaam` (Russian only, punctuated v3 e2e — needs `--lang ru`).
 `_asr.py check --models-dir <state>/transcribe/models` (run with the tier's
 python) prints which engines are ready. An existing ggml model is reused with
 `DOC2KB_WHISPER_MODEL=/path/ggml-large-v3.bin` at `--tier transcribe` time
@@ -157,26 +158,24 @@ When a `pymupdf4llm` extraction emits a `dropped_pictures` /
 `mangled_visual_layout` warning that names a handful of specific pages
 (usually formulas, schemas, or text-as-vector diagrams the text-layer
 extractor could not recover), use `extract_pdf_mineru.py` in page-patch
-mode instead of re-extracting the whole PDF. mineru's VLM run on a
-50-page book is hours; running it on the 8 broken pages takes a
-minute.
+mode instead of re-extracting the whole PDF. A whole 600-page book is
+half an hour of VLM time on an M-series laptop; the 8 broken pages take
+well under a minute (≈3 s/page + ~10 s model setup, MinerU 4 standard).
 
 ```bash
 python3 "$SKILL/scripts/ensure_env.py" extract_pdf_mineru.py \
     "$INPUT" /unused/output/path.md \
     --doc-id "$DOCID" --source-rel "$SREL" \
     --pages "2,18-19,35,221,243-244,588" \
-    --patch-into "$KB/docs/$DOCID-<slug>.md" \
-    --lang cyrillic
+    --patch-into "$KB/docs/$DOCID-<slug>.md"
 ```
 
 What the script does:
 
-1. Slices the original PDF down to just the requested pages via pymupdf
-   in a tempdir — mineru sees a tiny subset PDF and processes only that.
-2. Remaps every `[page N]` anchor and every asset filename it emits
-   from mineru's subset indices back to the original PDF page numbers.
-   Asset names get an extra `-mineru-` infix
+1. Hands the page list to MinerU's native `page_range` — only those pages
+   are parsed, and MinerU keeps the original page indices in its output.
+2. Writes every `[page N]` anchor and asset filename with the original PDF
+   page number. Asset names get an extra `-mineru-` infix
    (`<doc_id>-page<orig:03d>-mineru-imgN.<ext>`) so they never collide
    with pymupdf4llm's existing `<doc_id>-page<NN>-imgN` files.
 3. Splices the new page sections into the existing target md, replacing
@@ -184,7 +183,7 @@ What the script does:
    (preamble, other pages, frontmatter primary fields) is untouched.
 4. Updates the target's frontmatter with `mineru_patched_pages: [...]`
    (sorted union across runs) and `extraction_method_supplementary:
-   mineru-<backend>@<version>`. Appends a single-line splice-summary
+   mineru-<tier>@<version>`. Appends a single-line splice-summary
    warning, accumulates the mineru-side warnings under
    `mineru_patch[…]:` prefixes.
 5. Safety: refuses to splice if the target's `source_sha256` ≠ the
@@ -261,6 +260,27 @@ math-элементы, и body после него ссылается на «ф�
 (`pandoc` или `mammoth+markdownify`). Если pandoc недоступен на машине с
 math-документом — warning с инструкцией установить (`brew install pandoc` /
 `apt install pandoc`).
+
+### RTF в кодировке cp1251 и других — pandoc-маршрут
+
+RTF-ридер pandoc понимает `\'xx` только как cp1252 (и наборы
+`\mac`/`\pc`/`\pca`), а `\fcharset` игнорирует: русский RTF из Word
+(`\ansicpg1251`, шрифты `\fcharset204`) выходил как `Ïðèëîæåíèå`. Перед
+pandoc `extract_rtf.py` переписывает каждую серию `\'xx` в `\uN` по
+действующей кодовой странице (charset текущего шрифта, иначе `\ansicpg`;
+DBCS вроде cp932 — тоже); fallback-байты после `\uN`, данные `\bin` и
+символьные шрифты не трогаются. Fallback пишется как `\'3f`: после
+литерального `?` pandoc 3.12 съедает лишний символ. Если pandoc всё равно
+сообщает `Unsupported code page`, документ уходит в `striprtf` (он
+декодирует кодовые страницы сам) с warning'ом.
+
+### Экранирование Markdown (DOCX, HTML-fallback, EPUB)
+
+markdownify вызывается без экранирования `_` и `*` и с заголовком таблицы из
+первой строки (`MARKDOWNIFY_OPTIONS` в `_common.py`): KB читают агенты и grep,
+а не рендер, и `Тема\_Фамилия\_группа.doc` не находился поиском по
+исходному имени; у таблиц mammoth нет `<th>`, поэтому раньше шапка таблицы
+была пустой строкой.
 
 ### Поломанные лигатуры `fi` / `ff` / `fl` (PDF)
 
@@ -402,3 +422,14 @@ warnings родителя и поднимается до файла корпус
   не видит, раньше диаграмма пропадала целиком).
 - Группы обходятся на любую глубину (раньше — один уровень; текст во
   вложенных группах терялся молча).
+- Формулы. PowerPoint оборачивает фигуру с формулой в `mc:AlternateContent`
+  (`mc:Choice Requires="a14"` с `a14:m` → OMML), и python-pptx такую фигуру
+  не видит вовсе: пропадал весь текстовый блок, на лекциях с формулами — до
+  60 % текста. Теперь берётся `mc:Choice` для `a14`, формулы идут в текст как
+  LaTeX (`$…$`, отдельная строка-формула — `$$…$$`, `_omml.py`); для прочих
+  требований (рукописный ввод, 3D, новые типы диаграмм) — `mc:Fallback`,
+  обычно картинка того же содержимого.
+- Перенос строки внутри абзаца (`a:br`) — `\n`: склейка `para.runs`
+  слепляла слова по обе стороны («Спасибоза внимание»), а в ячейках таблиц и
+  заметках протекал символ `\v`. Вторая и следующие строки заголовка слайда
+  идут в тело слайда (раньше терялись).

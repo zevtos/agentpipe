@@ -12,8 +12,7 @@ When to use:
     hierarchy or split paragraphs/tables across page boundaries. Popo
     reportedly lifts TEDS hierarchy score from 53.7 → 90.6 on MinerU
     output. For short PDFs (≤ ~5 pages) the gain is negligible and the
-    infra cost (conda env, 4B model download, optional external LLM API
-    for enrichment) isn't justified.
+    infra cost (dedicated env, 16 GB model download) isn't justified.
 
 When NOT to use:
     - Single-page or short documents.
@@ -24,43 +23,63 @@ When NOT to use:
       main extraction is reviewed.
 
 Prerequisites:
-    1. Clone the upstream Popo repo somewhere local:
-           git clone https://github.com/opendatalab/MinerU-Popo.git
-    2. Follow the Popo README to install its conda env and download the
-       MinerU-Popo HF model into `<popo_repo>/models/Mineru-Popo/`.
-    3. Edit `<popo_repo>/post_processing/model_utils.py` so `POPO_MODEL_PATH`
-       (or the vLLM `url`/`key` in `popo_generate`) points at the local
-       model. If you want enrichment + QA, also configure `qwen_generate`
-       / `gpt_generate` per the Popo README.
-    4. Either export `DOC2KB_POPO_REPO=/abs/path/to/MinerU-Popo` or pass
-       `--popo-repo /abs/path/to/MinerU-Popo` to this script.
+    A MinerU-Popo checkout with its env and model — either
+    `bootstrap_popo.py` (auto: clone, env, model, macOS MPS pin) or by hand
+    per the upstream README (clone, env, `hf download DreamEternal/MinerU-Popo
+    --local-dir models/Mineru-Popo`). The repo is found via `--popo-repo` >
+    `$DOC2KB_POPO_REPO` > the bootstrap default `<state>/popo/MinerU-Popo`.
 
-This script does NOT install Popo, does NOT download the 4B model, and
-does NOT contact any external LLM API. It is pure glue — it copies cached
-MinerU output into the directory Popo's normalizer expects, invokes
-Popo's three bash scripts in sequence, and writes the resulting tree(s)
-back into the kb as sidecar files. Any missing dependency triggers an
-exit 2 with the install instructions above.
+This script does NOT install Popo, does NOT download the model, and does NOT
+contact any external LLM API. It is pure glue: it calls Popo's three Python
+entry points with explicit paths, keeps every intermediate file in the kb,
+and copies the resulting tree(s) next to the kb docs. Any missing dependency
+triggers an exit 2 with install instructions.
+
+How it drives Popo (upstream's bash wrappers are not used: they hard-code
+`--pdf-dir eval_pdf_dir`, which crashes when that dir is absent, and
+`--limit 5`, which silently drops documents):
+    1. post_processing/label_normalization.py --model mineru
+         --input-dir <kb>/_mineru --doc-id <ids…> --pdf-map-json …
+       MinerU-Popo's MineruReader reads
+       `<input-dir>/<doc_id>/vlm/<doc_id>_{model,middle,content_list}.json`,
+       which is exactly the `_mineru/` cache layout, so nothing is staged.
+       The pdf map points each doc at `_mineru/<doc_id>/<doc_id>.pdf` (the
+       copy `--keep-raw` makes): Popo's inference renders those pages as
+       the VLM's image input, and the PDF's stem names every output file.
+    2. post_processing/run_inference.py --model mineru --limit 0
+       (transformers backend, POPO_MAX_NEW_TOKENS=8192 like upstream's
+       run_inference.sh; both overridable from the environment).
+    3. post_processing/get_json_tree.py.
+    Steps 2 and 3 consume a whole directory, so each gets a fresh selection
+    dir holding only this run's docs.
+
+Work dir (`<kb_dir>/_popo/`, kept between runs for --skip-*):
+    pdf_map.json
+    label_normalization/mineru/<doc_id>.json
+    inference/<doc_id>.json
+    build_tree/<doc_id>.json          # the tree
+    build_tree_txt/<doc_id>.txt       # indented title|preview outline
 
 CLI:
     postprocess_popo.py <kb_dir>
                         [--popo-repo /abs/path]
                         [--doc-id doc-NNN]              # postprocess one doc; default: all cached
-                        [--run-name <name>]             # subfolder name under post-process/mineru/
-                        [--skip-normalization]          # if you've already normalized
-                        [--skip-inference]              # if you've already inferred
+                        [--skip-normalization]          # reuse _popo/label_normalization/
+                        [--skip-inference]              # reuse _popo/inference/
+                        [--auto-setup]                  # bootstrap Popo first when unconfigured
 
 Output:
-    For each processed doc, writes:
-        <kb_dir>/docs/<doc_id>-<slug>.tree.json   # the document tree
-    and appends `postprocess: popo@<version>` to the doc's frontmatter
-    `warnings` block so the audit trail is preserved. The body of the
-    `.md` is NOT rewritten by this script — tree consumption is left to
-    the agent that builds the final RAG-ready chunks from the kb.
+    For each processed doc, writes
+        <kb_dir>/docs/<doc_id>-<slug>.tree.json   # copy of _popo/build_tree/<doc_id>.json
+    The `.md` is NOT rewritten — tree consumption is left to the agent that
+    builds the final RAG-ready chunks from the kb. Per-doc results (and the
+    reason a doc produced no tree) are in the success JSON and in
+    <kb_dir>/_logs/popo.json.
 """
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import os
 import shutil
@@ -72,24 +91,35 @@ from _common import emit_failure, emit_success, log
 
 
 POPO_ENV_VAR = "DOC2KB_POPO_REPO"
-POPO_BASH_SCRIPTS = (
-    "scripts/run_label_normalization.sh",
-    "scripts/run_inference.sh",
-    "scripts/build_tree.sh",
-)
-POPO_OUTPUT_TREE_DIR = "outputs/build_tree/mineru"
+POPO_MODEL = "mineru"
+POPO_ENTRY_POINTS = {
+    "normalization": "post_processing/label_normalization.py",
+    "inference": "post_processing/run_inference.py",
+    "build_tree": "post_processing/get_json_tree.py",
+}
+# run_inference.py imports this one; checked so a partial checkout fails early.
+POPO_REQUIRED_FILES = (*POPO_ENTRY_POINTS.values(), "post_processing/inference.py")
+# What upstream's scripts/run_inference.sh exports (its default backend is an
+# OpenAI-compatible client with an empty URL).
+POPO_DEFAULT_ENV = {
+    "POPO_INFERENCE_BACKEND": "transformers",
+    "POPO_MAX_NEW_TOKENS": "8192",
+}
+MINERU_READER_FILES = ("_model.json", "_middle.json", "_content_list.json")
+WORK_DIRNAME = "_popo"
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
-# Sentinel written by bootstrap_popo.py holding the path to Popo's dedicated env
-# python. Its bin/ dir is prepended to PATH when running Popo's bash scripts
-# (which call `python3` from PATH, not `conda activate`).
+# Sentinel written by bootstrap_popo.py holding the path to Popo's dedicated
+# env python, which runs Popo's entry points.
 POPO_PY_SENTINEL = ".doc2kb-popo-python"
 
 POPO_NOT_FOUND_HINT = (
     "MinerU-Popo repo not configured. Either:\n"
     f"  1) Set the env var: export {POPO_ENV_VAR}=/abs/path/to/MinerU-Popo\n"
     "  2) Pass --popo-repo /abs/path/to/MinerU-Popo on the command line\n"
-    "Install Popo per upstream README:\n"
+    "  3) Bootstrap it (clone + env + ~16 GB model): "
+    "python3 <skill_dir>/scripts/ensure_env.py bootstrap_popo.py\n"
+    "Manual install per upstream README:\n"
     "  git clone https://github.com/opendatalab/MinerU-Popo.git\n"
     "  cd MinerU-Popo\n"
     "  conda create -n popo python=3.10 && conda activate popo\n"
@@ -101,8 +131,7 @@ POPO_NOT_FOUND_HINT = (
 def _resolve_popo_repo(arg: str | None) -> Path | None:
     """Return the Popo repo path. Precedence: --popo-repo > $DOC2KB_POPO_REPO >
     the bootstrap_popo.py auto-default (<state-dir>/popo/MinerU-Popo) if it
-    exists. We don't otherwise auto-detect — too easy to pick the wrong checkout
-    and silently overwrite someone else's working copy."""
+    exists. We don't otherwise auto-detect — too easy to pick the wrong checkout."""
     candidate = arg or os.environ.get(POPO_ENV_VAR)
     if candidate:
         return Path(candidate).expanduser().resolve()
@@ -116,54 +145,42 @@ def _resolve_popo_repo(arg: str | None) -> Path | None:
     return None
 
 
-def _popo_subprocess_env(popo_repo: Path) -> dict | None:
-    """Build the env for Popo's bash scripts. On macOS we always return an env
-    (even without a sentinel) so the MPS knobs are set; the sentinel additionally
-    PATH-injects the bootstrapped env's python. Returns None (ambient env) only on
-    non-darwin without a sentinel."""
+def _popo_python(popo_repo: Path) -> str | None:
+    """The bootstrapped env's python (sentinel), else `python3` from PATH — a
+    manual install's activated env."""
     sentinel = popo_repo / POPO_PY_SENTINEL
-    py = ""
     if sentinel.is_file():
         try:
             py = sentinel.read_text(encoding="utf-8").strip()
         except OSError:
             py = ""
+        if py and Path(py).is_file():
+            return py
+    return shutil.which("python3")
 
-    if not py and sys.platform != "darwin":
-        return None
 
+def _popo_subprocess_env(popo_repo: Path) -> dict:
     env = dict(os.environ)
-    if py:
-        bindir = str(Path(py).parent)
-        env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
-    # Popo's transformers backend (model_utils._transformers_generate) reads the
-    # model from os.environ["POPO_MODEL_PATH"] (default "popo_model" — a relative
-    # dir that won't exist). run_inference.sh never exports it, so wire it to the
-    # model the bootstrap downloaded.
+    for key, value in POPO_DEFAULT_ENV.items():
+        env.setdefault(key, value)
+    # Popo's transformers backend reads the model from $POPO_MODEL_PATH
+    # (upstream default "popo_model", a relative dir that won't exist).
     model_dir = popo_repo / "models" / "Mineru-Popo"
     if model_dir.is_dir():
         env.setdefault("POPO_MODEL_PATH", str(model_dir))
     if sys.platform == "darwin":
-        # Popo's transformers backend runs the 4B VLM on MPS; route any op that
-        # MPS doesn't implement to CPU instead of crashing.
+        # The 4B VLM runs on MPS; route ops MPS lacks to CPU instead of crashing.
         env.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
     return env
 
 
 def _validate_popo_layout(repo: Path) -> list[str]:
-    """Return a list of missing required files. Empty list means the repo
-    looks ready to run."""
-    missing: list[str] = []
-    for script in POPO_BASH_SCRIPTS:
-        if not (repo / script).is_file():
-            missing.append(script)
-    return missing
+    return [rel for rel in POPO_REQUIRED_FILES if not (repo / rel).is_file()]
 
 
 def _list_cached_docs(cache_dir: Path) -> list[str]:
     """Each subfolder of <kb_dir>/_mineru/ is one cached MinerU run named
-    after the doc_id. We skip dotfiles so a future `.cache/` sibling
-    doesn't accidentally enter the pipeline."""
+    after the doc_id. Dotfiles are skipped."""
     if not cache_dir.is_dir():
         return []
     return sorted(
@@ -172,102 +189,89 @@ def _list_cached_docs(cache_dir: Path) -> list[str]:
     )
 
 
-def _stage_doc_into_popo(
-    cache_doc_dir: Path,
-    popo_repo: Path,
-    run_name: str,
-    doc_id: str,
-) -> Path:
-    """Copy <kb_dir>/_mineru/<doc_id>/ into
-    <popo_repo>/post-process/mineru/<run_name>/<doc_id>/. Popo's
-    label-normalization script scans every subfolder under
-    `post-process/<source_name>/` so the per-doc layout keeps multiple
-    docs isolated from each other."""
-    target = popo_repo / "post-process" / "mineru" / run_name / doc_id
-    if target.exists():
-        shutil.rmtree(target)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(cache_doc_dir, target)
-    return target
+def _cache_problem(cache_dir: Path, doc_id: str) -> str | None:
+    """Why Popo can't take this cached doc, or None when it can."""
+    doc_dir = cache_dir / doc_id
+    vlm = doc_dir / "vlm"
+    if not any((vlm / f"{doc_id}{suffix}").is_file() for suffix in MINERU_READER_FILES):
+        return (f"no {vlm}/{doc_id}_content_list.json — cache predates MinerU 4; "
+                "re-run extract_pdf_mineru.py --keep-raw")
+    if not (doc_dir / f"{doc_id}.pdf").is_file():
+        return (f"no source PDF {doc_dir}/{doc_id}.pdf (Popo renders its pages); "
+                "re-run extract_pdf_mineru.py --keep-raw")
+    return None
 
 
-def _run_bash(script: Path, cwd: Path, env: dict | None = None) -> tuple[int, str]:
-    """Invoke a Popo bash script. We force `bash` even on macOS where the
-    user's default shell may be zsh, since Popo's scripts use bash-isms.
-    `env` (when given) carries the bootstrapped Popo env's bin/ on PATH."""
-    if not script.is_file():
-        return 127, f"script not found: {script}"
-    log(f"$ bash {script.relative_to(cwd)} (cwd={cwd})", prefix="popo")
-    proc = subprocess.run(
-        ["bash", str(script)],
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
+def _run_popo(label: str, python: str, script: Path, args: list[str],
+              cwd: Path, env: dict) -> tuple[int, str]:
+    """Run one Popo entry point, streaming its output to our stderr. Returns
+    (exit code, last lines of output)."""
+    log(f"{label}: {Path(python).name} {script.name}", prefix="popo")
+    tail: collections.deque[str] = collections.deque(maxlen=15)
+    proc = subprocess.Popen(
+        [python, str(script), *args], cwd=str(cwd), env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace",
     )
-    if proc.returncode != 0:
-        tail = "\n".join((proc.stderr or proc.stdout or "").splitlines()[-12:])
-        return proc.returncode, tail
-    return 0, ""
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        line = line.rstrip()
+        if line:
+            tail.append(line)
+            print(f"[popo:{label}] {line}", file=sys.stderr, flush=True)
+    return proc.wait(), "\n".join(tail)
 
 
-def _collect_trees(
-    popo_repo: Path,
-    run_name: str,
-    doc_ids: list[str],
-    kb_docs_dir: Path,
-) -> list[dict]:
-    """For each processed doc, copy the Popo tree JSON next to the kb md.
-    Popo writes its trees as `outputs/build_tree/mineru/<run_name>/<doc_id>/*.json`.
-    Returns a per-doc summary list suitable for the success payload.
-    """
-    base = popo_repo / POPO_OUTPUT_TREE_DIR / run_name
-    summaries: list[dict] = []
-    if not base.is_dir():
-        log(f"no tree outputs under {base}", prefix="popo")
-        return summaries
+def _select(src_dir: Path, doc_ids: list[str], dst_dir: Path) -> list[str]:
+    """Fresh `dst_dir` with only `<id>.json` of `doc_ids` copied from `src_dir`
+    (run_inference.py / get_json_tree.py take every *.json in a directory).
+    Returns the ids that had a file."""
+    if dst_dir.exists():
+        shutil.rmtree(dst_dir)
+    dst_dir.mkdir(parents=True)
+    present = []
     for doc_id in doc_ids:
-        src_dir = base / doc_id
-        if not src_dir.is_dir():
+        src = src_dir / f"{doc_id}.json"
+        if src.is_file():
+            shutil.copyfile(src, dst_dir / src.name)
+            present.append(doc_id)
+    return present
+
+
+def _unlink_outputs(out_dir: Path, doc_ids: list[str]) -> None:
+    """Drop this run's previous outputs so a doc Popo silently skips can't
+    pass for done on the strength of an old file."""
+    for doc_id in doc_ids:
+        (out_dir / f"{doc_id}.json").unlink(missing_ok=True)
+
+
+def _collect_trees(tree_dir: Path, doc_ids: list[str], kb_docs_dir: Path) -> list[dict]:
+    """Copy `<tree_dir>/<doc_id>.json` next to the kb doc as `.tree.json`."""
+    summaries: list[dict] = []
+    for doc_id in doc_ids:
+        tree = tree_dir / f"{doc_id}.json"
+        if not tree.is_file():
             summaries.append({"doc_id": doc_id, "tree_copied": False,
-                              "reason": "popo produced no output"})
+                              "reason": "popo produced no tree"})
             continue
-        # Locate the kb doc to derive the slug for the sidecar name.
         kb_doc = next(
-            (p for p in kb_docs_dir.glob(f"{doc_id}-*.md") if p.is_file()),
+            (p for p in sorted(kb_docs_dir.glob(f"{doc_id}-*.md")) if p.is_file()),
             None,
         )
         if kb_doc is None:
             summaries.append({"doc_id": doc_id, "tree_copied": False,
-                              "reason": f"no kb doc matching {doc_id}-*.md"})
+                              "reason": f"no kb doc matching {doc_id}-*.md",
+                              "source": str(tree)})
             continue
         sidecar = kb_doc.with_suffix(".tree.json")
-        # Pick the largest JSON in the tree dir — Popo emits a few aux
-        # files (txt previews, partial chunks); the real tree is the
-        # one with `tree_nodes` or `nodes` at the top level. Falling
-        # back to "largest .json" keeps us robust to filename drift.
-        tree_files = sorted(
-            (p for p in src_dir.glob("*.json") if p.is_file()),
-            key=lambda p: p.stat().st_size,
-            reverse=True,
-        )
-        if not tree_files:
-            summaries.append({"doc_id": doc_id, "tree_copied": False,
-                              "reason": "popo run produced no JSON"})
-            continue
         try:
-            sidecar.write_bytes(tree_files[0].read_bytes())
+            shutil.copyfile(tree, sidecar)
         except OSError as e:
             summaries.append({"doc_id": doc_id, "tree_copied": False,
                               "reason": f"copy failed: {e}"})
             continue
-        summaries.append({
-            "doc_id": doc_id,
-            "tree_copied": True,
-            "tree_path": str(sidecar),
-            "source": str(tree_files[0]),
-        })
+        summaries.append({"doc_id": doc_id, "tree_copied": True,
+                          "tree_path": str(sidecar), "source": str(tree)})
     return summaries
 
 
@@ -275,14 +279,15 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description=(
             "Run MinerU-Popo over cached MinerU outputs in a doc2kb kb. "
-            "Strictly opt-in — requires an upstream Popo checkout."
+            "Strictly opt-in — requires a MinerU-Popo checkout with its model."
         ),
     )
     ap.add_argument("kb_dir", help="Path to the doc2kb kb directory")
     ap.add_argument(
         "--popo-repo",
         default=None,
-        help=f"Path to the MinerU-Popo clone. Falls back to ${POPO_ENV_VAR}.",
+        help=f"Path to the MinerU-Popo clone. Falls back to ${POPO_ENV_VAR}, "
+             "then the bootstrap_popo.py default.",
     )
     ap.add_argument(
         "--doc-id",
@@ -290,29 +295,28 @@ def main() -> int:
         help="Postprocess only this doc_id. Default: every doc under "
              "<kb_dir>/_mineru/.",
     )
-    ap.add_argument(
-        "--run-name",
-        default="doc2kb",
-        help="Subfolder name created under <popo_repo>/post-process/mineru/. "
-             "Defaults to 'doc2kb' so multiple kbs share the same Popo "
-             "checkout without colliding.",
-    )
+    # Pre-4.2 the docs were staged into the shared Popo checkout under
+    # post-process/mineru/<run-name>/; everything now lives in <kb_dir>/_popo/.
+    ap.add_argument("--run-name", default=None, help=argparse.SUPPRESS)
     ap.add_argument(
         "--skip-normalization", action="store_true",
-        help="Skip step 2 (run_label_normalization.sh) — useful when "
-             "re-running inference after editing normalized output.",
+        help="Reuse <kb_dir>/_popo/label_normalization/ — e.g. re-running "
+             "inference after editing the normalized labels.",
     )
     ap.add_argument(
         "--skip-inference", action="store_true",
-        help="Skip step 3 (run_inference.sh) — useful when re-building "
-             "trees from existing inference output.",
+        help="Reuse <kb_dir>/_popo/inference/ — re-build trees only.",
     )
     ap.add_argument(
         "--auto-setup", action="store_true",
         help="If no Popo repo is configured, run bootstrap_popo.py first "
-             "(clone + env + ~8 GB model download), then proceed.",
+             "(clone + env + ~16 GB model download), then proceed.",
     )
     args = ap.parse_args()
+    warnings: list[str] = []
+    if args.run_name is not None:
+        warnings.append("--run-name ignored: Popo's working files now live in "
+                        f"<kb_dir>/{WORK_DIRNAME}/")
 
     kb_dir = Path(args.kb_dir).expanduser().resolve()
     if not kb_dir.is_dir():
@@ -322,7 +326,7 @@ def main() -> int:
     popo_repo = _resolve_popo_repo(args.popo_repo)
     if popo_repo is None and args.auto_setup:
         log("Popo repo not configured; --auto-setup → running bootstrap_popo.py "
-            "(this may clone the repo, build an env, and download ~8 GB)",
+            "(this may clone the repo, build an env, and download ~16 GB)",
             prefix="popo")
         subprocess.run(
             [sys.executable, str(SCRIPTS_DIR / "ensure_env.py"), "bootstrap_popo.py"],
@@ -338,10 +342,16 @@ def main() -> int:
     missing = _validate_popo_layout(popo_repo)
     if missing:
         emit_failure(
-            "Popo repo missing required scripts: " + ", ".join(missing)
+            "Popo repo missing required files: " + ", ".join(missing)
             + "\n\nIs this the right checkout? Expected layout per Popo README.\n\n"
             + POPO_NOT_FOUND_HINT
         )
+        return 2
+    python = _popo_python(popo_repo)
+    if python is None:
+        emit_failure(
+            f"no Python for Popo: {popo_repo / POPO_PY_SENTINEL} is missing and "
+            "python3 is not on PATH. Activate Popo's env or run bootstrap_popo.py.")
         return 2
 
     cache_dir = kb_dir / "_mineru"
@@ -352,71 +362,118 @@ def main() -> int:
             "Run extract_pdf_mineru.py with --keep-raw first."
         )
         return 1
-
     if args.doc_id:
         if args.doc_id not in available:
-            emit_failure(
-                f"doc_id {args.doc_id!r} not in cache. "
-                f"Available: {available}"
-            )
+            emit_failure(f"doc_id {args.doc_id!r} not in cache. Available: {available}")
             return 1
         targets = [args.doc_id]
     else:
         targets = available
 
-    # Stage each doc under post-process/mineru/<run>/<doc_id>/.
-    staged: list[Path] = []
+    failed: dict[str, str] = {}
     for doc_id in targets:
-        try:
-            dst = _stage_doc_into_popo(
-                cache_dir / doc_id, popo_repo, args.run_name, doc_id,
-            )
-            staged.append(dst)
-        except OSError as e:
-            emit_failure(f"failed to stage {doc_id}: {e}")
-            return 1
-    log(f"staged {len(staged)} doc(s) under {popo_repo}/post-process/mineru/{args.run_name}/",
-        prefix="popo")
+        problem = _cache_problem(cache_dir, doc_id)
+        if problem:
+            failed[doc_id] = problem
+    ready = [d for d in targets if d not in failed]
+    if not ready:
+        emit_failure("no cached doc is usable by Popo:\n" + "\n".join(
+            f"  {d}: {r}" for d, r in failed.items()))
+        return 1
 
-    # Use the bootstrapped env's python (if bootstrap_popo.py set one up) when
-    # invoking Popo's bash scripts — they resolve `python3` from PATH.
-    popo_env = _popo_subprocess_env(popo_repo)
-    if popo_env is not None:
-        log(f"using bootstrapped Popo env (sentinel {POPO_PY_SENTINEL})", prefix="popo")
+    work = kb_dir / WORK_DIRNAME
+    label_dir = work / "label_normalization"
+    label_model_dir = label_dir / POPO_MODEL   # label_normalization.py appends <model>/
+    infer_dir = work / "inference"
+    tree_dir = work / "build_tree"
+    txt_dir = work / "build_tree_txt"
+    select_root = work / ".select"
+    for d in (label_model_dir, infer_dir, tree_dir, txt_dir):
+        d.mkdir(parents=True, exist_ok=True)
 
-    # Run Popo's three bash scripts in order. Each step can be skipped via
-    # a flag for iterative re-runs without re-normalizing/re-inferring.
-    steps: list[tuple[str, str, bool]] = [
-        ("normalization", POPO_BASH_SCRIPTS[0], args.skip_normalization),
-        ("inference",     POPO_BASH_SCRIPTS[1], args.skip_inference),
-        ("build_tree",    POPO_BASH_SCRIPTS[2], False),
-    ]
-    for label, rel_script, skip in steps:
-        if skip:
-            log(f"skipping {label} (--skip-{label.split('_')[0]} set)", prefix="popo")
-            continue
-        rc, err = _run_bash(popo_repo / rel_script, popo_repo, env=popo_env)
+    env = _popo_subprocess_env(popo_repo)
+    post = popo_repo / "post_processing"
+    log(f"{len(ready)} doc(s) → Popo at {popo_repo} (work dir {work})", prefix="popo")
+
+    def drop(doc_ids: list[str], present: list[str], reason: str) -> list[str]:
+        for d in doc_ids:
+            if d not in present:
+                failed[d] = reason
+        return [d for d in doc_ids if d in present]
+
+    def step_failed(label: str, rc: int, tail: str) -> int:
+        emit_failure(f"popo {label} failed (exit {rc}):\n{tail or 'no output captured'}",
+                     extra={"work_dir": str(work)})
+        return 1
+
+    # 1. Label normalization: MinerU cache → Popo's per-page block format.
+    if args.skip_normalization:
+        log("skipping normalization (--skip-normalization)", prefix="popo")
+    else:
+        pdf_map = work / "pdf_map.json"
+        pdf_map.write_text(json.dumps(
+            {d: str(cache_dir / d / f"{d}.pdf") for d in ready},
+            ensure_ascii=False, indent=2), encoding="utf-8")
+        _unlink_outputs(label_model_dir, ready)
+        rc, tail = _run_popo("normalization", python, post / "label_normalization.py", [
+            "--model", POPO_MODEL, "--input-dir", str(cache_dir),
+            "--doc-id", *ready, "--output-dir", str(label_dir),
+            "--pdf-map-json", str(pdf_map),
+        ], popo_repo, env)
         if rc != 0:
-            emit_failure(
-                f"popo {label} failed (exit {rc}):\n{err or 'no stderr captured'}"
-            )
-            return 1
+            return step_failed("normalization", rc, tail)
+    present = [d for d in ready if (label_model_dir / f"{d}.json").is_file()]
+    ready = drop(ready, present, "no normalized labels (Popo's MineruReader skipped "
+                 "the doc, or --skip-normalization without an earlier run)")
 
-    summaries = _collect_trees(popo_repo, args.run_name, targets, kb_dir / "docs")
+    # 2. Inference: the 4B VLM labels truncation, title levels, image links.
+    if ready and args.skip_inference:
+        log("skipping inference (--skip-inference)", prefix="popo")
+    elif ready:
+        selected = _select(label_model_dir, ready, select_root / "labels")
+        _unlink_outputs(infer_dir, selected)
+        rc, tail = _run_popo("inference", python, post / "run_inference.py", [
+            "--model", POPO_MODEL, "--input-dir", str(select_root / "labels"),
+            "--output-dir", str(infer_dir), "--raw-output-root", "", "--limit", "0",
+        ], popo_repo, env)
+        if rc != 0:
+            return step_failed("inference", rc, tail)
+    present = [d for d in ready if (infer_dir / f"{d}.json").is_file()]
+    ready = drop(ready, present, "no inference output (or --skip-inference "
+                 "without an earlier run)")
+
+    # 3. Tree building (no model).
+    if ready:
+        selected = _select(infer_dir, ready, select_root / "inference")
+        _unlink_outputs(tree_dir, selected)
+        rc, tail = _run_popo("build_tree", python, post / "get_json_tree.py", [
+            "--input-dir", str(select_root / "inference"),
+            "--output-dir", str(tree_dir), "--txt-dir", str(txt_dir),
+        ], popo_repo, env)
+        if rc != 0:
+            return step_failed("build_tree", rc, tail)
+    shutil.rmtree(select_root, ignore_errors=True)
+
+    summaries = _collect_trees(tree_dir, ready, kb_dir / "docs")
+    summaries += [{"doc_id": d, "tree_copied": False, "reason": r}
+                  for d, r in failed.items()]
+    summaries.sort(key=lambda s: s["doc_id"])
 
     success_extras = {
         "popo_repo": str(popo_repo),
-        "run_name": args.run_name,
+        "work_dir": str(work),
         "processed": targets,
         "results": summaries,
     }
-    # Reuse emit_success's shape (it expects a body but we have none —
-    # pass a placeholder so tokens_estimated stays sensible at zero).
-    placeholder = kb_dir / "_logs" / "popo.json"
-    placeholder.parent.mkdir(parents=True, exist_ok=True)
-    placeholder.write_text(json.dumps(success_extras, indent=2),
-                           encoding="utf-8")
-    emit_success(placeholder, "", warnings=(), extra=success_extras)
+    log_path = kb_dir / "_logs" / "popo.json"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(json.dumps(success_extras, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+    if not any(s["tree_copied"] for s in summaries):
+        emit_failure("popo produced no tree:\n" + "\n".join(
+            f"  {s['doc_id']}: {s['reason']}" for s in summaries), extra=success_extras)
+        return 1
+    emit_success(log_path, "", warnings=warnings, extra=success_extras)
     return 0
 
 
