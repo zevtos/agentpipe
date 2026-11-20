@@ -49,7 +49,7 @@ python3 <skill_dir>/scripts/ensure_env.py
 
 **Опциональная зависимость для DOCX с математикой:** `pandoc` (`brew install pandoc` / `apt install pandoc`). Если установлен, `extract_docx.py` автоматически переключается на него для документов, помеченных scout'ом как `has_equations: true`, и сохраняет OOXML math как `$...$` LaTeX. Без pandoc такие документы извлекаются через mammoth и теряют формулы (warning будет в JSON output). `pandoc` также используется как предпочтительный маршрут для **`.rtf`** (`extract_rtf.py`): он сохраняет таблицы/картинки/структуру. Без pandoc `.rtf` всё равно извлекается через pure-Python `striprtf` (plain text), так что rtf никогда не падает. Аналогично для **`.epub`** (`extract_epub.py`): с pandoc сохраняется OPF spine-порядок, картинки и EPUB3 MathML → `$...$` LaTeX; без pandoc работает pure-Python fallback (`zip` + `markdownify`), который flatten'ит картинки в `![image N]()` placeholder'ы и теряет формулы (warning в JSON), но никогда не падает.
 
-**Системный конвертер для legacy `.doc`:** бинарный формат `.doc` (OLE2) не читается чистым Python, поэтому `extract_doc.py` шеллится во внешний конвертер по убыванию точности: `soffice`/`libreoffice` (`brew install --cask libreoffice` / `apt install libreoffice-writer`) → конвертит в `.docx` и переиспользует весь DOCX-пайплайн (таблицы, картинки, OOXML math); на macOS — `textutil` (встроен) тем же путём; иначе `antiword` (`apt install antiword`) — только plain text. Ни один из конвертеров не ставится в venv (как и opt-in mineru CLI). Если ни одного нет на PATH, `extract_doc.py` выходит с кодом 2 и install-hint — главный цикл должен трактовать это как «нужна установка конвертера», а не как corrupt-файл, и залогировать в `_logs/errors.json`. Scout заранее предупреждает (`no .doc converter on PATH ...`), когда в корпусе есть `.doc`, а конвертера нет.
+**Системный конвертер для legacy `.doc`:** бинарный формат `.doc` (OLE2) не читается чистым Python, поэтому `extract_doc.py` шеллится во внешний конвертер по убыванию точности: `soffice`/`libreoffice` (`brew install --cask libreoffice` / `apt install libreoffice-writer`) → конвертит в `.docx` и переиспользует весь DOCX-пайплайн (таблицы, картинки, OOXML math); на macOS — `textutil` (встроен) тем же путём; иначе `antiword` (`apt install antiword`) — только plain text. Ни один из конвертеров не ставится в venv (как и opt-in mineru tier). Если ни одного нет на PATH, `extract_doc.py` выходит с кодом 2 и install-hint — главный цикл должен трактовать это как «нужна установка конвертера», а не как corrupt-файл, и залогировать в `_logs/errors.json`. Scout заранее предупреждает (`no .doc converter on PATH ...`), когда в корпусе есть `.doc`, а конвертера нет.
 
 **Векторные картинки (EMF/WMF/SVG/PDF/EPS).** Схемы в DOCX/PPTX часто лежат метафайлами (вставка из Visio, «векторный клипарт»). Они растеризуются в PNG и попадают в `assets/` как обычные картинки: EMF/WMF — через тот же `soffice` (LibreOffice, одним запуском на документ), SVG и PDF — PyMuPDF из venv, EPS — `gs` (Ghostscript, `brew install ghostscript` / `apt install ghostscript`). Без `soffice`/`gs` на PATH такая картинка пропускается с warning и install-hint (`vector image (emf) not rasterized — LibreOffice is not on PATH — install it …`). Детали — `references/extraction-recipes.md` («Векторные картинки»).
 
@@ -96,7 +96,7 @@ python3 <skill_dir>/scripts/ensure_env.py apply_overrides.py <kb_dir> [--dry-run
   "overrides": [
     { "match": "papers/*.pdf",          // glob по source_path, ЛИБО точный doc-id, ЛИБО точный source_path
       "strategy": "mineru",
-      "mineru": { "backend": "vlm-auto-engine", "lang": "cyrillic", "keep_raw": true },
+      "mineru": { "tier": "standard", "keep_raw": true },   // старые "backend"/"lang" (MinerU 3) ещё принимаются
       "popo": true },                    // per-file Popo opt-in/out (перекрывает env)
     { "match": "doc-012", "strategy": "skip" }
   ]
@@ -104,7 +104,7 @@ python3 <skill_dir>/scripts/ensure_env.py apply_overrides.py <kb_dir> [--dry-run
 ```
 
 Гарантии: конфиг валидируется (неизвестный ключ / неверная `strategy` /
-`backend` → exit 2, запись не происходит); `_scout.json` валидируется **после**
+`tier` / `backend` → exit 2, запись не происходит); `_scout.json` валидируется **после**
 применения и пишется **атомарно** (`.tmp` → `os.replace`) — он никогда не
 останется полузаписанным или со сломанной схемой. На runnable-стратегии
 `action_required` обнуляется (override и есть Phase-3 решение). Правило,
@@ -139,7 +139,7 @@ Exit codes: `0` — все файлы дошли до терминального
 Каждый файл попадает ровно в один бакет `counts`: `extracted` / `unchanged` (sha совпал, переэкстракция пропущена) / `skipped_by_decision` / `error` / `needs_attention` (= число `needs_install`). Дочерние doc'и вложений в бакеты не входят — их число в `embedded_documents`. **Идемпотентность по `source_sha256`:** повторный запуск переэкстрактит только изменившиеся файлы (шардированный doc сверяется по `_index.md` своей папки) — безопасно гонять много раз (например, после установки конвертера для `.doc`).
 
 **Разберите `needs_attention[]` после диспетчера — это файлы, требующие ВАШЕГО суждения (диспетчер их НЕ решает сам, только surface'ит):**
-- `reason: "needs_install"` — extractor вышел с кодом 2: `.doc` без системного конвертера, либо `mineru` CLI не установлен. `install_hint` подскажет, что поставить. Это НЕ ошибка и НЕ corrupt — поставьте инструмент и **перезапустите `extract_corpus.py`** (идемпотентность доделает только этот файл).
+- `reason: "needs_install"` — extractor вышел с кодом 2: `.doc` без системного конвертера, либо не установлен mineru tier (`ensure_env.py --tier mineru`). `install_hint` подскажет, что поставить. Это НЕ ошибка и НЕ corrupt — поставьте инструмент и **перезапустите `extract_corpus.py`** (идемпотентность доделает только этот файл).
 - `reason: "visual_transcription"` — `ok:true` PDF с warning'ом `mangled_visual_layout`: body извлечён, но позиционная математика рассыпана. Перечитайте исходный PDF через `Read` и перепишите body `docs/<id>-*.md` вручную (см. pitfalls #13), затем `extraction_method: claude-pagewise-manual@1`.
 - `reason: "dropped_pictures_residual"` — `ok:true` PDF с остаточными `dropped_pictures`: поле `pages` (список номеров страниц, восстановленный из тела документа) подскажет, какие страницы догнать через mineru page-patch (`extract_pdf_mineru.py --pages … --patch-into …`) или ручную транскрипцию. **Автоматизация:** запустите `extract_corpus.py --patch-warnings` (или `dkb … --patch-warnings`) — он сам прогонит mineru page-patch по каждой такой PDF (нужен установленный `--tier mineru`; если не установлен — surface `tier_missing`, ничего молча не качает). `visual_transcription` не патчится авто (нет списка страниц — `--patch-into` требует `--pages`), только surface'ится.
 
@@ -194,14 +194,13 @@ python3 <skill_dir>/scripts/ensure_env.py extract_pdf_pymupdf4llm.py \
        "<input.pdf>" "<unused output path>" \
        --doc-id <id> --source-rel "<rel>" \
        --pages "2,18-19,35,221,243-244,588" \
-       --patch-into "<kb_dir>/docs/<existing>.md" \
-       --lang cyrillic
+       --patch-into "<kb_dir>/docs/<existing>.md"
    ```
 
-   Расценки на M-серии: ≈10 c/страница на vlm-mlx, то есть 9 страниц ≈
-   полторы минуты. Frontmatter автоматически обновляется
-   (`mineru_patched_pages: [...]`, `extraction_method_supplementary:
-   mineru-vlm@x.y.z`), и ассеты для патчей сохраняются под именем
+   Расценки на M-серии (MinerU 4, тир `standard`): ≈3 c/страница плюс
+   ~10 c на загрузку моделей, то есть 9 страниц ≈ 40 секунд. Frontmatter
+   автоматически обновляется (`mineru_patched_pages: [...]`,
+   `extraction_method_supplementary: mineru-standard@x.y.z`), и ассеты для патчей сохраняются под именем
    `<doc_id>-page<orig:03d>-mineru-imgN.<ext>` — pymupdf4llm-вые имена
    не затрагиваются. Установка tier и детали page-patching — в
    `references/mineru.md` (секция «Optional heavy tier» ниже — краткий обзор).
@@ -367,7 +366,7 @@ heading catalog alone is fine; the index earns its keep from dozens of docs up.
 | `apply_overrides.py`         | Phase 3.5 — deterministically patch `_scout.json` from `<kb_dir>/_overrides.json` (per-file `strategy`, structured `mineru` block, `popo` flag; nulls `action_required`). Validates config + post-apply scout, writes atomically, never corrupts scout. `--dry-run` / `--allow-unmatched`. |
 | `extract_corpus.py`          | Phase 4 batch dispatcher — runs the whole mechanical extract loop from `_scout.json` (strategy→extractor via `ensure_env.py`, writes `docs/*.md` + `_logs/errors.json`), idempotent by `source_sha256`, and prints one JSON summary with a `needs_attention[]` queue (`needs_install` / `visual_transcription` / `dropped_pictures_residual`). Renders per-file `mineru` flags from the scout entry; with `DOC2KB_ALWAYS_POPO` (or per-file `popo:true`) routes each mineru doc through Popo as a non-fatal stage 2 (`popo[]` in summary). Refuses to start (exit 2) on unresolved `action_required`. The agent runs this instead of looping per-file, then handles `needs_attention[]`. |
 | `extract_pdf_pymupdf4llm.py` | text-layer PDF → Markdown; auto-extracts embedded images to `<kb_dir>/assets/` and rewires `picture intentionally omitted` placeholders to those files. Page ranges are parsed by a process pool (`DOC2KB_PDF_WORKERS`, same output as one process). pymupdf4llm's own OCR (when Tesseract is installed) skips scans whose text layer lies under the page image; languages `DOC2KB_OCR_LANG` (default `rus+eng`), off with `DOC2KB_PDF_OCR=0` |
-| `extract_pdf_mineru.py`      | **opt-in** VLM-grade PDF → Markdown via the opendatalab/MinerU CLI; mirrors the other extractors' single-file contract, copies images to `<kb_dir>/assets/` via `save_image_safe`, optionally caches raw mineru output under `<kb_dir>/_mineru/<doc_id>/` for follow-up Popo runs. Supports `--pages 2,18-19,35` for page-targeted patching and `--patch-into <target.md>` to splice the result directly into an existing extraction (no temp files, frontmatter records `mineru_patched_pages` + `extraction_method_supplementary`). Requires `ensure_env.py --tier mineru`. |
+| `extract_pdf_mineru.py`      | **opt-in** VLM-grade PDF → Markdown via MinerU 4 (`standard` tier, run by `_mineru_driver.py` in the tier venv); mirrors the other extractors' single-file contract, copies the images the body links to `<kb_dir>/assets/` via `save_image_safe`, optionally caches raw mineru output under `<kb_dir>/_mineru/<doc_id>/vlm/` (with the `<doc_id>_content_list.json` Popo reads) for follow-up Popo runs. Supports `--pages 2,18-19,35` for page-targeted patching and `--patch-into <target.md>` to splice the result directly into an existing extraction (no temp files, frontmatter records `mineru_patched_pages` + `extraction_method_supplementary`). Requires `ensure_env.py --tier mineru`. |
 | `extract_docx.py`            | DOCX → Markdown via mammoth + markdownify; switches to pandoc when source contains OOXML math so formulas survive as LaTeX |
 | `extract_doc.py`             | legacy binary `.doc` → Markdown via a system-converter cascade (`soffice`/`libreoffice` or macOS `textutil` → `.docx` → full DOCX pipeline; `antiword` → plain text). Exits 2 with an install hint when no converter is on PATH |
 | `extract_rtf.py`             | RTF → Markdown via pandoc when available (tables/images/structure), else the pure-Python `striprtf` fallback (plain text). Codepage escapes (`\ansicpg1251`, `\fcharset204`, DBCS…) are rewritten as `\uN` before pandoc, which reads only cp1252 |
@@ -377,6 +376,7 @@ heading catalog alone is fine; the index earns its keep from dozens of docs up.
 | `extract_media.py`           | audio/video → timed Markdown (`[mm:ss]` paragraphs in chapter / 5-min sections). Text from subtitles that transcribe the speech (scout-paired sidecar files, text tracks rendered by ffmpeg), else speech-to-text through the opt-in `transcribe` tier (`_asr.py` in its own venv, process-group-killed at the job deadline). Exit 2 → `needs_install` when ffmpeg or the tier is missing |
 | `extract_subtitles.py`       | standalone .srt / .vtt / .ass / .ssa / .sbv / .lrc → the same timed Markdown; cue numbers, timing, styling tags and auto-caption rolling duplicates dropped; cp1251/koi8-r detected |
 | `_media.py`                  | stdlib helpers shared by scout and both media extractors: media/subtitle extension sets, `ffprobe` summary (cover art and stills are not video), subtitle parsers, transcript-vs-translation subtitle choice, timed-body renderer |
+| `_mineru_driver.py`          | **opt-in tier worker** (runs only in `<state>/mineru/venv`): the one caller of the MinerU 4 SDK — `parse` (tier, ocr_mode, native page_range) writes markdown.md / middle_json.json / images/ + Content List V1; `setup` fetches the standard-tier models into `<state>/mineru/models` |
 | `_asr.py`                    | **opt-in tier worker** (runs only in `<state>/transcribe/venv`): whisper.cpp large-v3 `-mc 0` + silero VAD (fallbacks mlx-whisper → faster-whisper) as the punctuated base, GigaAM v3 filling loops/silent gaps for Russian, deterministic merge + `review.md`; `setup` fetches the pinned models (HF revision + sha256), `check` lists usable engines |
 | `extract_ipynb.py`           | Jupyter notebook (.ipynb) → Markdown; per-cell anchors, text outputs preserved, base64 images dropped |
 | `extract_md_txt.py`          | normalize Markdown/text, encoding-aware |
@@ -545,7 +545,7 @@ generated index files.
 
 ## Optional heavy tier — MinerU VLM + Popo (opt-in)
 
-Дефолтный lightweight-тир покрывает text-layer PDF. Для **image-only (сканы)** или PDF с warning'ами `mangled_visual_layout` / `dropped_pictures` — opt-in VLM-экстрактор [MinerU](https://github.com/opendatalab/MinerU). Сам **никогда** не активируется: тяжёлые ML-deps (+~3 ГБ модель) ставятся явным действием — в **собственный venv** `<state>/mineru/venv` (его форк python-pptx в общем venv перезаписывал файлы `pptx`; общий venv, где тир ещё стоит, один раз пересобирается без него — после этого снова `--tier mineru`, модели остаются в кэше). Тир закреплён на mineru 3.2.x и mlx < 0.31.2 (почему — `references/mineru.md`).
+Дефолтный lightweight-тир покрывает text-layer PDF. Для **image-only (сканы)** или PDF с warning'ами `mangled_visual_layout` / `dropped_pictures` — opt-in VLM-экстрактор [MinerU](https://github.com/opendatalab/MinerU). Сам **никогда** не активируется: тяжёлые ML-deps (+~3 ГБ модель) ставятся явным действием — в **собственный venv** `<state>/mineru/venv`, модели (~2 ГБ) в `<state>/mineru/models` (форк python-pptx из MinerU 3 в общем venv перезаписывал файлы `pptx`; общий venv, где тир ещё стоит, один раз пересобирается без него — после этого снова `--tier mineru`). Тир — **MinerU 4.2.x, `standard`** (small-модели + VLM MinerU2.5-Pro через llama.cpp): на 30 русских страницах (скан ГОСТ, отчёт LaTeX, слайды) 0,20 % CER по кириллице, 9/11 формул, 3,5 с/стр. — точнее и в 4,6 раза быстрее MinerU 3.2; тир `basic` кириллицу не читает вовсе (замеры и выбор против PaddleOCR-VL/docling — `references/mineru.md`).
 
 ```bash
 python3 <skill_dir>/scripts/ensure_env.py --tier mineru                       # один раз
@@ -556,7 +556,7 @@ python3 <skill_dir>/scripts/ensure_env.py scout_corpus.py <in> <kb> --enable-min
 
 Опциональный stage 2 — [MinerU-Popo](https://github.com/opendatalab/MinerU-Popo) (4B-модель, реконструкция дерева документа): только если иерархия длинного документа всё ещё кривая после MinerU.
 
-**Полная настройка** (бэкенды `vlm`/`hybrid`/`pipeline`, бенчмарки по железу, тюнинг env, page-targeted `--pages … --patch-into …`, установка и авто-bootstrap Popo, env-роутинг `DOC2KB_ALWAYS_POPO` / `DOC2KB_POPO_AUTO`) — в **`references/mineru.md`**.
+**Полная настройка** (тиры и `--ocr-mode`, замеры движков на русских страницах, page-targeted `--pages … --patch-into …`, установка и авто-bootstrap Popo, env-роутинг `DOC2KB_ALWAYS_POPO` / `DOC2KB_POPO_AUTO`) — в **`references/mineru.md`**.
 
 ## Optional heavy tier — transcribe (speech-to-text for audio/video)
 
@@ -619,8 +619,8 @@ Env: `DOC2KB_TRANSCRIBE_LANG` (`auto`), `DOC2KB_ASR_ENGINES` (`auto` | `whisper,
   нужен только системный `ffmpeg`.
 
 **Opt-in heavy tier (`ensure_env.py --tier mineru`):**
-- VLM-grade PDF extraction через MinerU 2.5+ (`extract_pdf_mineru.py`).
-- На Apple Silicon — MLX-accelerated backend (`vlm-auto-engine`).
+- VLM-grade PDF extraction через MinerU 4, тир `standard` (`extract_pdf_mineru.py`
+  → `_mineru_driver.py` в venv тира); на Apple Silicon VLM идёт через llama.cpp/Metal.
 - Optional stage 2: MinerU-Popo для document-level tree reconstruction
   (`postprocess_popo.py`). Установка Popo — вручную по README, либо
   авто через `bootstrap_popo.py` (`DOC2KB_POPO_AUTO=1`). Авто-роутинг
@@ -639,4 +639,4 @@ Env: `DOC2KB_TRANSCRIBE_LANG` (`auto`), `DOC2KB_ASR_ENGINES` (`auto` | `whisper,
   вложения в PDF, идущих через mineru.
 - Scanned PDFs через OCRmyPDF + Tesseract (альтернатива MinerU без VLM).
 - Heavy tier на базе docling / marker-pdf для специфических layout-кейсов.
-- MinerU 4.x (новый CLI/SDK и формат вывода, без языкового параметра для OCR) и сравнение с PaddleOCR-VL на русских сканах и методичках.
+- Кириллица внутри формул (`Гц` → `\Gamma …`): одинаково ломается у MinerU 3/4, PaddleOCR-VL и docling.

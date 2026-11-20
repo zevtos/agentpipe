@@ -276,8 +276,8 @@ Options:
                             && playwright-cli install --skills) IF no playwright cli/mcp
                             is already present. Gated by y/N; needs npm. god implies it.
   --no-playwright           Never install playwright-cli (overrides a preset).
-  --with-mineru             Pre-warm doc2kb's MinerU tier (~3 GB+, several minutes,
-                            MLX/CUDA wheels). HEAVY deps are never auto-installed:
+  --with-mineru             Pre-warm doc2kb's MinerU 4 tier (~3 GB+, several minutes,
+                            torch + llama.cpp + models). HEAVY deps are never auto-installed:
                             requires an interactive y/N confirm (default N) and is
                             skipped in non-interactive shells. god implies this.
   --no-mineru               Never pre-warm MinerU (overrides a preset that requests it).
@@ -1372,7 +1372,7 @@ do_launchers_dry() {
 
 # --- MinerU pre-warm (opt-in, gated; both targets ship doc2kb) ---
 #
-# HARD RULE: heavy ML deps (MinerU's ~3 GB+ MLX/CUDA stack) are NEVER auto-
+# HARD RULE: heavy ML deps (MinerU's ~3 GB+ torch/llama.cpp stack + models) are NEVER auto-
 # installed or silently routed. Pre-warm fires only when explicitly requested
 # (--with-mineru, or the god preset) AND an interactive y/N is answered yes.
 # Non-interactive shells (CI, piped installs) skip with a pointer. The
@@ -1399,7 +1399,7 @@ do_mineru_prewarm() {
         return 0
     fi
     echo ""
-    warn "MinerU tier is a HEAVY download: ~3 GB+, several minutes (MLX/CUDA wheels)."
+    warn "MinerU tier is a HEAVY download: ~3 GB+, several minutes (torch + llama.cpp + ~2 GB models)."
     printf "  Pre-warm doc2kb MinerU tier now? [y/N] "
     local reply=""
     read -r reply || true

@@ -185,11 +185,13 @@ Per-type optional fields:
 | `headings`         | all        | first up to 10 top-level headings, for fast index |
 | `mineru_subset_pages` | pdf     | sorted list of original page numbers that mineru extracted, when the file was produced by `extract_pdf_mineru.py --pages` in standalone (non-splice) mode |
 | `mineru_patched_pages` | pdf    | sorted union of every page that has been replaced via `extract_pdf_mineru.py --patch-into`; accumulates across runs against the same target md |
-| `extraction_method_supplementary` | pdf | `mineru-<backend>@<version>` of the most recent mineru patch; set alongside `mineru_patched_pages`, never replaces the primary `extraction_method` |
+| `extraction_method_supplementary` | pdf | `mineru-<tier>@<version>` of the most recent mineru patch (3.x runs wrote `mineru-<backend>@<version>`); set alongside `mineru_patched_pages`, never replaces the primary `extraction_method` |
 
 `extraction_method` values that callers should recognise:
 
 - `pymupdf4llm@<ver>` — default PDF extractor.
+- `mineru-<tier>@<ver>` — opt-in MinerU 4 extractor (`mineru-standard@4.2.3`);
+  MinerU 3.x runs wrote `mineru-<backend>@<ver>` (`mineru-vlm@3.2.3`).
 - `mammoth+markdownify@<ver>` — default DOCX extractor (no math).
 - `pandoc@<ver>` — DOCX extractor used when source has OOXML math and pandoc
   is available; math is preserved as `$...$` / `$$...$$` LaTeX. Also the

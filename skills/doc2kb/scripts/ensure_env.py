@@ -25,7 +25,7 @@ ensure_env.py — изолированное окружение для скил�
 Использование:
     python3 ensure_env.py                          # lightweight bootstrap + путь к venv-питону
     python3 ensure_env.py <script> [args]          # lightweight bootstrap + запустить script
-    python3 ensure_env.py --tier mineru            # MinerU VLM для PDF (свой venv)
+    python3 ensure_env.py --tier mineru            # MinerU 4 для PDF (свой venv + модели)
     python3 ensure_env.py --tier mineru <script>   # ensure mineru tier перед запуском script
     python3 ensure_env.py --tier transcribe        # speech-to-text для аудио/видео (свой venv)
 
@@ -34,7 +34,9 @@ ensure_env.py — изолированное окружение для скил�
                             (у onnxruntime и mineru нет колёс для более новых).
     mineru                — requirements-mineru.txt в СОБСТВЕННОМ venv
                             (<state>/mineru/venv, Python 3.13), ставится только
-                            при явном --tier mineru. ~3 GB + MLX wheels на Mac.
+                            при явном --tier mineru. После pip-установки
+                            `_mineru_driver.py setup` качает модели тира
+                            standard (~2 GB) в <state>/mineru/models.
                             Раньше жил в общем venv, где его форк python-pptx
                             перезаписывал файлы пакета `pptx`; такой venv один
                             раз пересобирается без MinerU.
@@ -120,11 +122,12 @@ TIERS: dict[str, str] = {}
 # reach the tier as a subprocess (see isolated_python()).
 ISOLATED_TIERS: dict[str, tuple[str, str, str | None]] = {
     "transcribe": ("requirements-transcribe.txt", "3.12", "_asr.py"),
-    # MinerU pulls torch/transformers and `pypptx-with-oxml`, a python-pptx fork
-    # that installs into the same `pptx` package: in the shared venv it
-    # overwrote python-pptx's files under extract_pptx.py. Its CLI is all the
-    # extractor needs (extract_pdf_mineru.py runs <state>/mineru/venv/bin/mineru).
-    "mineru": ("requirements-mineru.txt", "3.13", None),
+    # MinerU pulls torch/transformers and (3.x) `pypptx-with-oxml`, a
+    # python-pptx fork that installs into the same `pptx` package: in the
+    # shared venv it overwrote python-pptx's files under extract_pptx.py.
+    # extract_pdf_mineru.py runs `_mineru_driver.py` with this venv's python;
+    # its `setup` fetches the standard-tier models into <state>/mineru/models.
+    "mineru": ("requirements-mineru.txt", "3.13", "_mineru_driver.py"),
 }
 
 # Python of the shared venv. onnxruntime (a PyMuPDF 2.x dependency) and mineru

@@ -88,9 +88,9 @@ assert payload["ok"]
 | extraction_strategy | script                          | invocation |
 |---------------------|---------------------------------|------------|
 | `pymupdf4llm`       | `extract_pdf_pymupdf4llm.py`    | `<input> <output> --doc-id <id> --source-rel <rel>` (auto image extraction to `<kb_dir>/assets/`; override with `--assets-dir`/`--assets-rel`, disable with `--no-extract-images`) |
-| `mineru`            | `extract_pdf_mineru.py`         | **Opt-in tier** — requires `ensure_env.py --tier mineru` once. `<input> <output> --doc-id <id> --source-rel <rel>` (default backend `auto`, language `cyrillic`; pass `--backend pipeline` for CPU-only, `--lang en` for English-only; `--keep-raw` preserves MinerU output under `<kb_dir>/_mineru/<doc_id>/` for follow-up `postprocess_popo.py`). Exits 2 with install hint when mineru CLI is missing — parent loop should mark the file as needing install rather than skipping silently. |
+| `mineru`            | `extract_pdf_mineru.py`         | **Opt-in tier** — requires `ensure_env.py --tier mineru` once. `<input> <output> --doc-id <id> --source-rel <rel>` (MinerU 4 tier `standard`, `--ocr-mode ocr`; never `--tier basic` for Cyrillic — it reads none; legacy `--backend`/`--lang` are accepted and run `standard`; `--keep-raw` preserves MinerU output under `<kb_dir>/_mineru/<doc_id>/vlm/` for follow-up `postprocess_popo.py`). Exits 2 with install hint when the mineru tier is missing — parent loop should mark the file as needing install rather than skipping silently. |
 | `mammoth`           | `extract_docx.py`               | `<input> <output> --doc-id <id> --source-rel <rel>` (auto-routes to `pandoc` when `has_equations: true` and pandoc is on PATH; force mammoth with `--force-mammoth`) |
-| `doc`               | `extract_doc.py`                | `<input> <output> --doc-id <id> --source-rel <rel>` (legacy binary `.doc`; converter cascade `soffice`/`libreoffice` → `.docx` → DOCX pipeline, macOS `textutil` same path, else `antiword` → text. Force one with `--converter soffice\|textutil\|antiword`. **Exits 2 with an install hint when no converter is on PATH** — treat as "needs install", not corrupt, same as the mineru CLI) |
+| `doc`               | `extract_doc.py`                | `<input> <output> --doc-id <id> --source-rel <rel>` (legacy binary `.doc`; converter cascade `soffice`/`libreoffice` → `.docx` → DOCX pipeline, macOS `textutil` same path, else `antiword` → text. Force one with `--converter soffice\|textutil\|antiword`. **Exits 2 with an install hint when no converter is on PATH** — treat as "needs install", not corrupt, same as the mineru tier) |
 | `rtf`               | `extract_rtf.py`                | `<input> <output> --doc-id <id> --source-rel <rel>` (pandoc when on PATH — preserves tables/images/structure; else pure-Python `striprtf` → plain text. Force the fallback with `--force-striprtf`) |
 | `python-pptx`       | `extract_pptx.py`               | `<input> <output> --doc-id <id> --source-rel <rel>` |
 | `passthrough-md`    | `extract_md_txt.py --mode md`   | `<input> <output> --doc-id <id> --source-rel <rel> --mode md` |
@@ -109,12 +109,12 @@ assert payload["ok"]
 
 ## Opt-in MinerU tier
 
-The `mineru` strategy is opt-in by design: heavy ML deps and a ~3 GB model
-download never enter the lightweight default tier. To enable:
+The `mineru` strategy is opt-in by design: heavy ML deps and ~2 GB of
+models never enter the lightweight default tier. To enable:
 
 ```bash
-# One-time: mineru[all] (+ MLX wheels on Apple Silicon) in its own venv,
-# <state>/mineru/venv — never the shared lightweight one
+# One-time: MinerU 4 in its own venv (<state>/mineru/venv — never the shared
+# lightweight one) + standard-tier models in <state>/mineru/models
 python3 <skill_dir>/scripts/ensure_env.py --tier mineru
 
 # Auto-route image_only PDFs through mineru when scanning a corpus
@@ -158,26 +158,24 @@ When a `pymupdf4llm` extraction emits a `dropped_pictures` /
 `mangled_visual_layout` warning that names a handful of specific pages
 (usually formulas, schemas, or text-as-vector diagrams the text-layer
 extractor could not recover), use `extract_pdf_mineru.py` in page-patch
-mode instead of re-extracting the whole PDF. mineru's VLM run on a
-50-page book is hours; running it on the 8 broken pages takes a
-minute.
+mode instead of re-extracting the whole PDF. A whole 600-page book is
+half an hour of VLM time on an M-series laptop; the 8 broken pages take
+well under a minute (≈3 s/page + ~10 s model setup, MinerU 4 standard).
 
 ```bash
 python3 "$SKILL/scripts/ensure_env.py" extract_pdf_mineru.py \
     "$INPUT" /unused/output/path.md \
     --doc-id "$DOCID" --source-rel "$SREL" \
     --pages "2,18-19,35,221,243-244,588" \
-    --patch-into "$KB/docs/$DOCID-<slug>.md" \
-    --lang cyrillic
+    --patch-into "$KB/docs/$DOCID-<slug>.md"
 ```
 
 What the script does:
 
-1. Slices the original PDF down to just the requested pages via pymupdf
-   in a tempdir — mineru sees a tiny subset PDF and processes only that.
-2. Remaps every `[page N]` anchor and every asset filename it emits
-   from mineru's subset indices back to the original PDF page numbers.
-   Asset names get an extra `-mineru-` infix
+1. Hands the page list to MinerU's native `page_range` — only those pages
+   are parsed, and MinerU keeps the original page indices in its output.
+2. Writes every `[page N]` anchor and asset filename with the original PDF
+   page number. Asset names get an extra `-mineru-` infix
    (`<doc_id>-page<orig:03d>-mineru-imgN.<ext>`) so they never collide
    with pymupdf4llm's existing `<doc_id>-page<NN>-imgN` files.
 3. Splices the new page sections into the existing target md, replacing
@@ -185,7 +183,7 @@ What the script does:
    (preamble, other pages, frontmatter primary fields) is untouched.
 4. Updates the target's frontmatter with `mineru_patched_pages: [...]`
    (sorted union across runs) and `extraction_method_supplementary:
-   mineru-<backend>@<version>`. Appends a single-line splice-summary
+   mineru-<tier>@<version>`. Appends a single-line splice-summary
    warning, accumulates the mineru-side warnings under
    `mineru_patch[…]:` prefixes.
 5. Safety: refuses to splice if the target's `source_sha256` ≠ the
