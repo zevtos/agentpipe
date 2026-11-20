@@ -5,7 +5,7 @@
 #
 # Installed into its OWN venv (<state>/transcribe/venv, Python 3.12), never the
 # shared lightweight one: GigaAM pins onnx 1.19 / onnxruntime 1.23 (below what
-# the mineru tier needs) and torch wheels trail the newest CPython. After the
+# PyMuPDF 2.x needs) and torch wheels trail the newest CPython. After the
 # pip step ensure_env runs `_asr.py setup`, which downloads the pinned models
 # (HF revision + sha256): whisper.cpp ggml-large-v3 + silero VAD when
 # `whisper-cli` is on PATH, otherwise the mlx-whisper / faster-whisper weights;
@@ -18,13 +18,18 @@
 # Intel Macs: torch ≥ 2.6 publishes no x86_64 macOS wheels — the tier does not
 # install there; subtitle tracks still extract without it.
 
-# GigaAM (Sber, Russian ASR, MIT). PyPI 0.2.0 ships only the v2 models; v3
-# (v3_e2e_rnnt — punctuation-free but the most complete on hall audio) lives on
-# GitHub main. Pinned to a commit, never a branch.
+# GigaAM (Sber, Russian ASR, MIT). PyPI ships only the v2 models; v3
+# (v3_e2e_rnnt — punctuated and normalized, the most complete on hall audio)
+# lives on GitHub main. Pinned to a commit, never a branch. It downloads its
+# weights from Sber's CDN (cdn.chatwm.opensmodel.sberdevices.ru), not Hugging
+# Face; while that host is unreachable (its TLS certificate expired 2026-11-04)
+# an uncached install runs without the Russian filler (_asr.py, load_gigaam).
 gigaam @ git+https://github.com/salute-developers/gigaam@7447938d791c4f3e643386ee22c33777004293a5
-# torch ≥ 2.6: torch.load(weights_only=True) RCE (CVE-2025-32434) is fixed
-# there, and GigaAM loads pickled checkpoints. < 2.11 = the line GigaAM main
-# pins for its longform extra.
+# GigaAM unpickles its checkpoints (torch.load(weights_only=False)), so what
+# guards them is GigaAM's own md5 table plus the commit pin above, not torch's
+# weights_only fix (CVE-2025-32434, torch ≥ 2.6). < 2.11 = the line GigaAM
+# main pins for its longform extra; its inference path needs none of the
+# torchaudio I/O removed in 2.9.
 torch>=2.6,<2.11
 torchaudio>=2.6,<2.11
 silero-vad>=6.2,<7

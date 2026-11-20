@@ -135,6 +135,60 @@ def _is_chrome_placeholder(shape) -> bool:
         return False
 
 
+_MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+# mc:Choice branches we can read: a14 = Office 2010 drawing (a14:m equations,
+# rendered through _omml). Any other requirement (ink, 3D models, chartex …)
+# takes mc:Fallback, usually a picture of the same content.
+_READABLE_REQUIRES = {"a14"}
+
+
+def _unwrap_alternate_content(sp_tree) -> int:
+    """Replace each shape-level `mc:AlternateContent` with the shapes of the
+    branch we can read. python-pptx skips the wrapper entirely, so a text box
+    holding an equation — PowerPoint always wraps those — vanished with all its
+    text. Mutates the in-memory slide XML only. Returns the number unwrapped."""
+    n = 0
+    for ac in list(sp_tree.iter(f"{{{_MC_NS}}}AlternateContent")):
+        parent = ac.getparent()
+        if parent is None or _local(parent.tag) not in ("spTree", "grpSp"):
+            continue  # graphicFrame-level wrappers (OLE) are read by _ole_info
+        branch = next((c for c in ac if _local(c.tag) == "Choice" and c.get("Requires")
+                       and set(c.get("Requires").split()) <= _READABLE_REQUIRES), None)
+        if branch is None:
+            branch = next((c for c in ac if _local(c.tag) == "Fallback"), None)
+        at = parent.index(ac)
+        for k, shape_el in enumerate(list(branch) if branch is not None else []):
+            parent.insert(at + k, shape_el)
+        parent.remove(ac)
+        n += 1
+    return n
+
+
+def _para_text(para) -> str:
+    """A paragraph's text in document order: runs and fields, a line break as
+    "\\n" (joining `para.runs` glued the words on both sides of one), and
+    equations (`a14:m` → OMML) as `$…$` LaTeX, `$$…$$` for a display
+    equation — python-pptx leaves those out."""
+    out: list[str] = []
+    for child in para._p:
+        tag = _local(child.tag)
+        if tag in ("r", "fld"):
+            out.append("".join(t.text or "" for t in child if _local(t.tag) == "t"))
+        elif tag == "br":
+            out.append("\n")
+        elif tag not in ("pPr", "endParaRPr"):
+            import _omml  # noqa: E402
+            for m in _omml.math_elements(child) if tag != "oMathPara" else [child]:
+                latex = _omml.to_latex(m)
+                if latex:
+                    out.append(f"$${latex}$$" if _local(m.tag) == "oMathPara" else f"${latex}$")
+    return "".join(out)
+
+
+def _tf_text(tf) -> str:
+    return "\n".join(_para_text(p) for p in tf.paragraphs)
+
+
 def _shape_text(shape) -> str:
     if not getattr(shape, "has_text_frame", False):
         return ""
@@ -142,14 +196,7 @@ def _shape_text(shape) -> str:
         tf = shape.text_frame
     except Exception:
         return ""
-    parts = []
-    for para in tf.paragraphs:
-        line = "".join(run.text for run in para.runs)
-        if not line:
-            # Sometimes runs are empty but para.text has content (auto-numbered, etc.)
-            line = para.text or ""
-        parts.append(line)
-    return "\n".join(parts).rstrip()
+    return _tf_text(tf).rstrip()
 
 
 def _table_md(shape) -> str:
@@ -162,7 +209,8 @@ def _table_md(shape) -> str:
         cells = []
         for cell in row.cells:
             tf = cell.text_frame
-            txt = " ".join(p.text for p in tf.paragraphs if p.text).replace("\n", " ").strip()
+            txt = " ".join(t for t in (_para_text(p) for p in tf.paragraphs) if t)
+            txt = txt.replace("\n", " ").strip()
             # Markdown pipes inside cells break the table; escape them.
             txt = txt.replace("|", "\\|")
             cells.append(txt)
@@ -540,9 +588,10 @@ def extract(
                 continue
 
             if getattr(shape, "has_text_frame", False):
-                if ctx.title_shape_id is not None and shape.shape_id == ctx.title_shape_id:
-                    continue  # already used as the slide header
                 txt = _shape_text(shape)
+                if ctx.title_shape_id is not None and shape.shape_id == ctx.title_shape_id:
+                    # The header holds the first line; later lines are content.
+                    txt = txt.strip().split("\n", 1)[1] if "\n" in txt.strip() else ""
                 if txt.strip():
                     ctx.body.append(txt.strip())
                 continue
@@ -556,6 +605,10 @@ def extract(
                     warnings.append(f"slide {ctx.idx}: group shape unreadable ({e})")
 
     for idx, slide in enumerate(prs.slides, start=1):
+        try:
+            _unwrap_alternate_content(slide.shapes._spTree)
+        except Exception as e:  # noqa: BLE001 — never lose the rest of the slide
+            warnings.append(f"slide {idx}: alternate-content shapes unreadable ({e})")
         title = _best_title(slide)
         if title:
             title = sanitize_heading(title)
@@ -587,7 +640,7 @@ def extract(
         notes_text = ""
         if slide.has_notes_slide:
             try:
-                notes_text = (slide.notes_slide.notes_text_frame.text or "").strip()
+                notes_text = _tf_text(slide.notes_slide.notes_text_frame).strip()
             except Exception:
                 notes_text = ""
         if notes_text:

@@ -3,9 +3,15 @@
 # Install with:
 #     python3 <skill_dir>/scripts/ensure_env.py --tier mineru
 #
-# Default doc2kb bootstrap does NOT read this file. Adding `mineru[all]` to
-# the lightweight tier would pull torch + transformers + ~3 GB of CV models
-# into every `ensure_env.py` run, which we explicitly do not want.
+# Installed into its OWN venv (<state>/mineru/venv, Python 3.13), never the
+# shared lightweight one: besides torch + transformers + ~3 GB of CV models,
+# mineru pulls `pypptx-with-oxml`, a python-pptx fork that writes into the same
+# `pptx` package and replaced python-pptx's files under extract_pptx.py.
+#
+# Held on 3.2.x, the line doc2kb was measured on: the 3.4 pipeline backend
+# drops subscript digits (`Li2MnO3` → "Li MnO", MinerU #5540, fixed only by the
+# 4.0 rewrite), and 4.x replaces the `mineru -p … -b … -l …` CLI and the output
+# layout extract_pdf_mineru.py parses.
 #
 # Apple Silicon notes:
 #   - `mlx-vlm` is the package mineru's auto-engine selector probes for to
@@ -18,11 +24,11 @@
 #   - `sys_platform == "darwin"` markers keep Linux/Windows installs from
 #     trying to pull MLX wheels that aren't published for them; mineru on
 #     those platforms uses CUDA or pure-CPU pipeline backends instead.
-mineru[all]>=2.5,<4.0
-mlx-vlm; sys_platform == "darwin"
-# Pin mlx below 0.32 — version 0.31.2 introduced a regression where the
-# mlx-engine throws "RuntimeError: There is no Stream(gpu, N) in current
-# thread" inside multi-threaded inference; confirmed safe range is the
-# 0.31.x line up to but not including 0.32. See MinerU discussion #4842.
-mlx>=0.31,<0.32; sys_platform == "darwin"
-mlx-lm; sys_platform == "darwin"
+mineru[all]>=3.2.2,<3.3
+mlx-vlm>=0.3.9,<0.4; sys_platform == "darwin"
+# Pin mlx below 0.31.2: 0.31.2 made a stream created in one thread unusable
+# from another ("RuntimeError: There is no Stream(gpu, N) in current thread",
+# ml-explore/mlx#3727), which breaks mineru's threaded mlx-engine; the 3.2.x
+# mineru-vl-utils never adapted. The old `<0.32` cap still let 0.31.2 in.
+mlx>=0.31,<0.31.2; sys_platform == "darwin"
+mlx-lm>=0.29,<0.30; sys_platform == "darwin"

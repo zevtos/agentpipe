@@ -160,10 +160,7 @@ def _render_document_bytes(data: bytes, filetype: str,
     try:
         import pymupdf  # type: ignore
     except ImportError:
-        try:
-            import fitz as pymupdf  # type: ignore
-        except ImportError:
-            return None, "PyMuPDF is not importable (broken venv — re-run ensure_env.py)"
+        return None, "PyMuPDF is not importable (broken venv — re-run ensure_env.py)"
     try:
         doc = pymupdf.open(stream=data, filetype=filetype)
     except Exception as e:  # noqa: BLE001 — any parser error means "not renderable"

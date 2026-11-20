@@ -159,11 +159,10 @@ DEFAULT_LANG = "cyrillic"  # doc2kb users primarily work with RU/EN material
 MINERU_TIMEOUT_SECONDS = 3600
 
 INSTALL_HINT = (
-    "MinerU CLI not found. Install the opt-in tier:\n"
+    "MinerU CLI not found. Install the opt-in tier (its own venv, "
+    "<state>/mineru/venv):\n"
     "    python3 <skill_dir>/scripts/ensure_env.py --tier mineru\n"
-    "Or install manually into the active venv:\n"
-    "    uv pip install -U 'mineru[all]'\n"
-    "    # macOS Apple Silicon: also `uv pip install -U mlx mlx-lm`"
+    "Or point --mineru-bin at a mineru you manage yourself."
 )
 
 
@@ -214,15 +213,23 @@ def _slice_pdf(
 
 
 def _mineru_executable(override: str | None = None) -> str | None:
-    """Resolve the mineru binary. Prefer an explicit `--mineru-bin` arg,
-    then look on PATH (which inside ensure_env.py points at the venv's
-    `bin/`). Returns None if mineru isn't available.
+    """Resolve the mineru binary: an explicit `--mineru-bin`, else the
+    `--tier mineru` venv (<state>/mineru/venv), else `mineru` on PATH.
+    Returns None if mineru isn't available.
     """
     if override:
         candidate = Path(override).expanduser()
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate)
         return None
+    try:
+        import ensure_env  # noqa: E402 — stdlib-only, next to this script
+        tier_bin = ensure_env.isolated_python("mineru").parent / (
+            "mineru.exe" if os.name == "nt" else "mineru")
+        if ensure_env.isolated_ready("mineru") and os.access(tier_bin, os.X_OK):
+            return str(tier_bin)
+    except Exception:  # noqa: BLE001 — fall back to PATH
+        pass
     return shutil.which("mineru")
 
 

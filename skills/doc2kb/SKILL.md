@@ -43,7 +43,7 @@ python3 <skill_dir>/scripts/ensure_env.py <target_script.py> [args ...]
 python3 <skill_dir>/scripts/ensure_env.py
 ```
 
-(No target script → bootstrap only, prints venv-python path.) Creates the venv in a global state dir outside the code (ADR-008 — `$DOC2KB_HOME` or `${XDG_DATA_HOME:-~/.local/share}/agentpipe/doc2kb/venv`) and installs the lightweight tier: pymupdf4llm, pdfplumber, pypdf, pikepdf, python-magic, python-docx, mammoth, python-pptx, openpyxl, defusedxml, olefile, trafilatura, markdownify, charset-normalizer, striprtf, tiktoken, Pillow, lxml (полный список — `scripts/requirements.txt`).
+(No target script → bootstrap only, prints venv-python path.) Creates the venv in a global state dir outside the code (ADR-008 — `$DOC2KB_HOME` or `${XDG_DATA_HOME:-~/.local/share}/agentpipe/doc2kb/venv`) on Python 3.11–3.14 (onnxruntime и mineru не публикуют колёса для более новых; uv подберёт/скачает такой сам, без uv ищется `python3.14`…`python3.11`) and installs the lightweight tier: PyMuPDF 2.x (внутри — pymupdf4llm и layout), pdfplumber, pikepdf, python-magic, python-docx, mammoth, python-pptx, openpyxl, defusedxml, olefile, trafilatura, markdownify, charset-normalizer, striprtf, tiktoken, Pillow, lxml (полный список — `scripts/requirements.txt`).
 
 **Системные зависимости (macOS):** `brew install libmagic` — обязательно, иначе python-magic не импортируется. На Linux: `apt install libmagic1`. На WSL то же. Без libmagic scout всё равно работает (fallback на расширение файла), но `mime_confidence` будет всегда `"high"` без перекрёстной проверки.
 
@@ -362,7 +362,7 @@ heading catalog alone is fine; the index earns its keep from dozens of docs up.
 
 | script | purpose |
 |---|---|
-| `ensure_env.py`              | idempotent venv bootstrap (run once or on requirements change). Accepts `--tier mineru` (additive, shared venv) and `--tier transcribe` (isolated venv `<state>/transcribe/venv` + pinned-model setup) for the opt-in heavy installs. |
+| `ensure_env.py`              | idempotent venv bootstrap (run once or on requirements change); the shared venv runs on Python 3.11–3.14 and is rebuilt when it sits on another interpreter. Accepts `--tier mineru` (isolated venv `<state>/mineru/venv`) and `--tier transcribe` (isolated venv `<state>/transcribe/venv` + pinned-model setup) for the opt-in heavy installs. |
 | `scout_corpus.py`            | Phase 2 — classify corpus, emit `_scout.json`. `--enable-mineru` opt-in routes `image_only` PDFs through the mineru extractor. |
 | `apply_overrides.py`         | Phase 3.5 — deterministically patch `_scout.json` from `<kb_dir>/_overrides.json` (per-file `strategy`, structured `mineru` block, `popo` flag; nulls `action_required`). Validates config + post-apply scout, writes atomically, never corrupts scout. `--dry-run` / `--allow-unmatched`. |
 | `extract_corpus.py`          | Phase 4 batch dispatcher — runs the whole mechanical extract loop from `_scout.json` (strategy→extractor via `ensure_env.py`, writes `docs/*.md` + `_logs/errors.json`), idempotent by `source_sha256`, and prints one JSON summary with a `needs_attention[]` queue (`needs_install` / `visual_transcription` / `dropped_pictures_residual`). Renders per-file `mineru` flags from the scout entry; with `DOC2KB_ALWAYS_POPO` (or per-file `popo:true`) routes each mineru doc through Popo as a non-fatal stage 2 (`popo[]` in summary). Refuses to start (exit 2) on unresolved `action_required`. The agent runs this instead of looping per-file, then handles `needs_attention[]`. |
@@ -370,9 +370,10 @@ heading catalog alone is fine; the index earns its keep from dozens of docs up.
 | `extract_pdf_mineru.py`      | **opt-in** VLM-grade PDF → Markdown via the opendatalab/MinerU CLI; mirrors the other extractors' single-file contract, copies images to `<kb_dir>/assets/` via `save_image_safe`, optionally caches raw mineru output under `<kb_dir>/_mineru/<doc_id>/` for follow-up Popo runs. Supports `--pages 2,18-19,35` for page-targeted patching and `--patch-into <target.md>` to splice the result directly into an existing extraction (no temp files, frontmatter records `mineru_patched_pages` + `extraction_method_supplementary`). Requires `ensure_env.py --tier mineru`. |
 | `extract_docx.py`            | DOCX → Markdown via mammoth + markdownify; switches to pandoc when source contains OOXML math so formulas survive as LaTeX |
 | `extract_doc.py`             | legacy binary `.doc` → Markdown via a system-converter cascade (`soffice`/`libreoffice` or macOS `textutil` → `.docx` → full DOCX pipeline; `antiword` → plain text). Exits 2 with an install hint when no converter is on PATH |
-| `extract_rtf.py`             | RTF → Markdown via pandoc when available (tables/images/structure), else the pure-Python `striprtf` fallback (plain text) |
+| `extract_rtf.py`             | RTF → Markdown via pandoc when available (tables/images/structure), else the pure-Python `striprtf` fallback (plain text). Codepage escapes (`\ansicpg1251`, `\fcharset204`, DBCS…) are rewritten as `\uN` before pandoc, which reads only cp1252 |
 | `extract_epub.py`            | EPUB → Markdown via pandoc when available (OPF spine order, images, EPUB3 MathML → `$...$` LaTeX), else the pure-Python `zip`+`markdownify` fallback (images → placeholders, MathML dropped). Records `book_title`/`book_authors` in frontmatter |
-| `extract_pptx.py`            | PPTX → Markdown, preserves speaker notes; pictures at any group depth, charts as category × series tables (cached values), SmartArt node texts, OLE objects (preview image + link to the embedded doc) |
+| `extract_pptx.py`            | PPTX → Markdown, preserves speaker notes; pictures at any group depth, charts as category × series tables (cached values), SmartArt node texts, OLE objects (preview image + link to the embedded doc), equations as `$…$` LaTeX (shapes in `mc:AlternateContent`, which python-pptx skips) |
+| `_omml.py`                   | Office Math (OMML) → LaTeX for `extract_pptx.py`: fractions, scripts, radicals, delimiters, n-ary operators, functions, accents, matrices; unknown elements keep their text |
 | `extract_media.py`           | audio/video → timed Markdown (`[mm:ss]` paragraphs in chapter / 5-min sections). Text from subtitles that transcribe the speech (scout-paired sidecar files, text tracks rendered by ffmpeg), else speech-to-text through the opt-in `transcribe` tier (`_asr.py` in its own venv, process-group-killed at the job deadline). Exit 2 → `needs_install` when ffmpeg or the tier is missing |
 | `extract_subtitles.py`       | standalone .srt / .vtt / .ass / .ssa / .sbv / .lrc → the same timed Markdown; cue numbers, timing, styling tags and auto-caption rolling duplicates dropped; cp1251/koi8-r detected |
 | `_media.py`                  | stdlib helpers shared by scout and both media extractors: media/subtitle extension sets, `ffprobe` summary (cover art and stills are not video), subtitle parsers, transcript-vs-translation subtitle choice, timed-body renderer |
@@ -512,8 +513,8 @@ generated index files.
 3. **Audio/video.** Recordings are parsed by the system `ffmpeg`/`ffprobe`
    (large C attack surface, like the `.doc` converter) — keep it updated.
    Speech-to-text runs locally in the tier's own venv; nothing leaves the
-   machine. GigaAM loads pickled checkpoints, hence the `torch ≥ 2.6` pin
-   (`weights_only` RCE fix).
+   machine. GigaAM unpickles its checkpoints (`weights_only=False`); they are
+   guarded by GigaAM's md5 table and the pinned GigaAM commit.
 4. **Embedded objects and vector images.** Embedded documents are parsed by
    the same extractors, in child processes, under depth / count / size /
    compression-ratio / time limits (`_embedded.py`); OLE2 containers go through
@@ -540,11 +541,11 @@ generated index files.
 - Не суммаризировать.
 - Не embed-ить картинки в Markdown (base64 раздувает токены — extract скрипты сами заменяют на placeholder, не пытайтесь переопределить).
 - Не задавать пользователю серию отдельных вопросов — батчите все решения в одно сообщение.
-- Не использовать `markitdown` или `unstructured` как "более простую альтернативу" — они теряют speaker notes в PPTX и таблицы в DOCX.
+- Не подменять экстракторы на `markitdown` или `unstructured` «для простоты»: markitdown 0.1.x для DOCX идёт тем же mammoth+markdownify путём и не держит формулы PPTX, SmartArt, вложения и картинки в `assets/` (см. pitfalls #7).
 
 ## Optional heavy tier — MinerU VLM + Popo (opt-in)
 
-Дефолтный lightweight-тир покрывает text-layer PDF. Для **image-only (сканы)** или PDF с warning'ами `mangled_visual_layout` / `dropped_pictures` — opt-in VLM-экстрактор [MinerU](https://github.com/opendatalab/MinerU). Сам **никогда** не активируется: тяжёлые ML-deps (+~3 ГБ модель) ставятся явным действием.
+Дефолтный lightweight-тир покрывает text-layer PDF. Для **image-only (сканы)** или PDF с warning'ами `mangled_visual_layout` / `dropped_pictures` — opt-in VLM-экстрактор [MinerU](https://github.com/opendatalab/MinerU). Сам **никогда** не активируется: тяжёлые ML-deps (+~3 ГБ модель) ставятся явным действием — в **собственный venv** `<state>/mineru/venv` (его форк python-pptx в общем venv перезаписывал файлы `pptx`; общий venv, где тир ещё стоит, один раз пересобирается без него — после этого снова `--tier mineru`, модели остаются в кэше). Тир закреплён на mineru 3.2.x и mlx < 0.31.2 (почему — `references/mineru.md`).
 
 ```bash
 python3 <skill_dir>/scripts/ensure_env.py --tier mineru                       # один раз
@@ -566,11 +567,13 @@ python3 <skill_dir>/scripts/ensure_env.py --tier transcribe       # один р�
 DOC2KB_WHISPER_MODEL=/path/ggml-large-v3.bin python3 <skill_dir>/scripts/ensure_env.py --tier transcribe
 ```
 
-Тир живёт в **собственном venv** (`<state>/transcribe/venv`, Python 3.12): GigaAM пинит onnx/onnxruntime ниже, чем нужно mineru, а torch отстаёт от свежего CPython — общий venv поломал бы mineru. `ensure_env.py --tier transcribe` ставит `requirements-transcribe.txt` и вызывает `_asr.py setup`, который качает модели по закреплённой ревизии HF с проверкой sha256 (whisper.cpp `ggml-large-v3` 3.1 ГБ + VAD, если есть `whisper-cli`; иначе веса mlx-whisper / faster-whisper; GigaAM v3 ~430 МБ). После установки scout/extract подхватывают тир сами (`isolated_ready`), без флагов.
+GigaAM качает веса не с Hugging Face, а с CDN Сбера; пока он недоступен (TLS-сертификат истёк 2026-11-04), установка без кэша `~/.cache/gigaam` проходит без русского филлера — `setup` и `run` пишут об этом, база (whisper) работает.
+
+Тир живёт в **собственном venv** (`<state>/transcribe/venv`, Python 3.12): GigaAM пинит onnx/onnxruntime ниже, чем нужно PyMuPDF 2.x, а torch отстаёт от свежего CPython — общий venv поломал бы mineru. `ensure_env.py --tier transcribe` ставит `requirements-transcribe.txt` и вызывает `_asr.py setup`, который качает модели по закреплённой ревизии HF с проверкой sha256 (whisper.cpp `ggml-large-v3` 3.1 ГБ + VAD, если есть `whisper-cli`; иначе веса mlx-whisper / faster-whisper; GigaAM v3 ~430 МБ). После установки scout/extract подхватывают тир сами (`isolated_ready`), без флагов.
 
 Пайплайн — порт локального `transcribe`, проверенного на 30-минутной записи из зала, где обычный whisper 19 минут из 30 крутил «Дай Бог.» по кругу:
 - **база** — whisper.cpp large-v3 по сырому аудио, `-mc 0` (без переноса текстового контекста между окнами — именно это убивает петли) + silero VAD → текст с пунктуацией. Без `whisper-cli`: mlx-whisper (Apple Silicon) → faster-whisper (везде), оба с `condition_on_previous_text=False`;
-- **филлер** — GigaAM v3 (Сбер, только русский: не зацикливается, полнее на плохом звуке, без пунктуации) по EQ-копии (срез гула, подъём 2–3 кГц, loudnorm), чанки VAD ≤ 25 с. Включается, только если речь русская;
+- **филлер** — GigaAM v3 e2e (Сбер, только русский: не зацикливается, полнее на плохом звуке, с пунктуацией) по EQ-копии (срез гула, подъём 2–3 кГц, loudnorm), чанки VAD ≤ 25 с. Включается, только если речь русская;
 - **merge** — текст базы; петли/мусор и тишина базы ≥ 6 с заменяются текстом филлера (`⟨gigaam⟩` в абзаце); сильные расхождения — в `<kb_dir>/_media/<id>/review.md`. Ноль LLM-вызовов.
 
 Скорость на Apple Silicon ≈ 6 мин на 30 мин записи (whisper.cpp 4 + GigaAM 1.5); CPU-only машины медленнее (таймаут масштабируется). **Не** подсовывайте whisper `--prompt` (галлюцинирует подсказку) и **не** шумодавьте заранее (afftdn/DeepFilterNet съедают речь — EQ и есть лечение). Спорные места полируйте, только если пользователь просит точную расшифровку: читайте лишь `review.md` и правьте эти места в доке, имена/термины — заменой по глоссарию пользователя, а не перезапуском.
@@ -636,3 +639,4 @@ Env: `DOC2KB_TRANSCRIBE_LANG` (`auto`), `DOC2KB_ASR_ENGINES` (`auto` | `whisper,
   вложения в PDF, идущих через mineru.
 - Scanned PDFs через OCRmyPDF + Tesseract (альтернатива MinerU без VLM).
 - Heavy tier на базе docling / marker-pdf для специфических layout-кейсов.
+- MinerU 4.x (новый CLI/SDK и формат вывода, без языкового параметра для OCR) и сравнение с PaddleOCR-VL на русских сканах и методичках.

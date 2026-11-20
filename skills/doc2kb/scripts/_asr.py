@@ -17,7 +17,7 @@ recording where plain whisper looped through 19 of 30 minutes):
          Fallbacks when whisper-cli or its model is absent: mlx-whisper
          (Apple Silicon) → faster-whisper (CTranslate2, everywhere), both with
          condition_on_previous_text=False.
-  filler GigaAM v3 (Russian-only, never loops, no punctuation) on an EQ'd copy
+  filler GigaAM v3 e2e (Russian-only, never loops, punctuated) on an EQ'd copy
          (hum cut, presence boost, loudnorm), VAD-chunked ≤ 25 s. Used only
          when the spoken language is Russian.
   merge  base text; loop / garbage spans and silent gaps of the base are
@@ -398,23 +398,36 @@ def run_faster_whisper(raw: Path, work: Path, lang: str | None, avail: dict,
     return segs, (lang or getattr(info, "language", None))
 
 
+class GigaamUnavailable(RuntimeError):
+    """No GigaAM model could be loaded: not cached and not downloadable."""
+
+
+def load_gigaam(device: str):
+    """(model, name): the configured model, else GIGAAM_FALLBACK. GigaAM fetches
+    weights from Sber's CDN, not Hugging Face; when that is unreachable (its TLS
+    certificate lapsed in 2026-11) and nothing is cached, raise
+    GigaamUnavailable so callers run without the filler instead of crashing."""
+    import gigaam
+    errors = []
+    for name in dict.fromkeys((env("DOC2KB_GIGAAM_MODEL", GIGAAM_DEFAULT) or GIGAAM_DEFAULT,
+                               GIGAAM_FALLBACK)):
+        try:
+            return gigaam.load_model(name, fp16_encoder=(device != "cpu"), device=device), name
+        except (ValueError, KeyError, AssertionError, OSError, RuntimeError) as e:
+            say(f"gigaam {name} unavailable ({e})")
+            errors.append(f"{name}: {str(e)[:160]}")
+    raise GigaamUnavailable("; ".join(errors))
+
+
 def run_gigaam(audio: Path, work: Path, deadline: float | None) -> tuple[list[Seg], str]:
     import logging
 
-    import gigaam
     import soundfile as sf
     logging.disable(logging.WARNING)
 
     wav = _read_wav(audio)
     chunks = vad_chunks(wav, SR)
-    name = env("DOC2KB_GIGAAM_MODEL", GIGAAM_DEFAULT) or GIGAAM_DEFAULT
-    device = env("DOC2KB_GIGAAM_DEVICE", "cpu") or "cpu"
-    try:
-        model = gigaam.load_model(name, fp16_encoder=(device != "cpu"), device=device)
-    except (ValueError, KeyError, AssertionError) as e:
-        say(f"gigaam {name} unavailable ({e}); falling back to {GIGAAM_FALLBACK}")
-        name = GIGAAM_FALLBACK
-        model = gigaam.load_model(name, fp16_encoder=(device != "cpu"), device=device)
+    model, name = load_gigaam(env("DOC2KB_GIGAAM_DEVICE", "cpu") or "cpu")
     tmp = work / "_chunk.wav"
     segs: list[Seg] = []
     for s, e in chunks:
@@ -600,7 +613,13 @@ def cmd_run(a: argparse.Namespace) -> int:
     for extra in [x for x in (fill_name, third_name) if x]:
         if extra == "gigaam":
             audio = raw if a.no_eq else make_eq(raw, work, log, deadline)
-            results["gigaam"], models["gigaam"] = timed("gigaam", lambda: run_gigaam(audio, work, deadline))
+            try:
+                results["gigaam"], models["gigaam"] = timed(
+                    "gigaam", lambda: run_gigaam(audio, work, deadline))
+            except GigaamUnavailable as e:
+                notes.append(f"GigaAM filler skipped — no model could be loaded ({e})")
+                fill_name = None if fill_name == "gigaam" else fill_name
+                third_name = None if third_name == "gigaam" else third_name
         else:
             results[extra], _ = timed(extra, lambda: runners[extra](lang))
             models[extra] = (Path(avail[extra]["model"]).name if extra == "whisper" else avail[extra]["model"])
@@ -709,14 +728,11 @@ def cmd_setup(a: argparse.Namespace) -> int:
                 if not a.all:
                     break
     if have("gigaam"):
-        import gigaam
-        name = env("DOC2KB_GIGAAM_MODEL", GIGAAM_DEFAULT) or GIGAAM_DEFAULT
         try:
-            gigaam.load_model(name, fp16_encoder=False, device="cpu")
-        except (ValueError, KeyError, AssertionError):
-            name = GIGAAM_FALLBACK
-            gigaam.load_model(name, fp16_encoder=False, device="cpu")
-        report["gigaam"] = f"{name} ready"
+            report["gigaam"] = f"{load_gigaam('cpu')[1]} ready"
+        except GigaamUnavailable as e:
+            report["gigaam"] = (f"unavailable — Russian loops/gaps go unrepaired until it downloads "
+                                f"(re-run `ensure_env.py --tier transcribe` later): {e}")
     avail = usable(models_dir)
     ready = any(avail[e]["ok"] for e in BASE_ENGINES)
     print(json.dumps({"ok": ready, "models_dir": str(models_dir), "setup": report,

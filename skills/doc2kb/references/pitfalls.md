@@ -67,8 +67,10 @@ Speaker notes в PowerPoint часто содержат больше семан�
 
 ## 7. Никогда не используй `markitdown` или `unstructured` как замену
 
-- `markitdown` теряет speaker notes в PPTX, теряет структуру таблиц в
-  сложных DOCX, не делает encryption detection.
+- `markitdown` 0.1.x внутри идёт тем же mammoth+markdownify путём для DOCX
+  (выигрыша нет), тянет magika + onnxruntime и не даёт того, что держат наши
+  экстракторы: формулы PPTX (`$…$`), SmartArt, диаграммы таблицами, OLE- и
+  PDF-вложения отдельными doc'ами, картинки в `assets/`, encryption detection.
 - `unstructured` в API/cloud-режиме отправляет данные наружу — это
   нарушает local-first принцип; localmode тяжёлый и менее точный, чем
   специализированные per-format экстракторы.
@@ -277,7 +279,7 @@ pymupdf4llm ≥ 0.2 при установленном Tesseract OCR'ит сам.
   `_asr.py` уже применяет к копии для GigaAM; whisper получает сырое аудио
   (на EQ-копии он зацикливался чаще).
 - Не ставь тир `transcribe` в общий venv руками (`pip install gigaam` в
-  `<state>/venv`): GigaAM откатит onnxruntime и сломает mineru. Только
+  `<state>/venv`): GigaAM откатит onnxruntime (1.23) ниже того, что нужно PyMuPDF 2.x. Только
   `ensure_env.py --tier transcribe` — он строит отдельный venv.
 - Не читай `_media/<id>/` drafts целиком при полировке — только `review.md`
   (там все спорные места с текстом обоих движков).

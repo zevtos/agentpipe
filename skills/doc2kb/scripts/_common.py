@@ -514,6 +514,15 @@ def strip_page_footer_numbers(body: str) -> tuple[str, int]:
 
 # ---------- file writer ----------
 
+# markdownify options shared by every HTML → Markdown route (DOCX via mammoth,
+# the HTML/XML fallback, the pure-Python EPUB route). No escaping: the KB is
+# read by agents and grep, not rendered, and `\_` broke verbatim text
+# (`Тема\_Фамилия\_группа.doc`). Mammoth's tables have no <th>, so the first
+# row becomes the header instead of an empty header row.
+MARKDOWNIFY_OPTIONS = {"heading_style": "ATX", "escape_underscores": False,
+                       "escape_asterisks": False, "table_infer_header": True}
+
+
 def write_md(out_path: Path, frontmatter: dict[str, Any], body: str) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fm = render_frontmatter(frontmatter)

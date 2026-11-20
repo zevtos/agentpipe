@@ -20,11 +20,23 @@ explicit user action.
 python3 <skill_dir>/scripts/ensure_env.py --tier mineru
 ```
 
-This adds `mineru[all]` plus (on Apple Silicon) `mlx-vlm`, `mlx`, and
-`mlx-lm` into the same venv as the lightweight base. A separate hash
-file (`<venv>/.installed_hash_mineru`) keeps the install idempotent —
-re-running `--tier mineru` is a no-op unless `requirements-mineru.txt`
-changes. The `mlx-vlm` pin matters: mineru's auto-engine selector
+This installs `mineru[all]` plus (on Apple Silicon) `mlx-vlm`, `mlx`, and
+`mlx-lm` into the tier's **own venv**, `<state>/mineru/venv` (Python 3.13);
+`extract_pdf_mineru.py` runs that venv's `mineru` CLI. It used to share the
+lightweight venv, where mineru's `pypptx-with-oxml` (a python-pptx fork
+installing into the same `pptx` package) overwrote python-pptx's files under
+`extract_pptx.py`; a shared venv that still holds the tier is rebuilt once
+without it, after which `--tier mineru` installs it separately (models stay
+in the Hugging Face cache). Re-running `--tier mineru` is a no-op unless
+`requirements-mineru.txt` changes.
+
+Pins (`requirements-mineru.txt`): **mineru 3.2.x** — 3.4's pipeline backend
+drops subscript digits (`Li2MnO3` → "Li MnO", MinerU #5540, fixed only by
+the 4.0 rewrite), and 4.x replaces the `mineru -p … -b … -l …` CLI and the
+output layout this wrapper parses (migration is a separate task).
+**mlx < 0.31.2** — 0.31.2 made a stream created in one thread unusable from
+another (ml-explore/mlx#3727), which breaks the 3.2.x mlx-engine with
+`There is no Stream(gpu, N) in current thread`. The `mlx-vlm` pin matters: mineru's auto-engine selector
 (`mineru/utils/engine_utils.py::_select_mac_engine`) only picks the
 fast MLX backend when `mlx-vlm` is importable; without it, mineru
 silently falls back to the much slower transformers path.

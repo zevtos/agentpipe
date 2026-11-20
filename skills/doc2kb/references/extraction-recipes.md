@@ -113,7 +113,8 @@ The `mineru` strategy is opt-in by design: heavy ML deps and a ~3 GB model
 download never enter the lightweight default tier. To enable:
 
 ```bash
-# One-time, installs mineru[all] + MLX wheels on Apple Silicon
+# One-time: mineru[all] (+ MLX wheels on Apple Silicon) in its own venv,
+# <state>/mineru/venv — never the shared lightweight one
 python3 <skill_dir>/scripts/ensure_env.py --tier mineru
 
 # Auto-route image_only PDFs through mineru when scanning a corpus
@@ -139,7 +140,7 @@ Engines (`--engines auto`): base = whisper.cpp (`whisper-cli` + `ggml-large-v3`)
 → mlx-whisper (Apple Silicon) → faster-whisper; filler = GigaAM v3 when the
 detected language is Russian. Explicit lists: `whisper,gigaam`, `whisper`,
 `mlx`, `whisper,gigaam,mlx` (third engine only adds its rendering to
-review.md), `gigaam` (Russian only, unpunctuated — needs `--lang ru`).
+review.md), `gigaam` (Russian only, punctuated v3 e2e — needs `--lang ru`).
 `_asr.py check --models-dir <state>/transcribe/models` (run with the tier's
 python) prints which engines are ready. An existing ggml model is reused with
 `DOC2KB_WHISPER_MODEL=/path/ggml-large-v3.bin` at `--tier transcribe` time
@@ -261,6 +262,27 @@ math-элементы, и body после него ссылается на «ф�
 (`pandoc` или `mammoth+markdownify`). Если pandoc недоступен на машине с
 math-документом — warning с инструкцией установить (`brew install pandoc` /
 `apt install pandoc`).
+
+### RTF в кодировке cp1251 и других — pandoc-маршрут
+
+RTF-ридер pandoc понимает `\'xx` только как cp1252 (и наборы
+`\mac`/`\pc`/`\pca`), а `\fcharset` игнорирует: русский RTF из Word
+(`\ansicpg1251`, шрифты `\fcharset204`) выходил как `Ïðèëîæåíèå`. Перед
+pandoc `extract_rtf.py` переписывает каждую серию `\'xx` в `\uN` по
+действующей кодовой странице (charset текущего шрифта, иначе `\ansicpg`;
+DBCS вроде cp932 — тоже); fallback-байты после `\uN`, данные `\bin` и
+символьные шрифты не трогаются. Fallback пишется как `\'3f`: после
+литерального `?` pandoc 3.12 съедает лишний символ. Если pandoc всё равно
+сообщает `Unsupported code page`, документ уходит в `striprtf` (он
+декодирует кодовые страницы сам) с warning'ом.
+
+### Экранирование Markdown (DOCX, HTML-fallback, EPUB)
+
+markdownify вызывается без экранирования `_` и `*` и с заголовком таблицы из
+первой строки (`MARKDOWNIFY_OPTIONS` в `_common.py`): KB читают агенты и grep,
+а не рендер, и `Тема\_Фамилия\_группа.doc` не находился поиском по
+исходному имени; у таблиц mammoth нет `<th>`, поэтому раньше шапка таблицы
+была пустой строкой.
 
 ### Поломанные лигатуры `fi` / `ff` / `fl` (PDF)
 
@@ -402,3 +424,14 @@ warnings родителя и поднимается до файла корпус
   не видит, раньше диаграмма пропадала целиком).
 - Группы обходятся на любую глубину (раньше — один уровень; текст во
   вложенных группах терялся молча).
+- Формулы. PowerPoint оборачивает фигуру с формулой в `mc:AlternateContent`
+  (`mc:Choice Requires="a14"` с `a14:m` → OMML), и python-pptx такую фигуру
+  не видит вовсе: пропадал весь текстовый блок, на лекциях с формулами — до
+  60 % текста. Теперь берётся `mc:Choice` для `a14`, формулы идут в текст как
+  LaTeX (`$…$`, отдельная строка-формула — `$$…$$`, `_omml.py`); для прочих
+  требований (рукописный ввод, 3D, новые типы диаграмм) — `mc:Fallback`,
+  обычно картинка того же содержимого.
+- Перенос строки внутри абзаца (`a:br`) — `\n`: склейка `para.runs`
+  слепляла слова по обе стороны («Спасибоза внимание»), а в ячейках таблиц и
+  заметках протекал символ `\v`. Вторая и следующие строки заголовка слайда
+  идут в тело слайда (раньше терялись).
