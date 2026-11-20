@@ -18,7 +18,7 @@ Scope — what this dispatcher OWNS vs. what stays the agent's:
     OWNS (deterministic mechanical dispatch): strategy→script mapping, the
     ensure_env invocation, last-line-JSON parsing, error logging, idempotent
     re-runs (skip when the produced doc's `source_sha256` already matches
-    scout's `sha256`).
+    scout's `sha256` — the flat doc, or a sharded doc's `_index.md`).
 
     SURFACES but never resolves (the agent decides — see SKILL.md / pitfalls):
       - `visual_transcription`     — an `ok:true` PDF whose warnings contain
@@ -660,9 +660,13 @@ def main() -> int:
                 continue
 
             # Idempotency: unchanged source → keep the existing doc, no subprocess.
+            # The produced doc is the flat file or, once the --shard pass has
+            # replaced it with a folder, that folder's _index.md.
             # sha256 hex is ASCII (NFC-invariant); source_rel is NFC from scout.
-            if out_path.is_file():
-                fm = read_frontmatter(out_path)
+            produced = (out_path if out_path.is_file()
+                        else out_path.with_suffix("") / "_index.md")
+            if produced.is_file():
+                fm = read_frontmatter(produced)
                 existing = str(fm.get("source_sha256") or "").strip().lower()
                 scout_sha = str(f.get("sha256") or "").strip().lower()
                 if existing and scout_sha and existing == scout_sha:
