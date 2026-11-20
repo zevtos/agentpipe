@@ -49,6 +49,16 @@ Embedded documents (default on, depth 4):
     environment, and reports the child-doc total as `embedded_documents` (not
     a `counts` bucket — those still sum to the scout file count).
 
+Audio / video (`media`) and subtitle files (`subtitles`):
+    `media` jobs run serially after the lightweight ones (speech-to-text
+    saturates the GPU/CPU) with a timeout scaled by duration —
+    max(--timeout, DOC2KB_MEDIA_TIMEOUT_FACTOR (2.0) × duration + 15 min) —
+    and get `--sidecar` for every subtitle file scout paired with them plus
+    whitelisted flags from a per-file `media` block ({lang, engines,
+    subtitles}, stamped by apply_overrides.py). A media file that needs
+    speech-to-text while the opt-in `transcribe` tier is absent exits 2 →
+    `needs_install` (the tier is never installed from here).
+
 Per-file MinerU settings + env-gated Popo (both default-off):
     - `_scout.files[].mineru` (a structured `{backend,lang,keep_raw}` block,
       stamped by apply_overrides.py) is rendered into whitelisted CLI flags for
@@ -137,6 +147,8 @@ DISPATCH: dict[str, tuple[str, list[str]]] = {
     "epub":            ("extract_epub.py", []),
     "xml":             ("extract_xml.py", []),
     "xlsx":            ("extract_xlsx.py", []),
+    "media":           ("extract_media.py", []),
+    "subtitles":       ("extract_subtitles.py", []),
 }
 
 # Explicit "do not extract" outcomes already decided upstream (scout or Phase 3).
@@ -146,8 +158,17 @@ NON_RUNNABLE = {"skip", "not_in_mvp", "needs_ocr_or_vlm", "needs_password"}
 # multi-GB and memory-bound — parallel runs would OOM. Every other strategy is
 # lightweight and embarrassingly parallel (independent files, the actual work
 # happens in child processes; threads only herd them).
-HEAVY_STRATEGIES = {"mineru"}
+HEAVY_STRATEGIES = {"mineru", "media"}
 DEFAULT_WORKERS = 4
+
+# Speech-to-text runs ~0.1–0.3× real time on Apple Silicon, slower on CPU-only
+# hosts: a media job's timeout grows with the recording instead of using the
+# per-document --timeout meant for PDFs.
+MEDIA_TIMEOUT_FACTOR_ENV = "DOC2KB_MEDIA_TIMEOUT_FACTOR"
+MEDIA_TIMEOUT_DEFAULT_FACTOR = 2.0
+MEDIA_TIMEOUT_HEADROOM_SEC = 900
+MEDIA_ENGINES = {"whisper", "gigaam", "mlx", "faster-whisper"}
+_MEDIA_LANG_RE = re.compile(r"^(auto|[a-z]{2,3})$")
 
 _LANG_RE = re.compile(r"^[a-z]{2,}$")
 # Popo (and its optional auto-bootstrap) are heavy: VLM inference on a 4B model
@@ -188,6 +209,60 @@ def _mineru_flags(file_entry: dict, force_keep_raw: bool) -> tuple[list[str], li
     if force_keep_raw and "--keep-raw" not in flags:
         flags.append("--keep-raw")
     return flags, warns
+
+
+def _media_flags(file_entry: dict, input_root: Path) -> tuple[list[str], list[str]]:
+    """CLI flags for extract_media.py from scout fields: `--sidecar` for each
+    paired subtitle file (re-validated to stay inside input_root — scout is
+    agent-mutable) and whitelisted values of the per-file `media` block.
+    Returns (flags, warnings)."""
+    flags: list[str] = []
+    warns: list[str] = []
+    for rel in file_entry.get("subtitle_sidecars") or []:
+        try:
+            rel = validate_source_rel(rel) if isinstance(rel, str) else ""
+        except ValueError:
+            rel = ""
+        path = (input_root / rel).resolve() if rel else None
+        if path is None or (path != input_root and input_root not in path.parents) or not path.is_file():
+            warns.append(f"ignored invalid subtitle sidecar {rel!r}")
+            continue
+        flags += ["--sidecar", str(path)]
+    block = file_entry.get("media")
+    if isinstance(block, dict):
+        lang = block.get("lang")
+        if isinstance(lang, str) and _MEDIA_LANG_RE.match(lang):
+            flags += ["--lang", lang]
+        elif lang is not None:
+            warns.append(f"ignored invalid media.lang {lang!r}")
+        engines = block.get("engines")
+        if isinstance(engines, str) and (engines == "auto" or (
+                engines and all(e in MEDIA_ENGINES for e in engines.split(",")))):
+            flags += ["--engines", engines]
+        elif engines is not None:
+            warns.append(f"ignored invalid media.engines {engines!r}")
+        subs = block.get("subtitles")
+        if subs in ("prefer", "ignore"):
+            flags += ["--subtitles", subs]
+        elif subs is not None:
+            warns.append(f"ignored invalid media.subtitles {subs!r}")
+    return flags, warns
+
+
+def _job_timeout(strategy: str, entry: dict, base: int) -> int:
+    if strategy != "media":
+        return base
+    try:
+        factor = float(os.environ.get(MEDIA_TIMEOUT_FACTOR_ENV) or MEDIA_TIMEOUT_DEFAULT_FACTOR)
+    except ValueError:
+        factor = MEDIA_TIMEOUT_DEFAULT_FACTOR
+    try:
+        dur = max(0, int(entry.get("media_duration_seconds") or 0))
+    except (TypeError, ValueError):
+        dur = 0
+    if dur == 0:
+        dur = 4 * 3600  # unknown duration (no ffprobe at scout): be generous
+    return max(base, int(dur * max(factor, 0.1)) + MEDIA_TIMEOUT_HEADROOM_SEC)
 
 
 def _emit(obj: dict) -> None:
@@ -343,7 +418,7 @@ def _execute_job(job: dict, args, kb_root: Path, jobs: int = 1) -> dict:
     try:
         rc, parsed, stderr_tail = _run_extractor(
             job["strategy"], job["in_path"], job["out_path"],
-            job["doc_id"], job["source_rel"], args.timeout,
+            job["doc_id"], job["source_rel"], job.get("timeout") or args.timeout,
             extra_flags=job["extra_flags"], embed_depth=args.embed_depth, jobs=jobs)
         outcome = _classify_result(job, rc, parsed, stderr_tail, kb_root)
         if outcome["bucket"] == "extracted" and args.normalize:
@@ -690,12 +765,17 @@ def main() -> int:
                 extra_flags, fwarns = _mineru_flags(f, force_keep_raw=popo_in_effect)
                 for w in fwarns:
                     log(f"{source_rel}: {w}")
+            elif strategy == "media":
+                extra_flags, fwarns = _media_flags(f, input_root)
+                for w in fwarns:
+                    log(f"{source_rel}: {w}")
 
             jobs.append({
                 "seq": len(jobs), "doc_id": doc_id, "source_rel": source_rel,
                 "strategy": strategy, "in_path": in_path, "out_path": out_path,
                 "extra_flags": extra_flags, "popo_in_effect": popo_in_effect,
                 "cost": _cost_hint(strategy, f),
+                "timeout": _job_timeout(strategy, f, args.timeout),
             })
         except Exception as e:  # noqa: BLE001 — one malformed entry must never abort the batch
             counts["error"] += 1

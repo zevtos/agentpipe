@@ -100,6 +100,8 @@ assert payload["ok"]
 | `xlsx`              | `extract_xlsx.py`               | `<input> <output> --doc-id <id> --source-rel <rel>` [`--max-sheets 100`] [`--max-rows 10000`] [`--max-cells 300000`] [`--timeout 20`] [`--max-rss-mb 1024`] (openpyxl `read_only=True, data_only=True, keep_links=False`, parsing through defusedxml — refuses to run without it — in a child process killed past the wall deadline or the RSS ceiling → `"refused: resource: time|memory"` — the child also enforces both itself and exits (removing its temp dir) the moment its parent dies, so a caller's own timeout kill leaves no orphan; env `DOC2KB_XLSX_TIMEOUT` / `DOC2KB_XLSX_MAX_RSS_MB`; the result carries `peak_rss_mib`. Pre-check first → `{"ok": false, "refused": true}`: zip bomb (members, per-member/total/sharedStrings size, ratio, encryption), any `<!DOCTYPE`/`<!ENTITY` in any member whatever its name, non-UTF-8 XML, a row past 16384 cells, a text run past 256 KiB. Wider than 64 columns → sparse `row N: A=…` lines. Past a sheet/row/cell/scan/time/8 MiB-output cap, or a cell cut at 2000 chars, the body gets a `> **[truncated]**` line and the JSON `"truncated": true, "truncation": ["<kind>: …"]`, kind one of sheets/rows/cells/scan/time/output/cell_chars; rows numbered at or below an earlier row are kept in file order and listed in `"row_order"` / a `row_order:` warning) |
 | `ipynb`             | `extract_ipynb.py`              | `<input> <output> --doc-id <id> --source-rel <rel>` |
 | `epub`              | `extract_epub.py`               | `<input> <output> --doc-id <id> --source-rel <rel>` (pandoc when on PATH — honours OPF spine order, preserves tables/images, converts EPUB3 MathML → `$...$` LaTeX; else pure-Python `zip`+`markdownify` → images become `![image N]()` placeholders and MathML is dropped. Force the fallback with `--force-fallback`. Auto image extraction to `<kb_dir>/assets/`; same `--assets-dir`/`--assets-rel`/`--no-extract-images` flags) |
+| `media`             | `extract_media.py`              | `<input> <output> --doc-id <id> --source-rel <rel>` [`--lang auto\|ru\|en…`] [`--engines auto\|whisper,gigaam\|mlx\|faster-whisper`] [`--subtitles prefer\|ignore`] [`--sidecar <file.srt>`…] [`--no-eq`] (audio/video. Needs system `ffmpeg`. Text from subtitles that transcribe the speech — sidecar file or a text track inside the container — else speech-to-text through the **opt-in `transcribe` tier** (`ensure_env.py --tier transcribe`; own venv, `_asr.py` worker). **Exits 2 with an install hint** when ffmpeg or the tier is missing → `needs_install`. Drafts and `review.md` → `<kb_dir>/_media/<id>/`. The dispatcher runs media jobs serially with a duration-scaled timeout and passes `--sidecar` for scout-paired files plus the per-file `media` override block) |
+| `subtitles`         | `extract_subtitles.py`          | `<input> <output> --doc-id <id> --source-rel <rel>` (standalone `.srt`/`.vtt`/`.ass`/`.ssa`/`.sbv`/`.lrc`; stdlib parsers, encoding detected; cue numbers/timing/styling and auto-caption rolling duplicates dropped. Files scout paired with a recording are `skip` + `sidecar_of` — the media doc reads them) |
 | `skip`              | (none — file is skipped) | — |
 | `needs_password`    | (Phase 3 user decision; if password given, re-classify and use `pymupdf4llm`) | — |
 | `needs_ocr_or_vlm`  | (Phase 3 user decision; pick `vlm_mlx` to route through `mineru` strategy — requires opt-in tier; default behaviour is `skip`) | — |
@@ -123,6 +125,31 @@ Without `--enable-mineru` scout behaves exactly as before — `image_only`
 PDFs surface as the `scanned_pdf` user-decision group and default to
 `skip`. The flag is also recorded in `_scout.flags.enable_mineru` so
 follow-up tools see the choice.
+
+## Opt-in transcribe tier (audio / video speech-to-text)
+
+```bash
+brew install ffmpeg whisper-cpp                                   # ffmpeg required; whisper-cli = best base engine
+python3 <skill_dir>/scripts/ensure_env.py --tier transcribe       # own venv + pinned models (HF rev + sha256)
+python3 <skill_dir>/scripts/ensure_env.py extract_media.py "<in.m4a>" "<kb>/docs/<id>-<slug>.md" \
+    --doc-id <id> --source-rel "<rel>" --lang ru                  # one file by hand
+```
+
+Engines (`--engines auto`): base = whisper.cpp (`whisper-cli` + `ggml-large-v3`)
+→ mlx-whisper (Apple Silicon) → faster-whisper; filler = GigaAM v3 when the
+detected language is Russian. Explicit lists: `whisper,gigaam`, `whisper`,
+`mlx`, `whisper,gigaam,mlx` (third engine only adds its rendering to
+review.md), `gigaam` (Russian only, unpunctuated — needs `--lang ru`).
+`_asr.py check --models-dir <state>/transcribe/models` (run with the tier's
+python) prints which engines are ready. An existing ggml model is reused with
+`DOC2KB_WHISPER_MODEL=/path/ggml-large-v3.bin` at `--tier transcribe` time
+(symlinked into the models dir, no 3 GB download).
+
+Polishing (only when the user wants an exact transcript): read
+`<kb_dir>/_media/<id>/review.md` — it lists loop fills, gap fills and
+disagreements with both engines' text — and patch those spots in the doc;
+fix names/terms by find/replace with the user's glossary. Never re-run with a
+whisper prompt and never denoise the audio first.
 
 ## Page-targeted patching with mineru
 

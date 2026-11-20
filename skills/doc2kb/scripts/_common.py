@@ -677,6 +677,10 @@ PDF_WARN_BENIGN_PREFIXES = (
     "ligature_residual:",
     "suspiciously small extraction:",
     "image extraction failed:",
+    # extract_media / extract_subtitles: informational (disputed ASR spots with
+    # their review.md path, bitmap subtitles skipped, translation used as text).
+    # Kept in the doc's frontmatter + INDEX, just not echoed as "unknown".
+    "media:",
 )
 
 # pymupdf4llm replaces positioned figures it cannot extract with

@@ -1,6 +1,6 @@
 ---
 name: doc2kb
-description: 'Converts a heterogeneous corpus of raw documents (PDF, DOCX, DOC, PPTX, XLSX, IPYNB, RTF, EPUB, MD, TXT, HTML, XML, etc.) into a structured, LLM-optimized knowledge base — per-source Markdown + manifest.json + INDEX.md + AGENTS.md + a built-in BM25 search index (`query.sh`, citation-first), ready for ingestion in a separate Claude / Codex session. USE WHEN the user asks to ingest, index, preprocess, search, or build a knowledge base from a folder of mixed documents; "feed files to Claude", "prepare a corpus", "make my documents searchable", "build a doc index", "RAG prep", "convert documents to markdown", "ingest Jupyter notebooks". RU triggers: "обработай папку с документами", "сделай базу знаний из папки", "подготовь корпус для LLM", "найди в моих документах", "извлеки markdown из файлов". Output is for AI agents, not human reading. For single-file PDF use Anthropic''s `pdf` skill.'
+description: 'Converts a mixed corpus (PDF, DOCX, DOC, PPTX, XLSX, IPYNB, RTF, EPUB, MD, TXT, HTML, XML, subtitles, audio/video via speech-to-text) into a structured, LLM-optimized knowledge base — per-source Markdown + manifest.json + INDEX.md + AGENTS.md + a built-in BM25 search index (`query.sh`, citation-first) for a separate Claude / Codex session. USE WHEN the user asks to ingest, index, preprocess, search, or build a knowledge base from a folder of mixed documents or recordings; "feed files to Claude", "prepare a corpus", "make my documents searchable", "build a doc index", "RAG prep", "convert documents to markdown", "ingest lecture recordings". RU triggers: "обработай папку с документами", "сделай базу знаний из папки", "подготовь корпус для LLM", "найди в моих документах", "добавь записи лекций в базу". Output is for AI agents, not human reading. For single-file PDF use Anthropic''s `pdf` skill.'
 ---
 
 # doc2kb — Document Corpus → LLM Knowledge Base
@@ -53,6 +53,8 @@ python3 <skill_dir>/scripts/ensure_env.py
 
 **Векторные картинки (EMF/WMF/SVG/PDF/EPS).** Схемы в DOCX/PPTX часто лежат метафайлами (вставка из Visio, «векторный клипарт»). Они растеризуются в PNG и попадают в `assets/` как обычные картинки: EMF/WMF — через тот же `soffice` (LibreOffice, одним запуском на документ), SVG и PDF — PyMuPDF из venv, EPS — `gs` (Ghostscript, `brew install ghostscript` / `apt install ghostscript`). Без `soffice`/`gs` на PATH такая картинка пропускается с warning и install-hint (`vector image (emf) not rasterized — LibreOffice is not on PATH — install it …`). Детали — `references/extraction-recipes.md` («Векторные картинки»).
 
+**Аудио и видео — `ffmpeg`** (`brew install ffmpeg` / `apt install ffmpeg` / `winget install ffmpeg`): `ffprobe` классифицирует запись, `ffmpeg` декодирует её — а это ≈400 контейнеров и кодеков (mp3, m4a/m4b, aac, wav, flac, ogg/opus, wma, aiff, caf, ac3, amr, ape/wv/tta, mp4, mov, mkv, webm, avi, wmv, flv, mpeg-ts/m2ts, mpg/vob, 3gp, mxf, rm…), поэтому «какие форматы поддержаны» = «что открывает ffprobe»: расширение/MIME только выдвигают кандидата, решают потоки. Текст берётся из **субтитров**, если они есть (дорожка внутри контейнера или файл рядом — `lecture.ru.srt`; лёгкий путь, секунды), иначе — **распознаванием речи** через opt-in тир `transcribe` (см. «Optional heavy tier — transcribe» ниже; без него такие файлы уходят в `needs_install`, ничего не ставится молча). Опционально `brew install whisper-cpp` — лучший базовый движок (Metal, `-mc 0` без зацикливаний).
+
 ### Phase 2: Scout
 
 ```bash
@@ -72,9 +74,9 @@ python3 <skill_dir>/scripts/ensure_env.py scout_corpus.py <input_dir> <kb_dir>
 Возможные группы решений:
 - `encrypted` — зашифрованные файлы (Office/PDF); опции: `password`, `skip`.
 - `scanned_pdf` — image-only PDF; опции: `skip`, `ocr_tesseract`, `vlm_mlx`, `claude_pagewise`. *MVP поддерживает только `skip`.*
-- `huge_file` — >50 MB или >500 страниц; опции: `skip`, `proceed`, `split`.
-- `corrupt` — не открывается; опции: `skip`.
-- `unsupported_format` — ODT/IMAGE (не в MVP); опции: `skip`. (`.doc`, `.rtf`, `.epub` и `.xlsx` теперь поддержаны — см. Phase 4.)
+- `huge_file` — >50 MB или >500 страниц; для аудио/видео — запись длиннее 4 ч (размер в байтах для медиа не считается); опции: `skip`, `proceed`, `split`.
+- `corrupt` — не открывается (в т.ч. «mp3», в котором ffprobe не нашёл потоков); опции: `skip`.
+- `unsupported_format` — ODT/IMAGE (не в MVP) и видео без звука и без текстовых субтитров (только картинка); опции: `skip`. (`.doc`, `.rtf`, `.epub`, `.xlsx`, аудио/видео и субтитры поддержаны — см. Phase 4.)
 
 **Применение решений (важно для Phase 4).** Разрешив группу, обновите каждый файл в `_scout.json`: проставьте итоговый `extraction_strategy` (`skip` для отказа, либо рабочую стратегию для `proceed`) **и обнулите `action_required` (`null`)**. `extract_corpus.py` (Phase 4) откажется стартовать (exit 2), пока хоть у одного файла остался непустой `action_required` — это и есть гейт, гарантирующий, что Phase 3 пройдена.
 
@@ -158,6 +160,8 @@ Exit codes: `0` — все файлы дошли до терминального
 | `trafilatura`     | `extract_html.py` |
 | `ipynb`           | `extract_ipynb.py` |
 | `epub`            | `extract_epub.py` *(pandoc when on PATH; else `zip`+`markdownify` fallback)* |
+| `media`           | `extract_media.py` *(audio/video: subtitles, else speech-to-text via the opt-in `transcribe` tier; needs ffmpeg)* |
+| `subtitles`       | `extract_subtitles.py` *(standalone .srt/.vtt/.ass/.ssa/.sbv/.lrc)* |
 
 ```bash
 python3 <skill_dir>/scripts/ensure_env.py extract_pdf_pymupdf4llm.py \
@@ -168,6 +172,8 @@ python3 <skill_dir>/scripts/ensure_env.py extract_pdf_pymupdf4llm.py \
 ```
 
 Каждый extract-скрипт пишет один `.md` в `<kb_dir>/docs/` и возвращает JSON `{ok, out, tokens_estimated, warnings, ...}` в stdout (диспетчер парсит его за вас). `warnings` непустые означают, что extraction прошёл с deficiency (пустой результат, charts dropped, и т.д.).
+
+**Аудио и видео (`media`).** Документ — `# <имя файла>`, строка-пометка, как получен текст, и абзацы `[mm:ss] …` (от часа — `[h:mm:ss]`) в секциях `## <глава> (mm:ss–mm:ss)` (главы контейнера: m4b-аудиокниги, mkv/mp4 с chapters) или `## 05:00–10:00` (окна по 5 минут) — поэтому цитата поиска (`файл › 10:00–15:00`) сразу даёт место в записи, а `--shard` режет длинную лекцию по этим секциям. Источник текста по приоритету: (1) **субтитры, которые и есть расшифровка речи** — сайдкар-файл (scout сам связывает `lecture.srt`/`lecture.ru.vtt`/`lecture_en.srt` с `lecture.mp4` в той же папке: он извлекается внутрь медиа-дока, а не отдельно) или текстовая дорожка контейнера (SRT/ASS/WebVTT/mov_text…); дорожка на другом языке, чем звук, — перевод, не расшифровка, и используется только если распознавание недоступно; forced-дорожки не считаются; неиспользованные сайдкары дописываются в конец дока секциями `## Subtitles: <файл>` — ничего не теряется; (2) **распознавание речи** тиром `transcribe`. Битмап-субтитры (PGS/VobSub) не OCR'ятся — warning. Видео без звука и субтитров scout отправляет в `unsupported_format`. Медиа-задачи идут последовательно после лёгких, таймаут растёт с длительностью: `max(--timeout, 2 × длительность + 15 мин)` (`DOC2KB_MEDIA_TIMEOUT_FACTOR`). Язык — автоопределение (`DOC2KB_TRANSCRIBE_LANG=ru` фиксирует его для всего корпуса; per-file — блок `media` в `_overrides.json`: `{"lang": "ru", "engines": "whisper,gigaam", "subtitles": "ignore"}`). Warnings с префиксом `media:` информационные (спорные места распознавания + путь к review.md, пропущенные битмап-субтитры, перевод вместо расшифровки) — в frontmatter и INDEX, в `unclassified_warnings` не эхаются.
 
 **Авто-восстановление внутри extractor'ов** — происходит само, вмешательства не требует: pandoc-маршрут для DOCX с математикой (OOXML math → `$...$` LaTeX; mammoth формулы молча дропает), починка поломанных лигатур `fi`/`ff`/`fl` у pymupdf4llm (warning `ligatures_recovered: N`), удаление footer-номеров страниц, извлечение встроенных картинок в `<kb_dir>/assets/` с заменой `picture intentionally omitted` плейсхолдеров на Markdown-ссылки. Детали, флаги (`--no-extract-images`, `--assets-dir`) и расширение таблицы лигатур — `references/extraction-recipes.md` («Auto-recovery»); читайте её, когда warning выглядит незнакомо или нужно подкрутить поведение.
 
@@ -283,6 +289,8 @@ Claude/Codex в `<kb_dir>` (или передаёт путь), Claude читае
 ├── raw/              # (optional, see Phase 5) original source files
 │   ├── README.md
 │   └── ...
+├── _media/           # audio/video: per-doc speech-to-text drafts — review.md
+│   └── doc-005/      #   (disputed spots), whisper.srt/json, gigaam.txt, run.log
 ├── _scout.json       # scout output (debugging artefact)
 └── _logs/
     └── errors.json   # extraction errors, if any
@@ -354,7 +362,7 @@ heading catalog alone is fine; the index earns its keep from dozens of docs up.
 
 | script | purpose |
 |---|---|
-| `ensure_env.py`              | idempotent venv bootstrap (run once or on requirements change). Accepts `--tier mineru` for the opt-in heavy install. |
+| `ensure_env.py`              | idempotent venv bootstrap (run once or on requirements change). Accepts `--tier mineru` (additive, shared venv) and `--tier transcribe` (isolated venv `<state>/transcribe/venv` + pinned-model setup) for the opt-in heavy installs. |
 | `scout_corpus.py`            | Phase 2 — classify corpus, emit `_scout.json`. `--enable-mineru` opt-in routes `image_only` PDFs through the mineru extractor. |
 | `apply_overrides.py`         | Phase 3.5 — deterministically patch `_scout.json` from `<kb_dir>/_overrides.json` (per-file `strategy`, structured `mineru` block, `popo` flag; nulls `action_required`). Validates config + post-apply scout, writes atomically, never corrupts scout. `--dry-run` / `--allow-unmatched`. |
 | `extract_corpus.py`          | Phase 4 batch dispatcher — runs the whole mechanical extract loop from `_scout.json` (strategy→extractor via `ensure_env.py`, writes `docs/*.md` + `_logs/errors.json`), idempotent by `source_sha256`, and prints one JSON summary with a `needs_attention[]` queue (`needs_install` / `visual_transcription` / `dropped_pictures_residual`). Renders per-file `mineru` flags from the scout entry; with `DOC2KB_ALWAYS_POPO` (or per-file `popo:true`) routes each mineru doc through Popo as a non-fatal stage 2 (`popo[]` in summary). Refuses to start (exit 2) on unresolved `action_required`. The agent runs this instead of looping per-file, then handles `needs_attention[]`. |
@@ -365,6 +373,10 @@ heading catalog alone is fine; the index earns its keep from dozens of docs up.
 | `extract_rtf.py`             | RTF → Markdown via pandoc when available (tables/images/structure), else the pure-Python `striprtf` fallback (plain text) |
 | `extract_epub.py`            | EPUB → Markdown via pandoc when available (OPF spine order, images, EPUB3 MathML → `$...$` LaTeX), else the pure-Python `zip`+`markdownify` fallback (images → placeholders, MathML dropped). Records `book_title`/`book_authors` in frontmatter |
 | `extract_pptx.py`            | PPTX → Markdown, preserves speaker notes; pictures at any group depth, charts as category × series tables (cached values), SmartArt node texts, OLE objects (preview image + link to the embedded doc) |
+| `extract_media.py`           | audio/video → timed Markdown (`[mm:ss]` paragraphs in chapter / 5-min sections). Text from subtitles that transcribe the speech (scout-paired sidecar files, text tracks rendered by ffmpeg), else speech-to-text through the opt-in `transcribe` tier (`_asr.py` in its own venv, process-group-killed at the job deadline). Exit 2 → `needs_install` when ffmpeg or the tier is missing |
+| `extract_subtitles.py`       | standalone .srt / .vtt / .ass / .ssa / .sbv / .lrc → the same timed Markdown; cue numbers, timing, styling tags and auto-caption rolling duplicates dropped; cp1251/koi8-r detected |
+| `_media.py`                  | stdlib helpers shared by scout and both media extractors: media/subtitle extension sets, `ffprobe` summary (cover art and stills are not video), subtitle parsers, transcript-vs-translation subtitle choice, timed-body renderer |
+| `_asr.py`                    | **opt-in tier worker** (runs only in `<state>/transcribe/venv`): whisper.cpp large-v3 `-mc 0` + silero VAD (fallbacks mlx-whisper → faster-whisper) as the punctuated base, GigaAM v3 filling loops/silent gaps for Russian, deterministic merge + `review.md`; `setup` fetches the pinned models (HF revision + sha256), `check` lists usable engines |
 | `extract_ipynb.py`           | Jupyter notebook (.ipynb) → Markdown; per-cell anchors, text outputs preserved, base64 images dropped |
 | `extract_md_txt.py`          | normalize Markdown/text, encoding-aware |
 | `extract_html.py`            | HTML → Markdown via trafilatura (boilerplate removal) |
@@ -426,7 +438,8 @@ deterministically via `apply_overrides.py` (it never hand-edits `_scout.json`).
   skips (a password or OCR backend is out of scope for the non-interactive flow).
 - `--enable-mineru` — route image-only PDFs through MinerU (needs `--tier mineru`;
   without the tier they surface as `needs_install` in the report).
-- `--tier mineru` — install the opt-in heavy tier before running.
+- `--tier mineru` / `--tier transcribe` — install that opt-in heavy tier
+  before running (`transcribe` = speech-to-text for audio/video).
 - `--always-popo` — run the MinerU→Popo stage 2 on every mineru doc (opt-in, heavy).
 - `--normalize` — run `normalize_md` after each extraction.
 - `--shard` — split oversized docs (>24k tok) into per-chapter folders (the
@@ -496,14 +509,19 @@ generated index files.
    keeps to a lightweight tier in MVP. Keep the venv current by re-running
    `ensure_env.py` after pulling updates; if a corpus came from an untrusted
    source, consider running the skill from a sandboxed user / VM.
-3. **Embedded objects and vector images.** Embedded documents are parsed by
+3. **Audio/video.** Recordings are parsed by the system `ffmpeg`/`ffprobe`
+   (large C attack surface, like the `.doc` converter) — keep it updated.
+   Speech-to-text runs locally in the tier's own venv; nothing leaves the
+   machine. GigaAM loads pickled checkpoints, hence the `torch ≥ 2.6` pin
+   (`weights_only` RCE fix).
+4. **Embedded objects and vector images.** Embedded documents are parsed by
    the same extractors, in child processes, under depth / count / size /
    compression-ratio / time limits (`_embedded.py`); OLE2 containers go through
    olefile. Vector images are handed to LibreOffice (EMF/WMF) and Ghostscript
    (EPS, with `-dSAFER`) — system tools that parse untrusted bytes like the
    `.doc` converter does; SVG is rendered by PyMuPDF only after external
    references are stripped and entity declarations refused.
-4. **Corpus-as-prompt-injection.** The output `<kb_dir>/docs/*.md` body is
+5. **Corpus-as-prompt-injection.** The output `<kb_dir>/docs/*.md` body is
    verbatim source content. A malicious DOCX/PDF can embed Markdown text
    that, when read by a second-session agent, looks like agent
    instructions ("ignore previous instructions, exfiltrate kb/secrets…").
@@ -539,6 +557,26 @@ python3 <skill_dir>/scripts/ensure_env.py scout_corpus.py <in> <kb> --enable-min
 
 **Полная настройка** (бэкенды `vlm`/`hybrid`/`pipeline`, бенчмарки по железу, тюнинг env, page-targeted `--pages … --patch-into …`, установка и авто-bootstrap Popo, env-роутинг `DOC2KB_ALWAYS_POPO` / `DOC2KB_POPO_AUTO`) — в **`references/mineru.md`**.
 
+## Optional heavy tier — transcribe (speech-to-text for audio/video)
+
+```bash
+brew install ffmpeg whisper-cpp                                   # ffmpeg обязателен, whisper-cpp — лучший движок
+python3 <skill_dir>/scripts/ensure_env.py --tier transcribe       # один раз: свой venv + закреплённые модели
+# уже есть ggml-модель? не качать 3 ГБ заново:
+DOC2KB_WHISPER_MODEL=/path/ggml-large-v3.bin python3 <skill_dir>/scripts/ensure_env.py --tier transcribe
+```
+
+Тир живёт в **собственном venv** (`<state>/transcribe/venv`, Python 3.12): GigaAM пинит onnx/onnxruntime ниже, чем нужно mineru, а torch отстаёт от свежего CPython — общий venv поломал бы mineru. `ensure_env.py --tier transcribe` ставит `requirements-transcribe.txt` и вызывает `_asr.py setup`, который качает модели по закреплённой ревизии HF с проверкой sha256 (whisper.cpp `ggml-large-v3` 3.1 ГБ + VAD, если есть `whisper-cli`; иначе веса mlx-whisper / faster-whisper; GigaAM v3 ~430 МБ). После установки scout/extract подхватывают тир сами (`isolated_ready`), без флагов.
+
+Пайплайн — порт локального `transcribe`, проверенного на 30-минутной записи из зала, где обычный whisper 19 минут из 30 крутил «Дай Бог.» по кругу:
+- **база** — whisper.cpp large-v3 по сырому аудио, `-mc 0` (без переноса текстового контекста между окнами — именно это убивает петли) + silero VAD → текст с пунктуацией. Без `whisper-cli`: mlx-whisper (Apple Silicon) → faster-whisper (везде), оба с `condition_on_previous_text=False`;
+- **филлер** — GigaAM v3 (Сбер, только русский: не зацикливается, полнее на плохом звуке, без пунктуации) по EQ-копии (срез гула, подъём 2–3 кГц, loudnorm), чанки VAD ≤ 25 с. Включается, только если речь русская;
+- **merge** — текст базы; петли/мусор и тишина базы ≥ 6 с заменяются текстом филлера (`⟨gigaam⟩` в абзаце); сильные расхождения — в `<kb_dir>/_media/<id>/review.md`. Ноль LLM-вызовов.
+
+Скорость на Apple Silicon ≈ 6 мин на 30 мин записи (whisper.cpp 4 + GigaAM 1.5); CPU-only машины медленнее (таймаут масштабируется). **Не** подсовывайте whisper `--prompt` (галлюцинирует подсказку) и **не** шумодавьте заранее (afftdn/DeepFilterNet съедают речь — EQ и есть лечение). Спорные места полируйте, только если пользователь просит точную расшифровку: читайте лишь `review.md` и правьте эти места в доке, имена/термины — заменой по глоссарию пользователя, а не перезапуском.
+
+Env: `DOC2KB_TRANSCRIBE_LANG` (`auto`), `DOC2KB_ASR_ENGINES` (`auto` | `whisper,gigaam` | `mlx` | `faster-whisper` | …), `DOC2KB_MEDIA_SUBTITLES` (`prefer` | `ignore`), `DOC2KB_WHISPER_MODEL` / `DOC2KB_WHISPER_MODEL_NAME` (`large-v3` | `large-v3-turbo` | `medium` …), `DOC2KB_WHISPER_BIN`, `DOC2KB_GIGAAM_MODEL` (`v3_e2e_rnnt`), `DOC2KB_GIGAAM_DEVICE` (`cpu`), `DOC2KB_MLX_MODEL`, `DOC2KB_FW_MODEL` / `DOC2KB_FW_DEVICE` / `DOC2KB_FW_COMPUTE`, `DOC2KB_MEDIA_TIMEOUT_FACTOR` (`2.0`), `DOC2KB_MEDIA_KEEP_WAV`. Без диаризации (спикеры не размечены). Intel Mac: у torch ≥ 2.6 нет x86_64-колёс — тир не ставится, субтитры работают и без него.
+
 ## Что доступно out-of-the-box vs follow-up
 
 **MVP lightweight tier (всегда установлен):**
@@ -573,6 +611,9 @@ python3 <skill_dir>/scripts/ensure_env.py scout_corpus.py <in> <kb> --enable-min
   `soffice`, EPS — `gs`; SVG/PDF — PyMuPDF из venv).
 - Вложенные документы (OLE-объекты, встроенные файлы, вложения PDF) —
   рекурсивно до глубины 4, каждый своим doc'ом.
+- Субтитры `.srt`/`.vtt`/`.ass`/`.ssa`/`.sbv`/`.lrc` (stdlib), а также
+  аудио/видео, у которых есть текстовые субтитры (дорожка или файл рядом) —
+  нужен только системный `ffmpeg`.
 
 **Opt-in heavy tier (`ensure_env.py --tier mineru`):**
 - VLM-grade PDF extraction через MinerU 2.5+ (`extract_pdf_mineru.py`).
@@ -583,8 +624,14 @@ python3 <skill_dir>/scripts/ensure_env.py scout_corpus.py <in> <kb> --enable-min
   каждого mineru-дока в Popo прямо из Phase 4 — `DOC2KB_ALWAYS_POPO=1`.
   Оба env по-умолчанию выключены (heavy-deps-opt-in).
 
+**Opt-in heavy tier (`ensure_env.py --tier transcribe`):**
+- Распознавание речи в аудио/видео любого формата, который читает ffmpeg:
+  whisper.cpp large-v3 + GigaAM v3 (русский) с merge без петель; свой venv.
+
 **Follow-up (ещё не в скилле):**
 - ODT, standalone images.
+- Аудио/видео внутри документов (`ppt/media/*.mp4` в PPTX), OCR битмап-
+  субтитров (PGS/VobSub), диаризация спикеров.
 - Вложения в RTF (`\object\objdata`), legacy `.xls`/`.ppt` внутри OLE,
   вложения в PDF, идущих через mineru.
 - Scanned PDFs через OCRmyPDF + Tesseract (альтернатива MinerU без VLM).

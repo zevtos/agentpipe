@@ -1,0 +1,37 @@
+# Opt-in speech-to-text tier for audio / video sources (extract_media.py).
+#
+# Install with:
+#     python3 <skill_dir>/scripts/ensure_env.py --tier transcribe
+#
+# Installed into its OWN venv (<state>/transcribe/venv, Python 3.12), never the
+# shared lightweight one: GigaAM pins onnx 1.19 / onnxruntime 1.23 (below what
+# the mineru tier needs) and torch wheels trail the newest CPython. After the
+# pip step ensure_env runs `_asr.py setup`, which downloads the pinned models
+# (HF revision + sha256): whisper.cpp ggml-large-v3 + silero VAD when
+# `whisper-cli` is on PATH, otherwise the mlx-whisper / faster-whisper weights;
+# GigaAM v3 weights (~430 MB, into ~/.cache/gigaam).
+#
+# System tools (not pip): ffmpeg/ffprobe (required — decoding of every format),
+# whisper-cli (`brew install whisper-cpp`; optional, the best base engine:
+# Metal on Apple Silicon, `-mc 0` loop-proof decoding).
+#
+# Intel Macs: torch ≥ 2.6 publishes no x86_64 macOS wheels — the tier does not
+# install there; subtitle tracks still extract without it.
+
+# GigaAM (Sber, Russian ASR, MIT). PyPI 0.2.0 ships only the v2 models; v3
+# (v3_e2e_rnnt — punctuation-free but the most complete on hall audio) lives on
+# GitHub main. Pinned to a commit, never a branch.
+gigaam @ git+https://github.com/salute-developers/gigaam@7447938d791c4f3e643386ee22c33777004293a5
+# torch ≥ 2.6: torch.load(weights_only=True) RCE (CVE-2025-32434) is fixed
+# there, and GigaAM loads pickled checkpoints. < 2.11 = the line GigaAM main
+# pins for its longform extra.
+torch>=2.6,<2.11
+torchaudio>=2.6,<2.11
+silero-vad>=6.2,<7
+soundfile>=0.12,<1
+numpy>=2,<3
+huggingface_hub>=0.25,<2
+# Base engine when whisper-cli is absent: MLX on Apple Silicon, CTranslate2
+# everywhere else (CPU int8 or CUDA).
+mlx-whisper>=0.4.3,<0.5; sys_platform == "darwin" and platform_machine == "arm64"
+faster-whisper>=1.1,<2; sys_platform != "darwin" or platform_machine != "arm64"

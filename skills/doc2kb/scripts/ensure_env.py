@@ -27,12 +27,20 @@ ensure_env.py — изолированное окружение для скил�
     python3 ensure_env.py <script> [args]          # lightweight bootstrap + запустить script
     python3 ensure_env.py --tier mineru            # additive: ставит mineru tier поверх lightweight
     python3 ensure_env.py --tier mineru <script>   # ensure mineru tier перед запуском script
+    python3 ensure_env.py --tier transcribe        # speech-to-text для аудио/видео (свой venv)
 
 Тиры (opt-in):
     lightweight (default) — requirements.txt, всегда поставлен.
     mineru                — requirements-mineru.txt, отдельный хэш-файл
                             (.installed_hash_mineru), additive, ставится только
                             при явном --tier mineru. ~3 GB + MLX wheels на Mac.
+    transcribe            — requirements-transcribe.txt в СОБСТВЕННОМ venv
+                            (<state>/transcribe/venv, Python 3.12): GigaAM пинит
+                            onnx/onnxruntime ниже, чем нужно mineru, а torch
+                            отстаёт от свежего CPython. После pip-установки
+                            `_asr.py setup` качает закреплённые модели (whisper.cpp
+                            ggml + VAD, либо mlx/faster-whisper; GigaAM) в
+                            <state>/transcribe/models. ~1 GB deps + 3.5 GB моделей.
 
 Зависит только от stdlib — иначе курица-яйцо. Поддерживает Python 3.8+.
 """
@@ -98,6 +106,17 @@ TIERS: dict[str, str] = {
     "mineru": "requirements-mineru.txt",
 }
 
+# Opt-in tiers that get their OWN venv under <state>/<tier>/venv because their
+# pins clash with the shared one (GigaAM: onnx 1.19 / onnxruntime 1.23 vs the
+# mineru tier's newer onnxruntime; torch wheels trail the newest CPython the
+# shared venv may run on). Value: (requirements file, Python version for the
+# venv, post-install setup script run as `<venv-python> <script> setup
+# --models-dir <state>/<tier>/models`, or None). Scripts in the shared venv
+# reach the tier as a subprocess (see isolated_python()).
+ISOLATED_TIERS: dict[str, tuple[str, str, str | None]] = {
+    "transcribe": ("requirements-transcribe.txt", "3.12", "_asr.py"),
+}
+
 
 def log(msg: str) -> None:
     """Прогресс на stderr — чтобы stdout оставался чистым (там путь к питону)."""
@@ -130,11 +149,113 @@ def tier_req_file(tier: str) -> Path:
     """Return the requirements file for the named opt-in tier. Raises
     ValueError for unknown tier names so the user gets an immediate error
     instead of a silent no-op install."""
+    if tier in ISOLATED_TIERS:
+        return SCRIPTS_DIR / ISOLATED_TIERS[tier][0]
     if tier not in TIERS:
         raise ValueError(
-            f"unknown tier {tier!r}; available: {sorted(TIERS)}"
+            f"unknown tier {tier!r}; available: {sorted(set(TIERS) | set(ISOLATED_TIERS))}"
         )
     return SCRIPTS_DIR / TIERS[tier]
+
+
+def isolated_venv_dir(tier: str) -> Path:
+    return STATE_DIR / tier / "venv"
+
+
+def isolated_models_dir(tier: str) -> Path:
+    return STATE_DIR / tier / "models"
+
+
+def isolated_python(tier: str) -> Path:
+    v = isolated_venv_dir(tier)
+    return v / "Scripts" / "python.exe" if os.name == "nt" else v / "bin" / "python"
+
+
+def _isolated_hash(tier: str) -> str:
+    return hashlib.sha256(tier_req_file(tier).read_bytes()).hexdigest()
+
+
+def isolated_ready(tier: str) -> bool:
+    """True iff the tier's own venv exists, matches its requirements file and
+    its post-install setup finished. Cheap (two small file reads) — callers in
+    the shared venv use it to decide `needs_install` without importing torch."""
+    v = isolated_venv_dir(tier)
+    try:
+        current = _isolated_hash(tier)
+        return (isolated_python(tier).exists()
+                and (v / ".installed_hash").read_text().strip() == current
+                and (v / ".setup_done").read_text().strip() == current)
+    except OSError:
+        return False
+
+
+def _find_python(version: str) -> str | None:
+    for name in (f"python{version}", "python3", "python"):
+        exe = shutil.which(name)
+        if not exe:
+            continue
+        try:
+            out = subprocess.run([exe, "-c", "import sys;print('%d.%d' % sys.version_info[:2])"],
+                                 capture_output=True, text=True, timeout=20).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if out == version:
+            return exe
+    return None
+
+
+def bootstrap_isolated_tier(tier: str) -> None:
+    """Build/refresh the tier's own venv, then run its setup script once per
+    requirements hash. Idempotent; a no-op when `isolated_ready(tier)`."""
+    req_name, py_version, setup_script = ISOLATED_TIERS[tier]
+    req = SCRIPTS_DIR / req_name
+    if not req.exists():
+        raise FileNotFoundError(f"tier {tier!r} requirements file missing: {req}")
+    bootstrap()  # the shared lightweight venv runs the extractors that call the tier
+    if isolated_ready(tier):
+        return
+    venv = isolated_venv_dir(tier)
+    py = isolated_python(tier)
+    lock = _acquire_lock()
+    try:
+        if isolated_ready(tier):
+            return
+        current = _isolated_hash(tier)
+        hash_file = venv / ".installed_hash"
+        if not (py.exists() and hash_file.exists() and hash_file.read_text().strip() == current):
+            venv.parent.mkdir(parents=True, exist_ok=True)
+            if not py.exists():
+                if have("uv"):
+                    log(f"Creating tier {tier!r} venv (Python {py_version}) via uv at {venv}")
+                    subprocess.run(["uv", "venv", "--python", py_version, str(venv)], check=True)
+                else:
+                    exe = _find_python(py_version)
+                    if exe is None:
+                        raise FileNotFoundError(
+                            f"tier {tier!r} needs Python {py_version}: install uv "
+                            f"(https://docs.astral.sh/uv/) or python{py_version}")
+                    log(f"Creating tier {tier!r} venv via {exe} -m venv at {venv}")
+                    subprocess.run([exe, "-m", "venv", str(venv)], check=True)
+            log(f"Installing opt-in tier {tier!r} from {req.name} (several minutes — torch + "
+                "speech models' runtimes)")
+            if have("uv"):
+                subprocess.run(["uv", "pip", "install", "--python", str(py), "-r", str(req),
+                                "--upgrade"], check=True)
+            else:
+                subprocess.run([str(py), "-m", "pip", "install", "-r", str(req), "--upgrade",
+                                "--quiet", "--disable-pip-version-check"], check=True)
+            hash_file.write_text(current)
+        if setup_script:
+            log(f"Tier {tier!r}: fetching pinned models into {isolated_models_dir(tier)} "
+                "(skips what is already there)")
+            rc = subprocess.run([str(py), str(SCRIPTS_DIR / setup_script), "setup",
+                                 "--models-dir", str(isolated_models_dir(tier))]).returncode
+            if rc != 0:
+                raise RuntimeError(f"tier {tier!r} setup failed (exit {rc}) — see the log above")
+        (venv / ".setup_done").write_text(current)
+        log(f"Tier {tier!r} ready")
+    finally:
+        _release_lock(lock)
 
 
 def tier_hash_file(tier: str) -> Path:
@@ -364,6 +485,9 @@ def bootstrap_tier(tier: str) -> None:
         raise FileNotFoundError(
             f"tier {tier!r} requirements file missing: {req}"
         )
+    if tier in ISOLATED_TIERS:
+        bootstrap_isolated_tier(tier)
+        return
     bootstrap()  # lightweight base must exist first
     if not tier_needs_update(tier):
         return
@@ -423,7 +547,7 @@ def main() -> int:
     except subprocess.CalledProcessError as e:
         log(f"Bootstrap failed (exit {e.returncode}): {' '.join(map(str, e.cmd))}")
         return 1
-    except (OSError, ValueError, FileNotFoundError) as e:
+    except (OSError, ValueError, FileNotFoundError, RuntimeError) as e:
         log(f"Bootstrap failed: {e}")
         return 1
 
