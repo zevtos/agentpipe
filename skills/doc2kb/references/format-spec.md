@@ -560,7 +560,7 @@ counted in `extracted` AND listed in `needs_attention[]` with
   "scout": "/abs/kb/_scout.json",
   "counts": {
     "extracted": int,               // ok:true (includes extracted_but_flagged)
-    "unchanged": int,               // produced doc's source_sha256 == scout sha256
+    "unchanged": int,               // produced doc's (flat or shard _index.md) source_sha256 == scout sha256
     "skipped_by_decision": int,     // strategy ∈ {skip, not_in_mvp, needs_ocr_or_vlm, needs_password}
     "error": int,                   // ok:false / non-2 exit / timeout / invalid scout field
     "needs_attention": int          // == number of needs_install entries only

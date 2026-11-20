@@ -41,8 +41,9 @@ Summary shape (last stdout line):
 }
 ```
 
-- Idempotent: a file whose produced doc already has a matching
-  `source_sha256` is counted `unchanged` and not re-extracted.
+- Idempotent: a file whose produced doc (the flat `docs/<id>-<slug>.md`, or
+  once `--shard` made it a folder, that folder's `_index.md`) already has a
+  matching `source_sha256` is counted `unchanged` and not re-extracted.
 - Longest first: PDFs start before other files, larger ones first, so a big
   PDF is not the batch's long tail. Each extractor child gets
   `DOC2KB_PARALLEL_JOBS` = how many extractors run at once; the PDF
