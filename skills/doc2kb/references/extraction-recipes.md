@@ -43,6 +43,10 @@ Summary shape (last stdout line):
 
 - Idempotent: a file whose produced doc already has a matching
   `source_sha256` is counted `unchanged` and not re-extracted.
+- Longest first: PDFs start before other files, larger ones first, so a big
+  PDF is not the batch's long tail. Each extractor child gets
+  `DOC2KB_PARALLEL_JOBS` = how many extractors run at once; the PDF
+  extractor divides the CPUs by it for its page workers.
 - Refuses to start (exit 2) if any `_scout.files[]` entry still has a non-null
   `action_required` — resolve Phase 3 first (set the final `extraction_strategy`
   AND null `action_required`).
@@ -277,6 +281,56 @@ PDF-страницы часто кончаются голым номером с�
 
 Если Pillow не декодирует картинку из PDF (JBIG2, CMYK JPX), экстрактор
 перекодирует её через MuPDF (`pymupdf.Pixmap`) в PNG, а не пропускает.
+
+### OCR и параллельный разбор (PDF)
+
+pymupdf4llm ≥ 0.2 разбирает страницы layout-моделью и, если в системе стоит
+Tesseract, сам решает, что OCR'ить: текст на картинках, страницы без
+текстового слоя. Скан, где текстовый слой нарисован **под** картинкой
+страницы (так пишет FineReader; ГОСТы), он не узнаёт — узнаёт только
+невидимый OCR-слой — и распознаёт заново. Получалась вторая, латинская
+«копия» каждой строки (`FMT_SMR.1 «Pony 6esonacHocTu» onpemenseT pony` после
+настоящего предложения, `FOCT` рядом с `ГОСТ`, мусор в `headings`), без
+warning, в 3–5 раз дольше. `extract_pdf_pymupdf4llm.py` находит такие
+страницы заранее по порядку отрисовки (`page.get_bboxlog()`: сначала видимый
+текст, потом непрозрачная картинка на ≥ 90 % страницы, после неё текста нет;
+~4 мс на страницу) и разбирает их без OCR. Слайд, где фон-картинка идёт до
+текста или поверх неё рисуется ещё текст, сканом не считается. Остальные
+страницы OCR'ятся как раньше. Проверено на ~11 тыс. страниц локальных PDF:
+помечены только сканы ABBYY FineReader (ГОСТ, книги) и один отсканированный
+титул, ни одной родной страницы.
+
+| env | что делает |
+|---|---|
+| `DOC2KB_PDF_OCR=0` | без OCR совсем |
+| `DOC2KB_OCR_LANG` | языки Tesseract через `+`; по умолчанию `rus+eng` — те, что установлены (у pymupdf4llm было `eng`). Явно заданного языка нет → warning `ocr_language_missing`, OCR на оставшихся |
+| `DOC2KB_PDF_WORKERS` | процессов на один PDF; по умолчанию `ядра ÷ DOC2KB_PARALLEL_JOBS`, не больше 8, не меньше 8 страниц на процесс, не больше свободной памяти ÷ (600 МБ × `DOC2KB_PARALLEL_JOBS`); `1` — разбор в одном процессе |
+
+Если OCR прошёлся по документу с преобладающей кириллицей, а русских данных
+у Tesseract нет, doc получает `ocr_language_missing: N page(s) went through
+OCR in eng only…` — русские подписи на картинках вышли латиницей
+(`Opranusayna` вместо «Организация»). Поставьте данные (macOS:
+`brew install tesseract-lang`, Debian: `apt install tesseract-ocr-rus`) и
+переизвлеките doc, либо `DOC2KB_PDF_OCR=0`. Без Tesseract OCR нет, как и
+раньше; при `DOC2KB_PDF_OCR=1` это warning `ocr_unavailable`.
+
+Пул получает диапазоны страниц подряд; каждый процесс разбирает свой
+диапазон и сохраняет его картинки. Родитель собирает страницы, заново
+ранжирует уровни заголовков по размерам шрифта всего документа (как
+`parse_document` за один проход) и пишет картинки в порядке страниц: первая
+копия сохраняет своё имя, повторы ссылаются на неё. Поэтому `docs/*.md` и
+`assets/` совпадают байт в байт с разбором в одном процессе. Любой сбой пула
+— строка в stderr и разбор в одном процессе. Старый маршрут pymupdf4llm без
+layout-движка идёт в одном процессе, как раньше. Сообщения pymupdf4llm
+уходят в stderr — в stdout только JSON-строка.
+
+Замер на ГОСТ Р ИСО/МЭК 15408-2-2008 (файл `29155-2-2008`, 174 страницы,
+скан с текстовым слоем, M5 Pro): было 1124 с и 577 тыс. токенов, стало
+108 с в одном процессе и 33 с в восьми, 255 тыс. токенов; кириллических
+слов столько же (53 373 → 53 347: дубли заголовков и слова, склеенные
+через перенос). Родной ГОСТ Р ИСО 15745-2 (290 страниц, OCR подписей на
+картинках остаётся): 89 → 63 с на загруженной машине, `.md` и `assets/`
+побайтово как у старого кода.
 
 ### Векторные картинки (EMF/WMF/SVG/PDF/EPS) → PNG (все экстракторы)
 

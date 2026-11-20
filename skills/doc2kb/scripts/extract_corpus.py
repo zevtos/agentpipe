@@ -91,6 +91,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from _common import (  # noqa: E402
+    PARALLEL_JOBS_ENV,
     classify_pdf_warning,
     format_page_list,
     kb_doc_filename,
@@ -211,23 +212,37 @@ def _parse_last_json_line(stdout: str) -> dict | None:
     return None
 
 
-def _extractor_env(timeout: int, embed_depth: int | None) -> dict[str, str]:
+def _cost_hint(strategy: str, entry: dict) -> tuple[int, int, int]:
+    """Sort key for starting the slowest files first: PDFs (seconds per page)
+    before everything else (sub-second per file), then pages, then bytes."""
+    def num(key: str) -> int:
+        try:
+            return max(0, int(entry.get(key) or 0))
+        except (TypeError, ValueError):
+            return 0
+    return (1 if strategy == "pymupdf4llm" else 0, num("pages"), num("size_bytes"))
+
+
+def _extractor_env(timeout: int, embed_depth: int | None, jobs: int = 1) -> dict[str, str]:
     """Environment for one top-level extractor: a fresh embedded-document
     recursion (level 0, empty ancestor chain, full tree budget) whose children
-    must finish a little before this job's own timeout kills the parent."""
+    must finish a little before this job's own timeout kills the parent, and
+    the number of extractors running side by side (`jobs`), so one that
+    parallelizes inside a document takes its share of the CPUs."""
     env = dict(os.environ)
     for key in EMBED_ENV_KEYS:
         env.pop(key, None)
     env[EMBED_ENV_DEADLINE] = f"{time.time() + max(30, timeout - 15):.3f}"
     if embed_depth is not None:
         env[EMBED_ENV_DEPTH] = str(max(0, embed_depth))
+    env[PARALLEL_JOBS_ENV] = str(max(1, jobs))
     return env
 
 
 def _run_extractor(strategy: str, in_path: Path, out_path: Path,
                    doc_id: str, source_rel: str, timeout: int,
                    extra_flags: list[str] | None = None,
-                   embed_depth: int | None = None):
+                   embed_depth: int | None = None, jobs: int = 1):
     """Invoke one extractor through ensure_env.py. Returns
     (returncode_or_'timeout', parsed_json_or_None, stderr_tail)."""
     script, extra = DISPATCH[strategy]
@@ -239,7 +254,7 @@ def _run_extractor(strategy: str, in_path: Path, out_path: Path,
     ]
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
-                              env=_extractor_env(timeout, embed_depth))
+                              env=_extractor_env(timeout, embed_depth, jobs))
     except subprocess.TimeoutExpired:
         return "timeout", None, f"timeout after {timeout}s"
     return proc.returncode, _parse_last_json_line(proc.stdout or ""), (proc.stderr or "").strip()
@@ -320,15 +335,16 @@ def _classify_result(job: dict, rc, parsed, stderr_tail: str, kb_root: Path) -> 
     return out
 
 
-def _execute_job(job: dict, args, kb_root: Path) -> dict:
+def _execute_job(job: dict, args, kb_root: Path, jobs: int = 1) -> dict:
     """Worker body for one runnable file: extractor subprocess → classify →
     optional normalize. Returns an outcome row and logs its own progress line
-    live, so a long parallel batch still shows movement on stderr."""
+    live, so a long parallel batch still shows movement on stderr. `jobs` is
+    how many of these run side by side."""
     try:
         rc, parsed, stderr_tail = _run_extractor(
             job["strategy"], job["in_path"], job["out_path"],
             job["doc_id"], job["source_rel"], args.timeout,
-            extra_flags=job["extra_flags"], embed_depth=args.embed_depth)
+            extra_flags=job["extra_flags"], embed_depth=args.embed_depth, jobs=jobs)
         outcome = _classify_result(job, rc, parsed, stderr_tail, kb_root)
         if outcome["bucket"] == "extracted" and args.normalize:
             _normalize(job["out_path"], args.timeout)
@@ -675,6 +691,7 @@ def main() -> int:
                 "seq": len(jobs), "doc_id": doc_id, "source_rel": source_rel,
                 "strategy": strategy, "in_path": in_path, "out_path": out_path,
                 "extra_flags": extra_flags, "popo_in_effect": popo_in_effect,
+                "cost": _cost_hint(strategy, f),
             })
         except Exception as e:  # noqa: BLE001 — one malformed entry must never abort the batch
             counts["error"] += 1
@@ -692,8 +709,12 @@ def main() -> int:
     outcomes: dict[int, dict] = {}
     workers = max(1, int(args.workers))
     if workers > 1 and len(light) > 1:
+        jobs_at_once = min(workers, len(light))
+        # Longest first: a big PDF that starts last is the batch's long tail.
+        ordered = sorted(light, key=lambda j: j["cost"], reverse=True)
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futs = {pool.submit(_execute_job, j, args, kb_root): j["seq"] for j in light}
+            futs = {pool.submit(_execute_job, j, args, kb_root, jobs_at_once): j["seq"]
+                    for j in ordered}
             for fut in as_completed(futs):
                 outcomes[futs[fut]] = fut.result()  # _execute_job never raises
     else:
