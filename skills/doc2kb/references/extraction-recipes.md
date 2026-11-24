@@ -138,11 +138,19 @@ python3 <skill_dir>/scripts/ensure_env.py extract_media.py "<in.m4a>" "<kb>/docs
 
 Engines (`--engines auto`): base = whisper.cpp (`whisper-cli` + `ggml-large-v3`)
 → mlx-whisper (Apple Silicon) → faster-whisper; filler = GigaAM v3 when the
-detected language is Russian. Explicit lists: `whisper,gigaam`, `whisper`,
+detected language is Russian; base and filler run side by side. That pair is
+the `quality` profile. `DOC2KB_ASR_PROFILE=fast` runs one engine per recording
+— GigaAM alone for Russian speech (≈40× real time on a single CPU thread), the
+whisper base alone for other languages — and `auto` (default) picks `quality`
+on a GPU host (Apple Silicon, CUDA) and `fast` on a CPU-only one, where
+whisper large-v3 runs near real time. Force the pair on a slow host for one
+file with a per-file `media.engines: whisper,gigaam` (raise
+`DOC2KB_MEDIA_TIMEOUT_FACTOR` with it). Explicit lists: `whisper,gigaam`, `whisper`,
 `mlx`, `whisper,gigaam,mlx` (third engine only adds its rendering to
 review.md), `gigaam` (Russian only, punctuated v3 e2e — needs `--lang ru`).
 `_asr.py check --models-dir <state>/transcribe/models` (run with the tier's
-python) prints which engines are ready. An existing ggml model is reused with
+python) prints which engines are ready and, under `host`, what the machine
+gets: `accel` (`metal` / `cuda` / `cpu`), the resolved `profile`, CPU `threads`. An existing ggml model is reused with
 `DOC2KB_WHISPER_MODEL=/path/ggml-large-v3.bin` at `--tier transcribe` time
 (symlinked into the models dir, no 3 GB download).
 

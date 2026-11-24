@@ -77,8 +77,10 @@ HUGE_PAGES = 500                    # PDF pages
 # drives the speech-to-text cost. Longer than this → ask before extracting.
 HUGE_MEDIA_SECONDS = 4 * 3600
 # Speech-to-text cost model: tokens per minute of speech (~110 words/min at
-# ~2.3 tokens/word for Russian), seconds of compute per second of audio on
-# Apple Silicon with whisper.cpp + GigaAM (CPU-only machines are slower).
+# ~2.3 tokens/word for Russian), seconds of compute per second of audio. An
+# upper bound for the profile `auto` picks: 0.07 measured on an M5 Pro
+# (whisper.cpp beside GigaAM), 0.10 on four CPU cores for Russian speech
+# (GigaAM alone); other languages on a CPU-only host run whisper and are slower.
 MEDIA_TOKENS_PER_MIN = 250
 SUBS_TOKENS_PER_MIN = 200
 ASR_SECONDS_PER_SECOND = 0.25

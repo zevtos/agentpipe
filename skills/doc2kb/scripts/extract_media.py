@@ -27,7 +27,12 @@ Where the text comes from (first that applies):
     2. Speech-to-text through the opt-in `transcribe` tier (`_asr.py` in its
        own venv): whisper.cpp large-v3 `-mc 0` + VAD as the punctuated base,
        GigaAM v3 filling whisper's loops and silent gaps when the speech is
-       Russian; disputed spans → `<kb_dir>/_media/<doc_id>/review.md`.
+       Russian (both run side by side); disputed spans →
+       `<kb_dir>/_media/<doc_id>/review.md`. $DOC2KB_ASR_PROFILE picks the
+       pipeline: `quality` (that pair), `fast` (one engine — GigaAM alone for
+       Russian speech, the whisper base alone otherwise), `auto` (default:
+       quality with a GPU, fast on a CPU-only host, where whisper large-v3
+       runs near real time and GigaAM 40× faster).
 
 Exit codes: 0 ok · 1 failure (unreadable media, no audio and no text, engine
 crash, timeout) · 2 needs install (ffmpeg missing, or the transcribe tier not
