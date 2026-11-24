@@ -33,7 +33,10 @@ Speed, measured on a 10-min lecture excerpt (Apple M5 Pro):
       quality  whisper base + GigaAM filler, as above;
       fast     one engine per recording: GigaAM alone when the speech is
                Russian (44× real time on ONE CPU thread, punctuated, never
-               loops), the whisper base alone otherwise;
+               loops); Parakeet TDT v3 alone (onnxruntime, int8) for the 24
+               other European languages it knows (a 6.5-min English speech on
+               four Linux cores: 29 s against 144 s for the whisper base); the
+               whisper base alone for the rest;
       auto     (default) quality with a GPU (Apple Silicon, CUDA), fast
                without one;
   * faster-whisper on a CPU: int8 weights, every physical core, batched
@@ -49,7 +52,7 @@ CLI:
                                                           + host (GPU, profile)
     _asr.py setup  --models-dir D [--all]               → fetch pinned models
     _asr.py run <wav16k> --work D --models-dir M
-                [--lang auto|ru|en|…] [--engines auto|whisper,gigaam,…]
+                [--lang auto|ru|en|…] [--engines auto|whisper,gigaam,parakeet,…]
                 [--no-eq] [--deadline EPOCH]
         → <work>/asr.json (+ review.md, whisper.srt/json, gigaam.txt, run.log)
           and one JSON line on stdout. Exit 2 = no usable engine (setup
@@ -137,8 +140,28 @@ GIGAAM_HF = {  # name → (commit of the model's branch, {file: (bytes, sha256)}
 }
 GIGAAM_CACHE = Path("~/.cache/gigaam").expanduser()  # gigaam's default download_root
 
-BASE_ENGINES = ("whisper", "mlx", "faster-whisper")
-ALL_ENGINES = BASE_ENGINES + ("gigaam",)
+# Parakeet TDT 0.6b v3 (NVIDIA, CC-BY-4.0): one transducer for 25 European
+# languages, punctuated and cased, no language prompt. NVIDIA publishes a
+# .nemo checkpoint; the ONNX export is istupakov's (the author of onnx-asr,
+# which runs it on onnxruntime) — plain ONNX graphs, no pickles, pinned to a
+# revision + sha256. int8: 670 MB against 2.5 GB in float32.
+PARAKEET_REPO = "istupakov/parakeet-tdt-0.6b-v3-onnx"
+PARAKEET_REV = "8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce"
+PARAKEET_ARCH = "nemo-parakeet-tdt-0.6b-v3"      # onnx-asr's name for it
+PARAKEET_LABEL = "parakeet-tdt-0.6b-v3-int8"
+PARAKEET_FILES = {  # name → (bytes, sha256)
+    "config.json": (97, "666903c76b9798caf2c210afd4f6cd60b08a8dbf9800ec8d7a3bc0d2148ac466"),
+    "vocab.txt": (93939, "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d"),
+    "nemo128.onnx": (139764, "a9fde1486ebfcc08f328d75ad4610c67835fea58c73ba57e3209a6f6cf019e9f"),
+    "decoder_joint-model.int8.onnx": (18202004, "eea7483ee3d1a30375daedc8ed83e3960c91b098812127a0d99d1c8977667a70"),
+    "encoder-model.int8.onnx": (652183999, "6139d2fa7e1b086097b277c7149725edbab89cc7c7ae64b23c741be4055aff09"),
+}
+PARAKEET_LANGS = frozenset(
+    "bg cs da de el en es et fi fr hr hu it lt lv mt nl pl pt ro ru sk sl sv uk".split())
+
+BASE_ENGINES = ("whisper", "mlx", "faster-whisper")   # whisper runtimes: any language, report it
+SOLO_ENGINES = ("gigaam", "parakeet")                 # transducers: fast on a CPU, fixed languages
+ALL_ENGINES = BASE_ENGINES + SOLO_ENGINES
 PROFILES = ("auto", "quality", "fast")
 # `fast` hands a recording to GigaAM alone only when whisper is this sure the
 # speech is Russian: GigaAM turns any other language into Russian-looking noise.
@@ -383,7 +406,24 @@ def usable(models_dir: Path) -> dict[str, dict]:
                      "weights": gigaam_weights(models_dir, name)}
     if not out["gigaam"]["ok"]:
         out["gigaam"]["why"] = "gigaam / silero-vad not installed"
+    pdir = parakeet_dir(models_dir)
+    out["parakeet"] = {"ok": have("onnx_asr") and pdir is not None, "model": PARAKEET_LABEL,
+                       "path": str(pdir) if pdir else None}
+    if not have("onnx_asr"):
+        out["parakeet"]["why"] = "onnx-asr not installed — run ensure_env.py --tier transcribe"
+    elif pdir is None:
+        out["parakeet"]["why"] = ("weights not downloaded — only the `fast` profile uses them: "
+                                  "DOC2KB_ASR_PROFILE=fast _asr.py setup")
     return out
+
+
+def parakeet_dir(models_dir: Path) -> Path | None:
+    """<models>/parakeet when every pinned file is there."""
+    d = models_dir / "parakeet"
+    if all((d / f).is_file() and (d / f).stat().st_size == size
+           for f, (size, _) in PARAKEET_FILES.items()):
+        return d
+    return None
 
 
 def gigaam_name() -> str:
@@ -414,12 +454,17 @@ def plan(spec: str, lang: str | None, avail: dict[str, dict],
          prof: str = "quality") -> tuple[str, str | None, str | None]:
     """(base, filler, third) for an engine spec. `auto` under the `quality`
     profile = best base + GigaAM (the filler is dropped later if the detected
-    language is not Russian); under `fast` = one engine, GigaAM when the
-    language is known to be Russian. An explicit list ignores the profile."""
+    language is not Russian); under `fast` = one engine: GigaAM when the
+    language is known to be Russian, Parakeet when it is another language
+    Parakeet knows, the whisper base otherwise. An explicit list ignores the
+    profile."""
     if spec in ("", "auto", None):
         base = next((e for e in BASE_ENGINES if avail[e]["ok"]), None)
-        if avail["gigaam"]["ok"] and lang == "ru" and (base is None or prof == "fast"):
-            return "gigaam", None, None
+        if base is None or prof == "fast":
+            if avail["gigaam"]["ok"] and lang == "ru":
+                return "gigaam", None, None
+            if avail["parakeet"]["ok"] and lang in PARAKEET_LANGS:
+                return "parakeet", None, None
         if base is None:
             why = "; ".join(f"{e}: {avail[e].get('why')}" for e in BASE_ENGINES)
             raise NeedsSetup("no speech-to-text engine ready (" + why + ")")
@@ -435,6 +480,9 @@ def plan(spec: str, lang: str | None, avail: dict[str, dict],
         raise NeedsSetup("engine(s) not ready — " + "; ".join(missing))
     if names[0] == "gigaam" and lang != "ru":
         raise ValueError("GigaAM is Russian-only — set the language to ru or list a whisper engine first")
+    if names[0] == "parakeet" and lang is not None and lang not in PARAKEET_LANGS:
+        raise ValueError(f"Parakeet does not know {lang!r} (it knows {', '.join(sorted(PARAKEET_LANGS))}) "
+                         "— list a whisper engine first")
     return names[0], (names[1] if len(names) > 1 else None), (names[2] if len(names) > 2 else None)
 
 
@@ -673,6 +721,40 @@ def detect_language(base: str, raw: Path, work: Path, avail: dict[str, dict], lo
     lang, prob, _ = _fw_on_device(
         lambda device: _fw_model(avail["faster-whisper"]["path"], device).detect_language(audio=sample))
     return lang, float(prob)
+
+
+def run_parakeet(raw: Path, work: Path, lang: str | None, avail: dict,
+                 deadline: float | None) -> tuple[list[Seg], str | None]:
+    """VAD chunks → Parakeet TDT v3 on onnxruntime, raw audio. The model picks
+    the language itself (one of PARAKEET_LANGS) and reports none, so `lang`
+    comes back as given."""
+    import onnx_asr
+    import onnxruntime as rt
+
+    wav = _read_wav(raw)
+    chunks = vad_chunks(wav, SR)
+    opts = rt.SessionOptions()
+    opts.intra_op_num_threads = cpu_threads()
+    model = onnx_asr.load_model(PARAKEET_ARCH, avail["path"], quantization="int8",
+                                sess_options=opts, providers=["CPUExecutionProvider"])
+    segs: list[Seg] = []
+    for s, e in chunks:
+        remaining(deadline)
+        txt = (model.recognize(wav[s:e], sample_rate=SR) or "").strip()
+        if txt:
+            segs.append(Seg(s / SR, e / SR, txt, "parakeet"))
+    (work / "parakeet.txt").write_text(
+        "\n".join(f"[{ts(x.start)}-{ts(x.end)}] {x.text}" for x in segs) + "\n", encoding="utf-8")
+    return segs, lang
+
+
+def fetch_parakeet(models_dir: Path) -> str:
+    """Download the pinned Parakeet files (sha256-checked) into <models>/parakeet."""
+    d = models_dir / "parakeet"
+    d.mkdir(parents=True, exist_ok=True)
+    states = [_download(f"https://huggingface.co/{PARAKEET_REPO}/resolve/{PARAKEET_REV}/{f}", d / f, sha, size)
+              for f, (size, sha) in PARAKEET_FILES.items()]
+    return f"{PARAKEET_REPO}@{PARAKEET_REV[:10]} " + ("downloaded" if "downloaded" in states else "present")
 
 
 class GigaamUnavailable(RuntimeError):
@@ -948,6 +1030,7 @@ def cmd_run(a: argparse.Namespace) -> int:
         "whisper": lambda lg: run_whisper_cpp(raw, work, lg, avail["whisper"], log, deadline),
         "mlx": lambda lg: run_mlx(raw, work, lg, avail["mlx"], deadline),
         "faster-whisper": lambda lg: run_faster_whisper(raw, work, lg, avail["faster-whisper"], deadline),
+        "parakeet": lambda lg: run_parakeet(raw, work, lg, avail["parakeet"], deadline),
     }
     timings: dict[str, float] = {}
     models: dict[str, str] = {}
@@ -972,16 +1055,18 @@ def cmd_run(a: argparse.Namespace) -> int:
         alone = stop is None and sys.platform != "darwin"
         return run_gigaam(audio, work, models_dir, deadline, stop, cpu_threads() if alone else 1)
 
-    # `fast` gives a Russian recording to GigaAM alone, so the language has to
-    # be known before the plan: one whisper window, no decoding.
+    # `fast` gives the recording to one transducer — GigaAM for Russian,
+    # Parakeet for the other languages it knows — so the language has to be
+    # known before the plan: one whisper window, no decoding.
     listener = next((e for e in BASE_ENGINES if avail[e]["ok"]), None)
-    if auto and prof == "fast" and lang is None and avail["gigaam"]["ok"] and listener:
+    solo = [e for e in SOLO_ENGINES if avail[e]["ok"]]
+    if auto and prof == "fast" and lang is None and solo and listener:
         heard, prob = timed("language", lambda: detect_language(listener, raw, work, avail, log, deadline))
-        if heard == "ru" and (prob is None or prob >= LANG_SURE):
-            lang = "ru"
-        elif heard == "ru":
-            notes.append(f"language ru with probability {prob:.2f} < {LANG_SURE} — "
-                         f"{listener} transcribes, not GigaAM alone")
+        if heard and (prob is None or prob >= LANG_SURE):
+            lang = heard
+        elif heard:
+            notes.append(f"language {heard} with probability {prob:.2f} < {LANG_SURE} — "
+                         f"{listener} transcribes, not {' / '.join(solo)} alone")
     base_name, fill_name, third_name = plan(a.engines, lang, avail, prof)
     if "faster-whisper" not in (base_name, fill_name, third_name):
         _FW_MODELS.clear()  # the listener's weights (1.6 GB int8) are not needed any more
@@ -1164,6 +1249,20 @@ def cmd_setup(a: argparse.Namespace) -> int:
         except GigaamUnavailable as e:
             report["gigaam"] = (f"unavailable — Russian loops/gaps go unrepaired until it downloads "
                                 f"(re-run `ensure_env.py --tier transcribe` later): {e}")
+    if have("onnx_asr"):
+        # 670 MB that only the `fast` profile reads: fetched where `auto`
+        # resolves to it (CPU-only hosts) or when asked for.
+        if a.all or profile() == "fast":
+            try:
+                report["parakeet"] = fetch_parakeet(models_dir)
+            except (OSError, RuntimeError) as e:
+                report["parakeet"] = (f"download failed — non-Russian speech stays on the whisper base "
+                                      f"until it downloads (re-run setup): {e}")
+        elif parakeet_dir(models_dir):
+            report["parakeet"] = "present"
+        else:
+            report["parakeet"] = ("skipped — only the `fast` profile uses it and this host resolves to "
+                                  "`quality`; `DOC2KB_ASR_PROFILE=fast _asr.py setup` fetches it (670 MB)")
     avail = usable(models_dir)
     ready = any(avail[e]["ok"] for e in BASE_ENGINES)
     print(json.dumps({"ok": ready, "models_dir": str(models_dir), "setup": report,
@@ -1186,7 +1285,8 @@ def main() -> int:
         p = sub.add_parser(name)
         p.add_argument("--models-dir", required=True)
         if name == "setup":
-            p.add_argument("--all", action="store_true", help="also fetch the python engines' weights")
+            p.add_argument("--all", action="store_true",
+                           help="also fetch the python engines' weights and Parakeet")
         if name == "run":
             p.add_argument("wav")
             p.add_argument("--work", required=True)

@@ -6,7 +6,7 @@ CLI:
     extract_media.py <input_media> <output_md>
                      [--doc-id doc-NNN] [--source-rel rel/path/in/corpus.mp4]
                      [--lang auto|ru|en|…]          (env DOC2KB_TRANSCRIBE_LANG, default auto)
-                     [--engines auto|whisper,gigaam,mlx,faster-whisper]
+                     [--engines auto|whisper,gigaam,mlx,faster-whisper,parakeet]
                                                      (env DOC2KB_ASR_ENGINES, default auto)
                      [--subtitles prefer|ignore]     (env DOC2KB_MEDIA_SUBTITLES, default prefer)
                      [--sidecar <path.srt>]…         subtitle files that belong to this file
@@ -30,9 +30,10 @@ Where the text comes from (first that applies):
        Russian (both run side by side); disputed spans →
        `<kb_dir>/_media/<doc_id>/review.md`. $DOC2KB_ASR_PROFILE picks the
        pipeline: `quality` (that pair), `fast` (one engine — GigaAM alone for
-       Russian speech, the whisper base alone otherwise), `auto` (default:
+       Russian speech, Parakeet v3 alone for the 24 other European languages
+       it knows, the whisper base alone for the rest), `auto` (default:
        quality with a GPU, fast on a CPU-only host, where whisper large-v3
-       runs near real time and GigaAM 40× faster).
+       runs near real time and the transducers tens of times faster).
 
 Exit codes: 0 ok · 1 failure (unreadable media, no audio and no text, engine
 crash, timeout) · 2 needs install (ffmpeg missing, or the transcribe tier not
@@ -89,12 +90,12 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 ASR_SCRIPT = SCRIPTS_DIR / "_asr.py"
 TIER_HINT = (
     "speech-to-text tier not installed — run `python3 <skill_dir>/scripts/ensure_env.py "
-    "--tier transcribe` (≈1 GB deps + up to 3.5 GB pinned models; `brew install "
+    "--tier transcribe` (≈1 GB deps + up to 4.2 GB pinned models; `brew install "
     "whisper-cpp` first gives the best engine), then re-run extract_corpus.py"
 )
 DECODE_TIMEOUT_SEC = 1800
 ENGINE_LABEL = {"whisper": "whisper.cpp", "mlx": "mlx-whisper", "faster-whisper": "faster-whisper",
-                "gigaam": "GigaAM"}
+                "gigaam": "GigaAM", "parakeet": "Parakeet"}
 _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_.-]")
 
 

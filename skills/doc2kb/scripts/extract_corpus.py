@@ -168,7 +168,7 @@ DEFAULT_WORKERS = 4
 MEDIA_TIMEOUT_FACTOR_ENV = "DOC2KB_MEDIA_TIMEOUT_FACTOR"
 MEDIA_TIMEOUT_DEFAULT_FACTOR = 2.0
 MEDIA_TIMEOUT_HEADROOM_SEC = 900
-MEDIA_ENGINES = {"whisper", "gigaam", "mlx", "faster-whisper"}
+MEDIA_ENGINES = {"whisper", "gigaam", "mlx", "faster-whisper", "parakeet"}
 _MEDIA_LANG_RE = re.compile(r"^(auto|[a-z]{2,3})$")
 
 _LANG_RE = re.compile(r"^[a-z]{2,}$")

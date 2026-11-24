@@ -45,8 +45,9 @@ ensure_env.py — изолированное окружение для скил�
                             onnx/onnxruntime ниже, чем нужно PyMuPDF 2.x, а torch
                             отстаёт от свежего CPython. После pip-установки
                             `_asr.py setup` качает закреплённые модели (whisper.cpp
-                            ggml + VAD, либо mlx/faster-whisper; GigaAM) в
-                            <state>/transcribe/models. ~1 GB deps + 3.5 GB моделей.
+                            ggml + VAD, либо mlx/faster-whisper; GigaAM; на
+                            CPU-only машине ещё Parakeet) в
+                            <state>/transcribe/models. ~1 GB deps + до 4.2 GB моделей.
 
 Зависит только от stdlib — иначе курица-яйцо. Поддерживает Python 3.8+.
 """
