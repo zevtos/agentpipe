@@ -1,13 +1,61 @@
 # Knowledge Base — Agent Instructions
 
-This directory is an extracted knowledge base built by the `doc2kb` skill.
-Read in this order:
+This directory is a knowledge base built by the `doc2kb` skill: source
+documents converted to Markdown under `docs/`, a catalog (`INDEX.md`) and a
+search index (`_index.db`).
+
+## Find things: search first
+
+`./query.sh` returns the best passages **in full**, each headed by where it sits:
+
+```
+[1] docs/doc-007-virtualbox.md:13062-13074 · 9.8.1 Configuring the Address of a NAT Network Interface · p.266
+In NAT mode, the guest network interface is assigned to the IPv4 range …
+[2] docs/doc-009-lab-1.md:88-97 · Настройка сетевых интерфейсов — … snippet of a weaker hit …
+sources: doc-007 = VirtualBox.pdf; doc-009 = Lab-1.docx
+```
+
+One call is usually the whole lookup. When you need the text around a hit,
+`Read` that file at those lines — no second search to find the place.
+
+```bash
+./query.sh "NAT guest address gateway" "адрес гостя в режиме NAT"   # several queries, one call
+./query.sh "<keywords>" --brief          # pointers + snippets only: where is this covered?
+./query.sh "<keywords>" --full -k 3      # full text of every hit
+./query.sh "<keywords>" --doc doc-002    # one document (and the documents embedded in it)
+./query.sh --help                        # every option
+```
+
+How to ask:
+
+- **Keywords, not sentences** — the words the document itself would use (terms,
+  API and option names). Several short queries in one call beat one long query;
+  a passage is never printed twice.
+- **Word forms don't matter.** Russian and English are stemmed, and a long
+  Russian word also matches its word family («блокировка» finds «блокирует»).
+  If a search misses, rephrase with *different words*, not other inflections.
+- **Exact tokens work as typed**: `10.0.2.15`, `--mac-address`, `hold.setBlocked`.
+- **Search does not cross languages.** In a corpus with Russian and English
+  documents send the query in both; the output reminds you when it matters.
+- `not in this KB: <word>` means that word occurs nowhere — try a synonym
+  before concluding the topic is absent.
+
+Use `Grep` on `docs/` instead when you need **every occurrence** of an exact
+string, or a regular expression. Use `INDEX.md` to see which documents exist.
+If your session has the doc2kb MCP tool `search` (server `kb`), it is this same
+engine across every KB under the working directory.
+
+The index keeps itself current: add or edit `docs/*.md` and the next query
+re-indexes first. Where doc2kb is installed, `query.sh` runs the installed
+searcher (an old KB gets today's search); elsewhere the bundled `_query.py`
+answers — pure stdlib, only `python3` needed. If there is no `_index.db` and it
+cannot be built here, fall back to the `INDEX.md` headings + `Grep`/`Read`.
+
+## What is where
 
 1. **`INDEX.md`** — the corpus catalog: every document grouped by source
-   type, with its headings and any extraction warnings listed inline. This
-   is your map — it is enough to decide which documents are relevant.
-2. **`docs/<id>-<slug>.md`** — open individual documents only when relevant
-   to the question at hand. Each has a YAML frontmatter block with `source`
+   type, with its headings and any extraction warnings listed inline.
+2. **`docs/<id>-<slug>.md`** — one document. YAML frontmatter carries `source`
    (original file path), `source_sha256`, `pages` or `slides`, `headings`,
    `tokens_estimated`, and any `warnings` from extraction.
 3. **`docs/<id>-<slug>/`** (a folder, not a file) — a large document that was
@@ -29,35 +77,10 @@ estimates in JSON) and `llms.txt` (an llmstxt.org catalog for external tools)
 duplicate INDEX.md's navigation info — read them only if you need structured
 JSON for programmatic filtering or sha256 provenance, not for navigation.
 
-## Searching the corpus (do this FIRST)
-
-If this directory contains `query.sh` and `_index.db`, the KB ships a built-in
-BM25 search index. **To answer a question, search before you grep or bulk-read** —
-it returns the top ranked passages with a citation, instead of flooding you with
-unranked grep hits:
-
-```bash
-./query.sh "<the question you are answering>"        # ranked passages + citations
-./query.sh "<question>" --show                       # full passage text, not snippets
-./query.sh "<question>" --json -k 5                  # machine-readable, top 5
-./query.sh "<question>" --type pdf --doc doc-002     # filter by source type / doc-id
-```
-
-`query.sh` is pure-stdlib and self-contained (`_query.py`) — it needs only
-`python3`, no venv, no network. Each result cites `source › heading › page N`;
-use that to open the exact `docs/*.md` section (or the original `source` file)
-for full context. Word forms don't matter: Russian and English words are
-stemmed on both sides, so «затраты на качество» also finds «затратами на
-качество» — rephrase with *different words* if a search misses, not with other
-inflections of the same ones. Search is iterative: refine the query and re-run
-rather than loading whole documents speculatively. If `_index.db` is absent, fall back to
-the INDEX.md headings + `Grep`/`Read` flow below.
-
 ## Reading discipline
 
-- **Search first** (above), then **do NOT bulk-load** every file in `docs/` —
-  that defeats the point of having an index. Use `Grep` and `Read` targeted at
-  the filenames the search (or `INDEX.md`) points you to.
+- **Search first**, then **do NOT bulk-load** every file in `docs/` — read the
+  line range a hit points to, widen it if the passage is cut short.
 - The headings listed under each document in `INDEX.md` (and in each doc's
   frontmatter `headings` array) are the fastest way to decide whether a doc
   is relevant before reading its body.
@@ -67,11 +90,12 @@ the INDEX.md headings + `Grep`/`Read` flow below.
 ## Citation
 
 When you answer questions using facts from this knowledge base, cite the
-`source` path from the document's frontmatter — that is the original file,
-not the kb path. Example: "From `papers/transformer.pdf`, §2.1 …". For an
-embedded document the `source` already names the container and the object
-inside it (`lecture.pptx#ppt/embeddings/Microsoft_Word_Document1.docx`) — cite
-it as is.
+source document — the `sources:` line of a search result names the file, the
+frontmatter `source` of the doc has its full path — plus the section or page.
+That is the original file, not the kb path. Example: "From
+`papers/transformer.pdf`, §2.1 …". For an embedded document the `source`
+already names the container and the object inside it
+(`lecture.pptx#ppt/embeddings/Microsoft_Word_Document1.docx`) — cite it as is.
 
 ## Errors and warnings
 

@@ -260,23 +260,20 @@ def write_index_md(kb_dir: Path, manifest: dict[str, Any]) -> None:
         lines += [
             "## Search (recommended first step)",
             "",
-            f"This KB ships a built-in search index (`_index.db`, {index['backend']}, "
-            f"{index['chunks']} passages). **Prefer it over grep** — it returns "
-            "ranked passages with citations:",
+            f"This KB has a search index (`_index.db`, {index['backend']}, "
+            f"{index['chunks']} passages). `./query.sh \"<keywords>\"` returns the best "
+            "passages **in full**, each headed by `docs/file.md:first-last` — the lines to "
+            "`Read` for more context. Use it before grep:",
             "",
             "```bash",
-            './query.sh "<your question>"          # ranked passages + citation',
-            './query.sh "<question>" --show        # full passage text, not snippets',
-            './query.sh "<question>" --json -k 5   # machine-readable, top 5',
+            './query.sh "<keywords>" "<another wording>"   # several queries, one call',
+            './query.sh "<keywords>" --brief                # pointers + snippets only',
+            './query.sh --help                              # every option',
             "```",
             "",
-            "`query.sh` is pure-stdlib and self-contained (`_query.py`) — it needs "
-            "only `python3`, no venv. Each hit cites `source › heading › page N` so "
-            "you can open the right `docs/*.md` (or original `source`) for full context.",
+            "`AGENTS.md` says how to ask (keywords, exact tokens, two languages) and when "
+            "grep is the better tool. The index re-builds itself when `docs/` changes.",
             "",
-            *(["Russian and English word forms are stemmed: «затраты» also finds "
-               "«затратами», «затрат» — don't retry other inflections of a query.", ""]
-              if index.get("stemmed") else []),
         ]
 
     # By source type.
