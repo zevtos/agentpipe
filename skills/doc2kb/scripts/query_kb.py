@@ -1136,22 +1136,24 @@ def is_kb(d: Path) -> bool:
 def discover_kbs(root: Path, max_depth: int = 5, limit: int = 64,
                  budget_s: float = 2.0) -> list[Path]:
     """Every doc2kb KB at or under `root` (a KB is a folder with `docs/` and an
-    `_index.db` or `manifest.json`). Does not look inside a KB, a hidden folder
-    or a dependency tree; stops at `max_depth`, `limit` KBs or `budget_s`."""
+    `_index.db` or `manifest.json`), a KB kept inside another KB's folder
+    included. Does not look into `docs/` / `assets/` / `raw/`, a hidden folder,
+    a KB's own `_`-folders or a dependency tree; stops at `max_depth`, `limit`
+    KBs or `budget_s`."""
     root = Path(root)
-    if is_kb(root):
-        return [root]
-    found: list[Path] = []
+    found: list[Path] = [root] if is_kb(root) else []
     deadline = time.monotonic() + budget_s
     level = [root]
     for _ in range(max_depth):
         nxt: list[Path] = []
         for d in level:
+            # inside a KB the `_`-folders are its own (_logs, _media, _mineru …)
+            hidden = (".", "_") if d in found else (".",)
             try:
                 with os.scandir(d) as it:
                     subs = sorted(e.path for e in it
                                   if e.is_dir(follow_symlinks=False)
-                                  and not e.name.startswith(".")
+                                  and not e.name.startswith(hidden)
                                   and e.name not in _SKIP_DIRS)
             except OSError:
                 continue
@@ -1161,8 +1163,7 @@ def discover_kbs(root: Path, max_depth: int = 5, limit: int = 64,
                     found.append(p)
                     if len(found) >= limit:
                         return found
-                else:
-                    nxt.append(p)
+                nxt.append(p)
             if time.monotonic() > deadline:
                 return found
         level = nxt
