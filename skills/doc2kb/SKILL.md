@@ -232,27 +232,35 @@ python3 <skill_dir>/scripts/ensure_env.py index_kb.py <kb_dir>
 #        --no-keywords, --force (rebuild despite unchanged signature), -q
 ```
 
-Слайсит каждый `docs/*.md` на structure-aware пассажи (split по `[page N]`
-anchors → по заголовкам → по абзацам, token-bounded, overlap-free) с
-**детерминированным contextual-заголовком** на каждом чанке
-(`Doc title › heading path › page N`) и строит `<kb_dir>/_index.db` —
-**SQLite FTS5/BM25** со **стеммингом русского и английского** (Snowball
-Russian + Snowball English, pure-Python порты в `query_kb.py`): запрос
-«затратами на качество» находит «затраты на качество», «затрат на качество».
-Стемминг идёт в Python, а не в SQLite — встроенный `porter` стеммит только
-английский, а свой FTS5-токенайзер требует C API; поэтому FTS5 получает уже
-проанализированные токены (contentless-таблица, токенайзер `ascii`), а запрос
-проходит через ту же функцию `analyze()`. Наличие FTS5 проверяется на этапе
-сборки и пишется в `meta.fts`; если этого CPython'а FTS5 нет — `query_kb.py`
-прозрачно падает на pure-Python BM25 по формуле FTS5 `bm25()` над той же
-таблицей `chunks` (ранжирование совпадает с FTS5, просто медленнее). Схема —
-`references/format-spec.md` («`_index.db` search index»). Кладёт в `<kb_dir>` self-contained pure-stdlib копию
-поисковика (`_query.py`) + лаунчеры `query.sh` / `query.cmd` — KB становится
-**портативной и searchable где угодно с одним лишь `python3`** (без venv, без
-скилла). Идемпотентно по corpus-signature (sorted doc-id+sha256 + chunk
-params + версия схемы и анализатора): повторный прогон — no-op, пока корпус не
-изменился; индекс старой схемы (до стемминга) пересобирается сам при следующем
-прогоне.
+Слайсит каждый `docs/*.md` на structure-aware пассажи (пассаж не пересекает
+`[page N]` anchor → делится по заголовкам → по абзацам, token-bounded,
+overlap-free) с **детерминированным contextual-заголовком** на каждом чанке
+(`Doc title › heading path › page N`; путь заголовков переживает разрыв
+страницы) и **диапазоном строк** пассажа в `.md`-файле, и строит
+`<kb_dir>/_index.db` — **SQLite FTS5/BM25** со **стеммингом русского и
+английского** (Snowball Russian + Snowball English, pure-Python порты в
+`query_kb.py`): запрос «затратами на качество» находит «затраты на качество»,
+«затрат на качество». Стемминг идёт в Python, а не в SQLite — встроенный
+`porter` стеммит только английский, а свой FTS5-токенайзер требует C API;
+поэтому FTS5 получает уже проанализированные токены (contentless-таблица,
+токенайзер `ascii`), а запрос проходит через ту же функцию `analyze()`. Наличие
+FTS5 проверяется на этапе сборки и пишется в `meta.fts`; если этого CPython'а
+FTS5 нет — `query_kb.py` прозрачно падает на pure-Python BM25 по формуле FTS5
+`bm25()` над той же таблицей `chunks` (ранжирование совпадает с FTS5, просто
+медленнее). Схема — `references/format-spec.md` («`_index.db` search index»).
+Кладёт в `<kb_dir>` self-contained pure-stdlib копию поисковика (`_query.py`) +
+лаунчеры `query.sh` / `query.cmd` — KB становится **портативной и searchable
+где угодно с одним лишь `python3`** (без venv, без скилла). Идемпотентно по
+corpus-signature (байты каждого проиндексированного `.md` + chunk params +
+версия схемы и анализатора): повторный прогон — no-op, пока корпус не изменился.
+
+**Индекс не устаревает и руками его пересобирать не нужно.** Перед каждым
+запросом поисковик сверяет индекс с `docs/` (размер + mtime каждого `.md`) и со
+своим форматом; если документы правили/добавляли или индекс собран старой
+версией — пересобирает его сам (6 млн токенов ≈ 4 с) и только потом отвечает.
+Заметка без frontmatter, которую агент только что положил в `docs/`, находится
+следующим же запросом. Запускать эту фазу вручную нужно лишь при первой сборке
+KB (и `dkb` делает это сам).
 
 > Эта фаза — детерминированная (никаких LLM, никакой суммаризации: чанки —
 > verbatim). Запускайте её **до** Phase 5 — `build_manifest.py` подхватывает
@@ -281,9 +289,9 @@ Claude/Codex в `<kb_dir>` (или передаёт путь), Claude читае
 ├── INDEX.md          # human + agent readable overview (+ Search section)
 ├── llms.txt          # llmstxt.org-compatible catalog
 ├── AGENTS.md         # navigation instructions for second-session agent
-├── _index.db         # BM25 search index (Phase 4.5; FTS5 or python fallback)
-├── _query.py         # self-contained pure-stdlib search script (portable)
-├── query.sh          # search launcher → ./query.sh "<question>"
+├── _index.db         # BM25 search index (Phase 4.5; FTS5 or python fallback); re-builds itself
+├── _query.py         # self-contained pure-stdlib searcher (portable); yields to a newer installed doc2kb
+├── query.sh          # search launcher → ./query.sh "<keywords>" ["<another wording>" ...]
 ├── query.cmd         # Windows search launcher
 ├── docs/
 │   ├── doc-001-<slug>.md
@@ -315,62 +323,135 @@ Claude/Codex в `<kb_dir>` (или передаёт путь), Claude читае
 
 ## Querying the knowledge base (retrieval layer)
 
-The whole point of doc2kb is that a **second** agent ingests the KB. Before this
-layer that agent had only `INDEX.md` headings + `Grep` — which floods it with
-unranked hits and burns tokens on a large corpus. Phase 4.5 ships a real search
-engine inside the KB so the agent (or a human) finds the right passage with one
-command, **citation-first**:
+The whole point of doc2kb is that a **second** agent ingests the KB. The search
+is built for that agent: one call returns the best passages **in full**, each
+headed by the file and line range it sits in — so the lookup is usually over
+after one call, and when it is not, `Read` with that range is the next step (no
+second grep to find the place):
 
-```bash
-# from inside <kb_dir> — pure stdlib, no venv, no API, works anywhere with python3:
-./query.sh "<your question>"                 # top-k ranked passages + citations
-./query.sh "<question>" --show               # full passage text, not snippets
-./query.sh "<question>" --json -k 5          # machine-readable, top 5
-./query.sh "<question>" --type pdf --doc doc-002   # filter by source type / doc
-./query.sh "<question>" --page 12            # filter by page anchor
-./query.sh "<question>" --and                # require ALL terms (default: OR + BM25)
-./query.sh '"нейронные сети" AND обучени*' --raw  # FTS5 syntax; its terms are stemmed too
-./query.sh --info                            # index stats + which backend is live
-
-# equivalent through the agent's canonical wrapper, or the dkb CLI:
-python3 <skill_dir>/scripts/ensure_env.py query_kb.py <kb_dir> "<question>"
-dkb query <kb_dir> "<question>" -k 5
+```
+$ ./query.sh "NAT guest address 10.0.2.15 gateway" "адрес гостя в режиме NAT"
+### NAT guest address 10.0.2.15 gateway
+[1] docs/doc-007-virtualbox.md:13062-13074 · 9.8 Fine Tuning the NAT Engine › 9.8.1 Configuring the Address of a NAT Network Interface · p.266
+In NAT mode, the guest network interface is assigned to the IPv4 range `10.0.x.0/24` by default …
+[2] docs/doc-009-lab-1.md:88-97 · Настройка сетевых интерфейсов — … «NAT» … snippet of a weaker hit …
+sources: doc-007 = VirtualBox.pdf; doc-009 = Lab-1.docx
 ```
 
-Each hit prints a citation the agent can drop straight into an answer —
-`source_path › heading path › page N  [doc-id]  score` — plus a highlighted
-snippet (or the full passage with `--show`) and the `docs/*.md` to open for
-context. **The second agent should search first, then Read** — `AGENTS.md`
-(generated into every KB) tells it exactly this.
+Three ways in, one engine (`query_kb.py`):
 
-Why this design (validated against 2025-2026 evidence — Amazon "Keyword search
-is all you need" AAAI 2026, Anthropic dropping RAG from Claude Code, Contextual
+```bash
+# 1. from inside a KB — pure stdlib, no venv, works anywhere with python3
+./query.sh "<keywords>" "<another wording>"   # each quoted argument is its own query
+./query.sh "<keywords>" --brief               # pointers + snippets only: where is it covered?
+./query.sh "<keywords>" --full -k 3           # full text of every hit (alias: --show)
+./query.sh "<keywords>" --budget 600          # less passage text per query (default 1500 tokens)
+./query.sh "<keywords>" --type pdf --doc doc-002 --page 12   # filters
+./query.sh "<keywords>" --and                 # every term must be present (default: any, ranked)
+./query.sh '"нейронные сети" AND обучени*' --raw   # FTS5 syntax; its terms are stemmed too
+./query.sh "<keywords>" --json                # machine-readable (path, lines, text, score, fit)
+./query.sh --info                             # index stats, backend, searcher revision
+
+# 2. from anywhere — one KB, or every KB under a folder (default: the current directory)
+dkb q "<keywords>"                            # all KBs under .
+dkb q ~/study "<keywords>" --kb kb-course     # only KBs whose path contains "kb-course"
+dkb q ~/study --list                          # which KBs are there and what is in them
+
+# 3. as a native tool of the agent (MCP) — see "MCP server" below
+```
+
+What makes it agent-oriented:
+
+- **The answer, not a pointer to it.** The strongest passages are printed in full
+  until `--budget` tokens per query are used; weaker hits follow as one-line
+  pointers with a snippet; hits far below the best one are dropped. Neighbouring
+  chunks of one file come out as one passage with one line range.
+- **`file:first-last` on every hit** — the passage's lines in the `.md`, exactly
+  what `Read(offset, limit)` or `sed -n` needs.
+- **Several queries per call.** Different wordings, the document's own terms,
+  each language of the corpus — in one call, and a passage is never printed
+  twice. This is how an agent covers what lexical search cannot guess.
+- **Exact tokens as typed.** `10.0.2.15`, `--mac-address`, `hold.setBlocked`,
+  `3.243` become a phrase of their parts (the tokenizer splits on that
+  punctuation on both sides, so adjacency is what identifies them). A query that
+  starts with a dash needs no escaping.
+- **Russian word families.** Snowball strips inflection, not derivation, so a
+  long Russian stem also searches as its family prefix: «блокировка» finds
+  «блокирует», «эпидемический» finds «эпидемия».
+- **Ranking: BM25 × coverage.** BM25 alone lets a passage that repeats one rare
+  word outrank one that has four of the five things asked about; the score is
+  scaled by the IDF-weighted share of the query's concepts the passage has.
+  Tables of contents, reference lists and indexes — which match almost any
+  query and answer none — are pushed down.
+- **It says what it could not do**: `not in this KB: <word>` (the word occurs
+  nowhere), `no exact match, searched as a prefix: …`, and — when a Russian
+  query meets a corpus that is partly English, or the reverse — a reminder to
+  send the query in the other language too (matching is by words, not meaning).
+- **Several KBs at once.** Hits from different KBs are ranked by `fit` — the
+  score as a share of the best a passage could get for that query in that KB —
+  which is comparable where raw BM25 is not (its IDF depends on the corpus).
+
+**Never stale.** Two things used to age: the searcher copied into each KB and the
+index. Now `_query.py` first looks for an installed doc2kb with a higher
+`ENGINE_REV` (`$DOC2KB_SKILL`, `~/.claude/skills/doc2kb`, `~/.codex/skills/doc2kb`)
+and hands the call over, and the engine re-indexes before answering when the
+docs or the index format changed — it also refreshes the KB's bundled searcher
+and `AGENTS.md`. Upgrading the skill reaches every KB on its next query. A KB
+built **before** this (its `_query.py` cannot delegate) needs one
+`dkb upgrade <folder>` — it re-indexes and re-catalogs every KB under the
+folder. Opt out of the self-refresh with `DOC2KB_NO_AUTOINDEX=1` / `--no-refresh`.
+
+Measured on three course KBs (0.36M / 2.3M / 6.3M tokens), 60 known-item
+queries + 40 exact tokens each, against the previous searcher: passage with the
+answer inside the default output 0 % → 84–98 % (it used to print 14-word
+snippets); exact tokens found 16–25 of 40 → 38–40; hit@1 0.85/0.64/0.97 →
+0.88/0.72/0.90 (the old 0.97 is an unstemmed index on exact-form queries);
+default output 500–940 → 940–1460 tokens, against 3500–3800 for the old `--show`.
+
+Why lexical (validated against 2025-2026 evidence — Amazon "Keyword search is
+all you need" AAAI 2026, Anthropic dropping RAG from Claude Code, Contextual
 Retrieval):
 
 - **No embeddings, no vector DB, no API key, no torch.** Agentic BM25 reaches
-  ~90 %+ of vector-RAG answer quality for a grep+Read agent, at a fraction of
+  ~90 %+ of vector-RAG answer quality for a search+Read agent, at a fraction of
   the infra — and stays inside doc2kb's lightweight-tier invariant. The index is
   one SQLite file built by stdlib `sqlite3`.
 - **Structure-aware + contextual headers.** Chunks respect `[page N]` anchors
   and headings; each is indexed with a deterministic `Doc title › heading ›
   page N` header weighted 2× in BM25 (the no-LLM, no-hallucination slice of
-  Anthropic's Contextual Retrieval). This is what lets a passage about "results"
-  match "transformer results" even when its body never repeats the title.
+  Anthropic's Contextual Retrieval).
 - **Verbatim & deterministic.** Chunks are the source bytes — no summary, no
   rewrite — so the `source_sha256` provenance guarantee is untouched.
 - **Russian + English morphology.** Every passage and every query goes through
   one pure-Python analyzer in `query_kb.py`: fold (lowercase, Latin diacritics,
   Russian stress marks) → tokenize → Snowball Russian / Snowball English stem.
-  FTS5's own `porter` stems English only and a custom FTS5 tokenizer needs the
-  C API, so the stemmed tokens are handed to FTS5 ready-made. On a 47-doc
-  Russian course KB, 20 queries in inflected forms went from recall@5 0.33 →
-  0.78 (hit@5 0.70 → 1.00) at the same ~2 ms per query; exact-form and English
-  queries unchanged. An index built before stemming still searches (unstemmed)
-  and says to rebuild.
 
-When to skip it: `--no-index` on `dkb`, or just don't run Phase 4.5 — INDEX.md
-then degrades gracefully to heading + grep navigation. For a tiny corpus the
-heading catalog alone is fine; the index earns its keep from dozens of docs up.
+When grep is the right tool: every occurrence of an exact string, or a regular
+expression. `AGENTS.md` (generated into every KB) tells the second agent both.
+
+When to skip the index: `--no-index` on `dkb` — INDEX.md then degrades to
+heading + grep navigation. For a tiny corpus the heading catalog alone is fine.
+
+### MCP server — KB search as a native tool (`kb_mcp.py`)
+
+An agent uses what is in its tool list. Registered as an MCP server, the same
+engine needs no `cd`, no shell quoting and no hint in CLAUDE.md:
+
+```bash
+dkb mcp install                 # claude mcp add --scope user kb -- python3 <skill>/scripts/kb_mcp.py
+dkb mcp install --kb ~/notes-kb # + a KB that is searched from every session
+dkb mcp status | uninstall | print   # print = the JSON for another MCP client
+```
+
+- `search(queries[], kb?, top_k?, detail?, doc?, all_terms?)` — every KB under
+  the session's working directory, or the KB / folder / path fragment in `kb`.
+- `list(path?)` — the KBs there: path, size, languages, source documents.
+- The server's `instructions` list the KBs under the working directory at
+  session start, so the agent knows they exist before it is told.
+
+Pure stdlib, stdio, both MCP styles (the `initialize` handshake and the
+stateless 2026-07-28 one). Opt-in: nothing registers it but `dkb mcp install`,
+and `dkb mcp uninstall` removes it.
 
 ## Scripts inventory
 
@@ -403,8 +484,9 @@ heading catalog alone is fine; the index earns its keep from dozens of docs up.
 | `postprocess_popo.py`        | **opt-in stage 2** — runs upstream opendatalab/MinerU-Popo over cached mineru outputs to rebuild document trees (heading hierarchy, cross-page table merging, paragraph truncation repair). Resolves the Popo repo from `--popo-repo` > `$DOC2KB_POPO_REPO` > the `bootstrap_popo.py` auto-default; runs Popo's Python entry points (not its bash wrappers) with the bootstrapped env's python (sentinel `.doc2kb-popo-python`), straight off the `_mineru/` cache, work files in `<kb_dir>/_popo/`; `--auto-setup` runs `bootstrap_popo.py` when unconfigured. |
 | `bootstrap_popo.py`          | **opt-in** auto-setup of the Popo stage-2 env — clone repo → create env (uv→conda→venv, py3.10) → install deps (upstream CUDA reqs on Linux, `requirements-popo-mac.txt` MPS set on macOS) → download the ~16 GB model (resumable, completeness-checked) → patch `POPO_MODEL_PATH` default; on macOS also pins `device_map`→MPS (verified ~22 tok/s, else accelerate disk-offloads). Never runs in the default pipeline; invoked directly or via `postprocess_popo.py --auto-setup` (gated by `DOC2KB_POPO_AUTO`). |
 | `token_count.py`             | count tokens in an extracted .md file |
-| `index_kb.py`                | Phase 4.5 — build `_index.db` (SQLite FTS5/BM25, Russian + English Snowball-stemmed via `query_kb.analyze`) over structure-aware, heading-path-headed, token-bounded chunks of `docs/*.md`; extracts per-doc distinctive terms; drops the portable `_query.py` + `query.sh`/`query.cmd` launchers. Idempotent by corpus signature. Importable `build_index()`. Pure stdlib + tiktoken — **never** a heavy tier. |
-| `query_kb.py`                | citation-first BM25 search over `_index.db`: `query_kb.py <kb_dir> "<question>" [-k N --doc ID --type pdf --page N --and --raw --show --json]`. Carries the analyzer (fold → tokenize → Snowball RU/EN stem, BSD-3 ports) that `index_kb.py` imports. FTS5 with a transparent pure-Python BM25 fallback that ranks identically. Pure stdlib — copied verbatim into each KB as `_query.py` so the KB searches anywhere with just `python3`. |
+| `index_kb.py`                | Phase 4.5 — build `_index.db` (SQLite FTS5/BM25, Russian + English Snowball-stemmed via `query_kb.analyze`) over structure-aware, heading-path-headed, token-bounded chunks of `docs/*.md`, each with its line range in the file; records every `.md`'s size + mtime (`files` table) so the searcher can tell the index is behind; extracts per-doc distinctive terms and a language tag; drops the portable `_query.py` + `query.sh`/`query.cmd` launchers and refreshes a generated `AGENTS.md`. Idempotent by a signature over the `.md` bytes; one builder per KB (lock file). Importable `build_index()`. Pure stdlib + tiktoken when present — **never** a heavy tier. |
+| `query_kb.py`                | the search engine: `query_kb.py <kb_dir \| folder with KBs> "<keywords>" ["<keywords>" ...] [-k N --budget N --full --brief --doc ID --type pdf --page N --and --raw --kb NAME --list --json --info]`. Best passages in full with `file:first-last` refs, exact-token phrases, Russian word families, BM25 × coverage, several KBs ranked by `fit`. Carries the analyzer (fold → tokenize → Snowball RU/EN stem, BSD-3 ports) that `index_kb.py` imports. Re-indexes before answering when docs or format changed; as a KB's `_query.py` it yields to a newer installed copy. FTS5 with a pure-Python BM25 fallback that ranks identically. Pure stdlib. |
+| `kb_mcp.py`                  | MCP server (stdio, pure stdlib) over the same engine: tools `search` and `list`, instructions that name the KBs under the session's directory. Registered by `dkb mcp install`. |
 | `build_manifest.py`          | Phase 5 — assemble manifest, INDEX, llms.txt, AGENTS.md; folds in the `_index.db` Search section + per-doc keywords when present |
 | `dkb.py`                     | **standalone CLI** — one-shot orchestrator that chains Phase 2→5 with the decision step automated, for human/no-agent use (`dkb <input_dir> <output_kb_dir>`). Pure stdlib; shells out to the other scripts through `ensure_env.py` and reuses `apply_overrides.py` to resolve scout decisions. Self-installs a `dkb` launcher on PATH. See "Standalone CLI" below. |
 | `update_kb.py`               | **live KB** — incrementally stamp frontmatter on new hand-authored `docs/*.md` + regenerate index; self-installs `update_kb.sh` (see below) |
@@ -442,7 +524,9 @@ deterministically via `apply_overrides.py` (it never hand-edits `_scout.json`).
 | `dkb scout <in> <out>`    | Phase 2 only — classify, write `_scout.json` |
 | `dkb extract <out>`       | Phase 4 only — auto-decide + extract from an existing `_scout.json` |
 | `dkb index <out> [--force]` | Phase 4.5 only — (re)build the BM25 search index (`_index.db` + `query.sh`) |
-| `dkb query <out> "<q>" [flags]` | search the KB — forwards to `query_kb.py` (uses the portable `_query.py`, no venv) |
+| `dkb query [kb\|folder] "<q>" ["<q>" ...] [flags]` (alias `dkb q`) | search a KB, or every KB under a folder (default: the current directory) with the skill's `query_kb.py` — no venv; `--list` shows the KBs |
+| `dkb upgrade [folder ...] [--dry-run]` | re-index and re-catalog every KB under the folders with this doc2kb — the one-time step for KBs built before the searcher updated itself |
+| `dkb mcp install\|uninstall\|status\|print [--kb PATH]` | register `kb_mcp.py` with Claude Code (user scope) — KB search as a native tool |
 | `dkb manifest <out>`      | Phase 5 only — (re)assemble manifest/INDEX/llms.txt/AGENTS.md |
 | `dkb install [--bin-dir D] [--force]` | install a `dkb` launcher on PATH (default `~/.local/bin`) |
 
@@ -501,8 +585,10 @@ python3 <skill_dir>/scripts/ensure_env.py update_kb.py <kb_dir>
 - Regenerates manifest.json / INDEX.md / llms.txt / AGENTS.md.
 - **Keeps the search index current** — if `<kb_dir>/_index.db` already exists
   (you opted in once with `dkb index` / `index_kb.py`), every refresh rebuilds
-  it so newly hand-authored notes are immediately searchable. A note-KB without
-  an index stays lean; search is never forced on it.
+  it. The searcher does the same on its own before a query when `docs/`
+  changed, so a note is searchable even if `update_kb.sh` was not run — what
+  `update_kb.sh` adds is the frontmatter stamp and the regenerated catalog. A
+  note-KB without an index stays lean; search is never forced on it.
 - On first run drops a self-contained `update_kb.sh` into `<kb_dir>`. The
   agent's loop is then just: **edit `docs/*.md` → run `./update_kb.sh`**.
   Never hand-edit INDEX.md — it is generated.

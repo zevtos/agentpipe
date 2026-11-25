@@ -23,8 +23,10 @@ Contents: [File layout](#file-layout) · [`_scout.json`](#_scoutjson) ·
 ├── AGENTS.md
 ├── _scout.json            # scout output, kept for debugging
 ├── _index.db              # BM25 search index (Phase 4.5, optional; see "_index.db search index")
-├── _query.py              # verbatim copy of scripts/query_kb.py — the portable searcher
-├── query.sh / query.cmd   # launchers: ./query.sh "<question>"
+├── _query.py              # verbatim copy of scripts/query_kb.py — the portable searcher; hands the
+│                          #   call to an installed doc2kb with a higher ENGINE_REV when there is one
+├── query.sh / query.cmd   # launchers: ./query.sh "<keywords>" ["<another wording>" ...]
+├── .index.lock            # present only while an index build runs (one builder per KB)
 ├── _logs/
 │   └── errors.json        # extraction failures, if any
 ├── _media/<doc-id>/       # audio/video speech-to-text drafts: review.md (disputed spots), whisper.srt/.json,
@@ -574,20 +576,50 @@ llmstxt.org-compatible catalog:
 
 Static template at `skills/doc2kb/assets/agents_template.md` is copied to
 `<kb_dir>/AGENTS.md` verbatim. It instructs the second-session agent on
-reading order (INDEX → manifest → docs as needed), citation policy, and
-warning interpretation.
+searching (`query.sh`: how to ask, when grep is the better tool), the layout of
+the KB, citation policy, and warning interpretation. Because it documents the
+searcher's interface, `index_kb.py` brings an existing generated `AGENTS.md`
+(first line `# Knowledge Base — Agent Instructions`) up to the installed
+template whenever it rebuilds or refreshes a KB.
 
 ## `_index.db` search index
 
 Built by `index_kb.py` (Phase 4.5), queried by `query_kb.py` / `<kb_dir>/_query.py`.
-SQLite, read-only for the searcher. Schema version 2:
+SQLite. Schema version 3:
 
 | table | content |
 |---|---|
-| `meta(key, value)` | `schema_version` (`2`), `analyzer` (`snowball-ru-en-1`), `fts` (`1`/`0`), `corpus_signature`, `indexer`, `created_at`, `chunk_target_tokens`, `chunk_max_tokens`, `documents`, `chunks` |
-| `docs` | one row per logical document: `doc_id`, `source_path`, `kb_path` (shard folder → its `_index.md`), `source_type`, `sha256`, `tokens_estimated`, `n_chunks`, `keywords` (top TF-IDF stems, shown as their most frequent surface form) |
-| `chunks` | one row per passage, **verbatim** source text: `chunk_id`, `doc_id`, `source_path`, `kb_path`, `source_type`, `page`, `heading` (path `A › B`), `ord`, `tokens`, `context` (`Doc title › heading path › page N`), `body` |
+| `meta(key, value)` | `schema_version` (`3`), `analyzer` (`snowball-ru-en-1`), `engine_rev` (the searcher revision that built it), `fts` (`1`/`0`), `corpus_signature`, `indexer`, `created_at`, `chunk_target_tokens`, `chunk_max_tokens`, `documents`, `chunks` |
+| `docs` | one row per logical document: `doc_id`, `source_path`, `kb_path` (shard folder → its `_index.md`), `source_type`, `sha256` (of the source), `tokens_estimated`, `n_chunks`, `keywords` (top TF-IDF stems, shown as their most frequent surface form), `title`, `lang` (`ru` / `en` / `mixed` by the share of Cyrillic vs Latin words; NULL for a near-empty doc) |
+| `chunks` | one row per passage, **verbatim** source text: `chunk_id`, `doc_id`, `source_path`, `kb_path`, `source_type`, `page`, `heading` (path `A › B`, Markdown emphasis stripped), `ord`, `tokens`, `context` (`Doc title › heading path › page N`), `body`, `line_start`, `line_end` (1-based lines of the passage in the `kb_path` file, frontmatter counted) |
+| `files(path, size, mtime_ns)` | every `docs/*.md` and `docs/*/*.md` as it was when the index was built — the searcher compares it with the folder to see that the index is behind |
 | `chunks_fts` | only when the building CPython's SQLite has FTS5: `fts5(context, body, content='', tokenize='ascii')`, `rowid = chunk_id` |
+
+Chunking: a passage never crosses a `[page N]` anchor; the heading path does (a
+section that runs over several pages keeps its heading on each). A chunk is
+labelled with the heading its text sits under — text before the chunk's first
+heading counts only from 40 tokens up (a running page header does not). A
+heading left at the very end of a full chunk moves to the next one. An
+over-long block is cut at sentence/line boundaries into verbatim slices (table
+rows keep their line breaks), one sentence of overlap across each cut. A flat
+`docs/*.md` without frontmatter is indexed under its file name (`doc_id` = the
+stem, `source_type` = `note`).
+
+`corpus_signature` = sha256 over schema version, analyzer id, chunk parameters
+and, per indexed file, `kb_path | doc_id | sha1(file bytes)` — a hand-edited note
+changes it (the source sha256 would not).
+
+**Staying current.** Before a query `query_kb.ensure_fresh()` checks, in order:
+no `_index.db` → build; `schema_version` / `analyzer` differ from the engine's
+→ rebuild; the `files` table differs from the folder listing → `build_index()`
+(a no-op that only re-records size/mtime when the bytes are the same, e.g. after
+a copy); the bundled `_query.py` has a lower `ENGINE_REV` → launchers refreshed.
+The rebuild needs `index_kb.py` + `_common.py` next to the engine, i.e. the
+installed skill — which is what a KB's `_query.py` delegates to. Without it (a
+KB carried to a machine with no doc2kb) a stale index is still searched and the
+output says it is stale. An index of format 2 has no line ranges (hits cite the
+file without them); one without `analyzer` (format 1, built before stemming) is
+searched unstemmed. `DOC2KB_NO_AUTOINDEX=1` or `--no-refresh` turns the check off.
 
 **Analysis happens in Python, not in SQLite.** FTS5's `porter` tokenizer stems
 English only and custom tokenizers need SQLite's C API, which stdlib `sqlite3`
@@ -608,21 +640,51 @@ turns text into terms, and `chunks_fts` stores `" ".join(analyze(context))` /
 The `ascii` tokenizer splits only on ASCII non-alphanumerics and folds only ASCII
 case, so FTS5's terms are exactly the analyzer's tokens. `chunks_fts` is
 contentless: snippets are cut from `chunks.body` in Python, with the words whose
-analysis matches a query term wrapped in `«»`. The query goes through the same
-`analyze()` (stopwords dropped on surface forms first); `--raw` MATCH
-expressions keep their syntax and have only their terms analyzed (a prefix
-`управлени*` is stemmed to `"управлен"*`).
+analysis matches a query term wrapped in `«»`.
 
-Ranking is FTS5 `bm25(chunks_fts, 2.0, 1.0)` (contextual header 2× body), ties
-by `chunk_id`. Without FTS5 the searcher analyzes `chunks` on the fly and
-applies the same formula (k1 = 1.2, b = 0.75, IDF `ln((N−n+0.5)/(n+0.5))`
-floored at 1e-6, statistics over the whole table) — identical ranking, slower.
+**Query → units** (`query_kb.parse_query`). The query is OR-ranked over units:
+
+- a plain word → one term (stopwords and single characters dropped on surface
+  forms, then stemmed, deduplicated);
+- a token glued by punctuation (`10.0.2.15`, `--mac-address`, `vbox_sf`,
+  `hold.setBlocked`) → an FTS5 **phrase** of its parts (`"10 0 2 15"`), plus its
+  alphabetic parts of 3+ letters as terms; `/ , ; | ( ) [ ] { } < > « »` separate
+  words like a space does;
+- `"double quotes"` inside the query → an explicit phrase;
+- a Russian stem of 7+ letters → also a **prefix** unit for its word family
+  (6 letters for stems up to 9, else 62 % of the stem): `блокировк` → `"блокир" *`.
+
+A term with no match is retried as a prefix, shortened letter by letter (up to
+six) until something matches; `--and` with no result falls back to any-term.
+`--raw` MATCH expressions keep their syntax and have only their terms analyzed
+(a prefix `управлени*` is stemmed to `"управлен"*`).
+
+**Ranking.** FTS5 `bm25(chunks_fts, 2.0, 1.0)` (contextual header 2× body) picks
+the top 40; then `score = bm25 × (0.5 + 0.5 × coverage)`, where coverage is the
+IDF-weighted share of the query's concepts (a word and its family prefix are one)
+present in the passage, and a navigation chunk — heading `Contents` /
+`References` / `Оглавление` / `Список литературы` …, a shard named so, or a body
+of dotted-leader lines — is multiplied by 0.6. Ties by `chunk_id`. `fit` =
+score ÷ (Σ IDF of the units × 2.2), the share of the best a passage could score
+for this query in this KB: hits from several KBs are merged by `fit`. Without
+FTS5 the searcher analyzes `chunks` on the fly and applies the same formulas
+(k1 = 1.2, b = 0.75, IDF `ln((N−n+0.5)/(n+0.5))` floored at 1e-6, statistics
+over the whole table) — identical ranking, slower.
+
+**Output** (`run_search`). Chunks next to each other in one file, both within
+75 % of the best score, merge into one passage (≤ 1100 tokens). Full text goes
+to the best passage and to every other one within 75 % of it while `--budget`
+tokens (default 1500, per query) last; the rest are one-line pointers with a
+16-word snippet; hits below 40 % of the best are dropped unless `-k`, `--full`,
+`--brief` or `--json` was given. With several queries in a call a passage is
+printed in full once. JSON hit: `rank`, `path`, `lines` (`[first, last]` or
+null), `doc_id`, `source_path`, `source_type`, `page`, `heading`, `citation`,
+`score`, `fit`, `snippet`, `text` (when shown in full), `kb` (several KBs); one
+query → a list of hits, several → `[{query, notes, hits}]`.
 
 `analyzer` is part of `corpus_signature`: any change to fold/tokenize/stem bumps
-`query_kb.ANALYZER`, and the next `index_kb.py` run rebuilds. A searcher refuses
-an index whose `analyzer` differs from its own; an index without `analyzer`
-(schema 1, built before stemming) is searched unstemmed with a rebuild hint on
-stderr.
+`query_kb.ANALYZER`, and the next query (or `index_kb.py` run) rebuilds. A
+searcher refuses an index whose `analyzer` is one it does not know.
 
 ## Stdout JSON from each extract_*.py
 

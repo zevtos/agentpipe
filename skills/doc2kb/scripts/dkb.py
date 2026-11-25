@@ -29,6 +29,10 @@ Subcommands:
     scout     Phase 2 only — classify the corpus, write _scout.json
     extract   Phase 4 only — extract from an existing _scout.json
     manifest  Phase 5 only — (re)assemble manifest/INDEX/llms.txt/AGENTS.md
+    index     Phase 4.5 only — (re)build the search index of one KB
+    query     search a KB, or every KB under a folder (alias: q)
+    upgrade   bring every KB under a folder up to this doc2kb (index + catalog)
+    mcp       register / unregister the KB search as an MCP server in Claude Code
     install   drop a `dkb` launcher onto your PATH (so you can type `dkb …`)
 
 `dkb <in> <out>` with two positional paths is shorthand for `dkb run <in> <out>`.
@@ -222,25 +226,111 @@ def _extract(kb_root: Path, tier: Optional[str], *, timeout: Optional[int],
     return rc, summary
 
 
-def _index(kb_root: Path, tier: Optional[str], *,
-           force: bool = False) -> tuple[int, Optional[dict]]:
+def _index(kb_root: Path, tier: Optional[str], *, force: bool = False,
+           quiet: bool = False) -> tuple[int, Optional[dict]]:
     """Phase 4.5 — build the BM25 search index (_index.db + portable query.sh).
     Pure stdlib + tiktoken; never pulls a heavy tier."""
     args = [str(kb_root)]
     if force:
         args.append("--force")
+    if quiet:
+        args.append("--quiet")
     rc, out = _run_phase(_ensure_env_cmd(tier, "index_kb.py", *args), capture=True)
     return rc, _last_json_line(out)
 
 
-def _query(kb_root: Path, query_args: list[str]) -> int:
-    """Search the KB. Prefer the self-contained `_query.py` copy (no venv
-    needed); fall back to the skill's query_kb.py through ensure_env."""
-    local = kb_root / "_query.py"
-    if local.is_file():
-        rc, _ = _run_phase([sys.executable, str(local), str(kb_root), *query_args])
-        return rc
-    rc, _ = _run_phase(_ensure_env_cmd(None, "query_kb.py", str(kb_root), *query_args))
+def _query(query_args: list[str]) -> int:
+    """Search with this skill's engine (pure stdlib — no venv). The first
+    argument may be a KB or a folder holding KBs; without one, the current
+    directory is searched (every KB under it)."""
+    args = list(query_args)
+    if args and args[0] == "--":
+        args = args[1:]
+    if not (args and not args[0].startswith("-") and Path(args[0]).expanduser().is_dir()):
+        args = [".", *args]
+    rc, _ = _run_phase([sys.executable, str(SCRIPTS_DIR / "query_kb.py"), *args])
+    return rc
+
+
+def _find_kbs(roots: list[str]) -> list[Path]:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    import query_kb  # pure stdlib
+    found: list[Path] = []
+    for r in roots or ["."]:
+        root = Path(r).expanduser().resolve()
+        if not root.is_dir():
+            _info(f"skip {root}: not a folder")
+            continue
+        for kb in query_kb.discover_kbs(root, max_depth=8, limit=500, budget_s=20.0):
+            if kb not in found:
+                found.append(kb)
+    return found
+
+
+def _upgrade(roots: list[str], tier: Optional[str], dry_run: bool) -> int:
+    """Rebuild the search index and the catalog (INDEX.md, AGENTS.md, bundled
+    searcher) of every KB under `roots` with this doc2kb. Needed once for KBs
+    built before the searcher learned to update itself; harmless to repeat —
+    a KB that is already current is left as it is."""
+    kbs = _find_kbs(roots)
+    if not kbs:
+        _info("no doc2kb knowledge base found")
+        return 0
+    failed = 0
+    for kb in kbs:
+        if dry_run:
+            print(f"would upgrade {kb}")
+            continue
+        rc, summary = _index(kb, tier, quiet=True)
+        if rc != 0 or not (summary and summary.get("ok")):
+            failed += 1
+            _info(f"FAILED index {kb}: {(summary or {}).get('reason', f'exit {rc}')}")
+            continue
+        mrc, _ = _run_phase(_ensure_env_cmd(tier, "build_manifest.py", str(kb), "--quiet"),
+                            capture=True)
+        print(f"{summary.get('status', '?'):9} {summary.get('chunks', 0):>6} passages  {kb}"
+              + ("" if mrc == 0 else "   (catalog NOT rebuilt)"))
+        failed += mrc != 0
+    return 3 if failed else 0
+
+
+MCP_NAME = "kb"
+
+
+def _mcp(action: str, extra_kbs: list[str]) -> int:
+    """Register kb_mcp.py with Claude Code (user scope), remove it, or print the
+    config for another MCP client."""
+    import shutil
+    server = str(SCRIPTS_DIR / "kb_mcp.py")
+    env = {}
+    if extra_kbs:
+        env["DOC2KB_KBS"] = os.pathsep.join(str(Path(k).expanduser().resolve())
+                                            for k in extra_kbs)
+    # `python3` from PATH survives interpreter upgrades; a versioned path does not
+    py = shutil.which("python3") or sys.executable
+    spec = {"command": py, "args": [server], **({"env": env} if env else {})}
+    if action == "print":
+        print(json.dumps({"mcpServers": {MCP_NAME: spec}}, ensure_ascii=False, indent=2))
+        return 0
+    claude = shutil.which("claude")
+    if not claude:
+        return _fail("`claude` CLI not found on PATH — add the server by hand:\n"
+                     + json.dumps({"mcpServers": {MCP_NAME: spec}}, ensure_ascii=False, indent=2))
+    if action == "status":
+        return subprocess.run([claude, "mcp", "get", MCP_NAME]).returncode
+    subprocess.run([claude, "mcp", "remove", "--scope", "user", MCP_NAME],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if action == "uninstall":
+        _info(f"removed MCP server `{MCP_NAME}` from Claude Code (user scope)")
+        return 0
+    cmd = [claude, "mcp", "add", "--scope", "user", MCP_NAME]
+    for k, v in env.items():
+        cmd += ["-e", f"{k}={v}"]
+    cmd += ["--", py, server]
+    rc = subprocess.run(cmd).returncode
+    if rc == 0:
+        _info(f"registered MCP server `{MCP_NAME}` (tools: search, list) — new Claude Code "
+              "sessions pick it up; undo with `dkb mcp uninstall`")
     return rc
 
 
@@ -482,10 +572,23 @@ def main() -> int:
                        help="rebuild even if the corpus signature is unchanged")
     p_idx.add_argument("--tier", choices=TIERS, default=None)
 
-    p_qry = sub.add_parser("query", help="search the KB index (forwards to query_kb.py)")
-    p_qry.add_argument("output_dir", help="kb directory with _index.db")
-    p_qry.add_argument("query_args", nargs=argparse.REMAINDER,
-                       help='the query and flags, e.g. "your question" -k 5 --show')
+    for name in ("query", "q"):
+        p_qry = sub.add_parser(name, help="search a KB or every KB under a folder "
+                                          "(default: the current directory)")
+        p_qry.add_argument("query_args", nargs=argparse.REMAINDER,
+                           help='[kb or folder] "question" ["question" ...] [-k N --brief ...]')
+
+    p_upg = sub.add_parser("upgrade", help="re-index and re-catalog every KB under a folder "
+                                           "with this doc2kb")
+    p_upg.add_argument("roots", nargs="*", help="folders to scan (default: current directory)")
+    p_upg.add_argument("--dry-run", action="store_true", help="only list the KBs found")
+    p_upg.add_argument("--tier", choices=TIERS, default=None)
+
+    p_mcp = sub.add_parser("mcp", help="KB search as an MCP server for Claude Code")
+    p_mcp.add_argument("action", choices=["install", "uninstall", "status", "print"])
+    p_mcp.add_argument("--kb", action="append", default=[],
+                       help="a KB to search from every session, besides the ones under "
+                            "the session folder (repeatable)")
 
     p_inst = sub.add_parser("install", help="install a `dkb` launcher on your PATH")
     p_inst.add_argument("--bin-dir", default=None,
@@ -496,7 +599,12 @@ def main() -> int:
     # Shorthand: `dkb <in> <out> [flags]` == `dkb run <in> <out> [flags]`.
     # Detected when the first token is neither a known subcommand nor a flag.
     argv = sys.argv[1:]
-    known = {"run", "scout", "extract", "manifest", "index", "query", "install"}
+    known = {"run", "scout", "extract", "manifest", "index", "query", "q", "upgrade",
+             "mcp", "install"}
+    if argv and argv[0] in ("query", "q"):
+        # everything after the subcommand is the searcher's business (a query may
+        # start with a dash, which argparse would take for an option)
+        return _query(argv[1:])
     if argv and argv[0] not in known and not argv[0].startswith("-"):
         argv = ["run", *argv]
 
@@ -537,9 +645,10 @@ def main() -> int:
         if summary:
             print(json.dumps(summary, ensure_ascii=False))
         return rc
-    if args.command == "query":
-        kb_root = Path(args.output_dir).expanduser().resolve()
-        return _query(kb_root, args.query_args)
+    if args.command == "upgrade":
+        return _upgrade(args.roots, tier, args.dry_run)
+    if args.command == "mcp":
+        return _mcp(args.action, args.kb)
     return 2
 
 
