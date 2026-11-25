@@ -26,10 +26,11 @@ if printf '%s\n' "$staged" | grep -Eq '^skills/[^/]+/SKILL\.md$'; then
     python3 "$repo_root/scripts/validate-skills.py"
 fi
 
-# Repo consistency — when a product file, a prose count source, or an installer
-# changed (the inputs validate-repo.py reads).
+# Repo consistency — when a product file, a prose count source, an installer or
+# VERSION changed (the inputs validate-repo.py reads; a bump must reach the
+# skills/*/VERSION copies).
 if printf '%s\n' "$staged" | grep -Eq \
-        '^(agents|commands|skills|research)/|^(README|CLAUDE)\.md$|^docs/installation\.md$|^install\.(sh|ps1)$'; then
+        '^(agents|commands|skills|research)/|^(README|CLAUDE)\.md$|^docs/installation\.md$|^install\.(sh|ps1)$|^VERSION$'; then
     python3 "$repo_root/scripts/validate-repo.py"
 fi
 

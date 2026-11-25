@@ -18,7 +18,9 @@ Checks:
        "MUST BE USED"
     C  command frontmatter — description present, body has @CLAUDE.md, $ARGUMENTS
        present iff argument-hint present
-    D  skill folder shape — SKILL.md + LICENSE present, frontmatter name==folder
+    D  skill folder shape — SKILL.md + LICENSE + VERSION present, frontmatter
+       name==folder, skills/<name>/VERSION == the top-level VERSION (the copy an
+       installed skill or a release zip reads its version from)
     E  installer flag parity — long-option set of install.sh == install.ps1
        (WARNING only in v1: the two installer DSLs are parsed by regex and the
        check is the most brittle; a mismatch warns but does not fail the build)
@@ -184,10 +186,22 @@ def check_commands(fails: list[str]) -> None:
 
 # --- Check D: skill folder shape ----------------------------------------------
 def check_skills(fails: list[str]) -> None:
+    version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     for skill_md in sorted((ROOT / "skills").glob("*/SKILL.md")):
         folder = skill_md.parent
         if not (folder / "LICENSE").exists():
             fails.append(f"FAIL skills/{folder.name}: missing LICENSE")
+        # The installer and the release zip copy the folder verbatim, and the
+        # top-level VERSION is not inside it: without its own copy an installed
+        # skill stamps its output `@unknown`.
+        own = folder / "VERSION"
+        if not own.is_file():
+            fails.append(f"FAIL skills/{folder.name}: missing VERSION (cp VERSION skills/{folder.name}/)")
+        elif own.read_text(encoding="utf-8").strip() != version:
+            fails.append(
+                f"FAIL skills/{folder.name}/VERSION: '{own.read_text(encoding='utf-8').strip()}' "
+                f"!= top-level VERSION '{version}' (cp VERSION skills/{folder.name}/)"
+            )
         fm_name = field(frontmatter(skill_md), "name")
         if fm_name is not None and fm_name != folder.name:
             fails.append(

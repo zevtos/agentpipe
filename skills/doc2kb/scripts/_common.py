@@ -957,8 +957,9 @@ def detect_text_encoding(
 
 
 def tool_version_string() -> str:
-    """Best-effort version string. Reads VERSION at repo root if available,
-    else returns 'unknown'."""
+    """The agentpipe version this skill shipped with: the VERSION file in the
+    skill folder (a copy of the repo's, kept equal by validate-repo.py, so an
+    installed skill and a release zip carry it too). 'unknown' without one."""
     here = Path(__file__).resolve()
     for parent in here.parents:
         vfile = parent / "VERSION"
