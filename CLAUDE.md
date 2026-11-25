@@ -103,6 +103,7 @@ Commands that run agents in parallel: review (reviewer + security), feature step
 Each skill is its own folder under `skills/`. Required files at the folder root:
 - `SKILL.md` — YAML frontmatter (`name` matching folder, `description` trigger sentence) + body
 - `LICENSE` — every skill ships its own license so the standalone `.zip` is legally usable when uploaded to Claude Chat or extracted into `~/.claude/skills/`. Default is MIT (matches repo top-level)
+- `VERSION` — a copy of the top-level `VERSION`. The installers and `build-skills` copy the folder verbatim and the top-level file is not in it, so without its own copy an installed skill or a release zip stamps its output `@unknown`. `validate-repo.py` fails when the copy is missing or differs
 
 Optional folders inside the skill:
 - `scripts/`    — supporting code (Python, Bash, etc.) the skill calls or references
@@ -128,14 +129,14 @@ Skills are installed as folders to `~/.claude/skills/<name>/` and discovered by 
 - Installer must stay POSIX-safe: `set -euo pipefail`, no bashisms beyond what install.sh already uses.
 - Installer must keep both `install.sh` and `install.ps1` in sync: same flags, same `--target` set, same skip-rules per target. When adding a new target, update the `case "$TARGET"` block in install.sh AND the `switch ($Target)` in install.ps1, plus the `[ValidateSet(...)]` attribute and the README target table.
 - Arithmetic: use `$((count + 1))` not `((count++))`. The latter exits non-zero on zero under set -e.
-- VERSION file: single line, semver, no v prefix. Installers and the release workflow read it at runtime.
+- VERSION file: single line, semver, no v prefix. Installers and the release workflow read it at runtime. Every `skills/<name>/VERSION` is a copy of it — after a bump run `for d in skills/*/; do cp VERSION "$d"; done` (the pre-commit hook and CI block a mismatch).
 - CHANGELOG.md: Keep a Changelog format. Update on every release.
 - Agent descriptions are triggers, not summaries. Write for the model to understand WHEN to fire.
 - Skill descriptions follow the same trigger principle and may include foreign-language keywords if the skill is domain-specific (see skills/gost-report).
 - No @-importing files in agent bodies — bloats every session.
 - Model assignment: opus for high-reasoning roles (architect, security). sonnet for everything else. This is the canonical `mixed` profile baked into `agents/*.md` source. Users can override at install time via `--model-profile opus|sonnet|mixed`; the installer rewrites the `model:` line at copy time without touching source files.
 - Research docs are reference material. Agents do not auto-import them.
-- Releases: bump VERSION → update CHANGELOG → commit → `git tag vX.Y.Z` → push tag. The release workflow builds skill zips and attaches them to the GitHub release.
+- Releases: bump VERSION (and the `skills/*/VERSION` copies) → update CHANGELOG → commit → `git tag vX.Y.Z` → push tag. The release workflow builds skill zips and attaches them to the GitHub release.
 - **External-Inclusion Bar (what the `god` preset may install).** Tier A = agentpipe's own content (always OK). Tier B = an *official, vendor-backed* tool installed via a channel the user already trusts (OS pkg manager / npm), **pinned to an exact version**, gated, install-if-missing, reversible (`gh`, `@playwright/cli`, ccstatusline). Tier C = third-party code agentpipe doesn't maintain or anything that weakens the user's safety model — **banned by default**; the only accepted entries are `caveman` (pinned commit SHA + sha256-verified before exec) and `claude-skip` (reversible by `--uninstall`), each behind an explicit `--with-*` flag + interactive confirm. **No unpinned `curl|bash`, no `@latest`, ever** — `validate-repo.py` Check F fails the build on `@latest` or a `main`/`master` githubusercontent ref in either installer. Every `god` side-effect must be reversible by `--uninstall` OR have its reversal command printed at uninstall.
 
 ## Do Not
@@ -173,10 +174,11 @@ Skills are installed as folders to `~/.claude/skills/<name>/` and discovered by 
 1. Create `skills/<name>/SKILL.md` with frontmatter: `name` (must equal the folder name) and `description` (trigger sentence, **≤ 1024 UTF-8 bytes** — Codex silently skips skills that exceed the cap)
 2. Body explains *when* the skill applies, then *how* to use it (minimal example + API reference)
 3. Add `skills/<name>/LICENSE` (MIT by default — copy from `skills/gost-report/LICENSE` and update the year/owner)
+   and `skills/<name>/VERSION` (`cp VERSION skills/<name>/`)
 4. Optional: `skills/<name>/scripts/` for supporting code, `skills/<name>/references/` for long-form docs
 5. Update README.md skills table and CHANGELOG.md
 6. Run `bash install.sh` to deploy locally, then test by invoking the skill in a real project
-7. Run `python3 scripts/validate-skills.py` (description within the 1024-byte cap), `python3 scripts/validate-repo.py` (skill counts + folder shape), and `bash scripts/build-skills.sh` (release archive builds cleanly and includes LICENSE)
+7. Run `python3 scripts/validate-skills.py` (description within the 1024-byte cap), `python3 scripts/validate-repo.py` (skill counts + folder shape + `VERSION` copy), and `bash scripts/build-skills.sh` (release archive builds cleanly and includes LICENSE)
 
 ## Contributing
 
