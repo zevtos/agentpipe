@@ -9,7 +9,9 @@
 # pip step ensure_env runs `_asr.py setup`, which downloads the pinned models
 # (HF revision + sha256): whisper.cpp ggml-large-v3 + silero VAD when
 # `whisper-cli` is on PATH, otherwise the mlx-whisper / faster-whisper weights;
-# GigaAM v3 e2e weights (449 MB, into <state>/transcribe/models/gigaam/).
+# GigaAM v3 e2e weights (449 MB, into <state>/transcribe/models/gigaam/);
+# Parakeet v3 int8 (670 MB, into <state>/transcribe/models/parakeet/) on a
+# CPU-only host, where the `fast` profile that reads it is the default.
 #
 # System tools (not pip): ffmpeg/ffprobe (required — decoding of every format),
 # whisper-cli (`brew install whisper-cpp`; optional, the best base engine:
@@ -38,6 +40,11 @@ silero-vad>=6.2,<7
 soundfile>=0.12,<1
 numpy>=2,<3
 huggingface_hub>=0.25,<2
+# Parakeet TDT 0.6b v3 (NVIDIA, CC-BY-4.0) — the `fast` profile's engine for
+# the non-Russian languages it knows. onnx-asr (MIT) is a numpy + onnxruntime
+# runner for the ONNX export; onnxruntime itself arrives pinned with GigaAM
+# (1.23), which onnx-asr accepts (>= 1.18.1). 0.12 is the API _asr.py uses.
+onnx-asr>=0.12,<0.13
 # Base engine when whisper-cli is absent: MLX on Apple Silicon, CTranslate2
 # everywhere else (CPU int8 or CUDA).
 mlx-whisper>=0.4.3,<0.5; sys_platform == "darwin" and platform_machine == "arm64"

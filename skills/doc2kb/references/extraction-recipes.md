@@ -140,14 +140,17 @@ Engines (`--engines auto`): base = whisper.cpp (`whisper-cli` + `ggml-large-v3`)
 → mlx-whisper (Apple Silicon) → faster-whisper; filler = GigaAM v3 when the
 detected language is Russian; base and filler run side by side. That pair is
 the `quality` profile. `DOC2KB_ASR_PROFILE=fast` runs one engine per recording
-— GigaAM alone for Russian speech (≈40× real time on a single CPU thread), the
-whisper base alone for other languages — and `auto` (default) picks `quality`
+— GigaAM alone for Russian speech (≈40× real time on a single CPU thread),
+Parakeet TDT v3 alone for the 24 other European languages it knows (bg cs da
+de el en es et fi fr hr hu it lt lv mt nl pl pt ro sk sl sv uk; int8 on
+onnxruntime), the whisper base alone for the rest — and `auto` (default) picks `quality`
 on a GPU host (Apple Silicon, CUDA) and `fast` on a CPU-only one, where
 whisper large-v3 runs near real time. Force the pair on a slow host for one
 file with a per-file `media.engines: whisper,gigaam` (raise
 `DOC2KB_MEDIA_TIMEOUT_FACTOR` with it). Explicit lists: `whisper,gigaam`, `whisper`,
 `mlx`, `whisper,gigaam,mlx` (third engine only adds its rendering to
-review.md), `gigaam` (Russian only, punctuated v3 e2e — needs `--lang ru`).
+review.md), `gigaam` (Russian only, punctuated v3 e2e — needs `--lang ru`),
+`parakeet` (its 25 languages; picks the language itself).
 `_asr.py check --models-dir <state>/transcribe/models` (run with the tier's
 python) prints which engines are ready and, under `host`, what the machine
 gets: `accel` (`metal` / `cuda` / `cpu`), the resolved `profile`, CPU `threads`. An existing ggml model is reused with
